@@ -1,0 +1,38 @@
+// plasma.miniaudio — MiniAudio.
+//
+// The AUTHORED manifest, kept in source next to the plugin. Component hashes and sizes are NOT
+// here: the packaging step computes those and emits them into the published manifest.
+//
+// Field reference and validation rules: Docs/PluginPackageManagerPlan.html §05.
+
+PackageInfo
+{
+	string %Id{"plasma.miniaudio"}
+	string %Version{"1.0.0"}
+	string %Publisher{"PlasmaTechnology"}
+	string %License{"MIT"}
+	string %Homepage{"https://plasmagameengine.com"}
+
+	string %MinEngineVersion{"0.7.0"}
+	string %MaxEngineVersion{"0.7.0"}
+	string %AbiTag{"win64-msvc19-0.7.0-dev"}
+
+	string %DisplayName{"MiniAudio"}
+	string %Category{"Audio"}
+	string %Description{"Adds support for sound via MiniAudio.
+
+MiniAudio is compiled into the plugin, so there is nothing else to install."}
+	string %Icon{"Branding/MiniAudioIcon.png"}
+	string %Banner{"Branding/MiniAudioBanner.png"}
+
+	string %EditorPlugins{"plEditorPluginMiniAudio"}
+	string %EditorEnginePlugins{}
+	string %RuntimePlugins{"plMiniAudioPlugin"}
+	string %PackageDependencies{"MiniAudio.dll"}
+
+	Component { string %Name{"manifest"} string %Platform{"any"} }
+	Component { string %Name{"runtime-win64"} string %Platform{"win64"} }
+	Component { string %Name{"editor-win64"} string %Platform{"win64"} }
+	Component { string %Name{"icon"} string %Platform{"any"} }
+	Component { string %Name{"banner"} string %Platform{"any"} }
+}
