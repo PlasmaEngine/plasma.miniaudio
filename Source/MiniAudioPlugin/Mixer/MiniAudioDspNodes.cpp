@@ -42,6 +42,185 @@ static void plMaMeterNodeProcess(ma_node* pNode, const float** ppFramesIn, ma_ui
 
 static ma_node_vtable g_plMaMeterNodeVTable = {plMaMeterNodeProcess, nullptr, 1, 1, 0};
 
+// ---------------------------------------------------------------------------------------------
+// PCM stream node
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+  /// Pulls one source frame from the ring into pNode->m_CurFrame. Returns false on underrun.
+  bool PullSourceFrame(plMaPcmStreamNode* pNode)
+  {
+    ma_uint32 uiFrames = 1;
+    void* pRead = nullptr;
+    if (ma_pcm_rb_acquire_read(&pNode->m_Ring, &uiFrames, &pRead) != MA_SUCCESS || uiFrames == 0)
+      return false;
+
+    const float* pSrc = static_cast<const float*>(pRead);
+    const plUInt32 uiSrcCh = pNode->m_uiSourceChannels;
+    const plUInt32 uiEngCh = pNode->m_uiEngineChannels;
+
+    plMemoryUtils::Copy(pNode->m_PrevFrame, pNode->m_CurFrame, plMaPcmStreamNode::MaxChannels);
+
+    // channel mapping: mono fans out, stereo (or more) maps by index, missing channels stay silent
+    for (plUInt32 c = 0; c < uiEngCh && c < plMaPcmStreamNode::MaxChannels; ++c)
+    {
+      if (uiSrcCh == 1)
+        pNode->m_CurFrame[c] = pSrc[0];
+      else
+        pNode->m_CurFrame[c] = c < uiSrcCh ? pSrc[c] : 0.0f;
+    }
+
+    ma_pcm_rb_commit_read(&pNode->m_Ring, 1);
+    pNode->m_uiFramesRendered.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+
+  void DrainRing(plMaPcmStreamNode* pNode)
+  {
+    while (true)
+    {
+      ma_uint32 uiFrames = 65536;
+      void* pRead = nullptr;
+      if (ma_pcm_rb_acquire_read(&pNode->m_Ring, &uiFrames, &pRead) != MA_SUCCESS || uiFrames == 0)
+        break;
+      ma_pcm_rb_commit_read(&pNode->m_Ring, uiFrames);
+    }
+  }
+} // namespace
+
+static void plMaPcmStreamNodeProcess(ma_node* pNodeBase, const float** ppFramesIn, ma_uint32* pFrameCountIn, float** ppFramesOut, ma_uint32* pFrameCountOut)
+{
+  PL_IGNORE_UNUSED(ppFramesIn);
+  PL_IGNORE_UNUSED(pFrameCountIn);
+
+  auto* pNode = reinterpret_cast<plMaPcmStreamNode*>(pNodeBase);
+
+  float* pOut = ppFramesOut[0];
+  const plUInt32 uiFrames = *pFrameCountOut;
+  const plUInt32 uiCh = pNode->m_uiEngineChannels;
+
+  // a seek: throw away what was queued for the old position and restart the clock
+  const plUInt32 uiFlush = pNode->m_uiFlushRequested.load(std::memory_order_acquire);
+  if (uiFlush != pNode->m_uiFlushHandled)
+  {
+    DrainRing(pNode);
+    pNode->m_uiFramesRendered.store(0, std::memory_order_relaxed);
+    pNode->m_fPhase = 1.0;
+    pNode->m_bPrimed = false;
+    pNode->m_uiFlushHandled = uiFlush;
+  }
+
+  if (pNode->m_bPaused.load(std::memory_order_relaxed) || !pNode->m_bRingValid)
+  {
+    plMemoryUtils::ZeroFill(pOut, uiFrames * uiCh);
+    return;
+  }
+
+  const float fVolume = pNode->m_fVolume.load(std::memory_order_relaxed);
+  const double fRatio = static_cast<double>(pNode->m_fPitch.load(std::memory_order_relaxed)) * static_cast<double>(pNode->m_uiSourceSampleRate) / static_cast<double>(plMath::Max(1u, pNode->m_uiEngineSampleRate));
+
+  for (plUInt32 f = 0; f < uiFrames; ++f)
+  {
+    // advance the source cursor as far as the phase asks; an empty ring holds the last frame and stops the clock
+    bool bUnderrun = false;
+    while (pNode->m_fPhase >= 1.0)
+    {
+      if (!PullSourceFrame(pNode))
+      {
+        bUnderrun = true;
+        break;
+      }
+      pNode->m_bPrimed = true;
+      pNode->m_fPhase -= 1.0;
+    }
+
+    float* pDst = pOut + static_cast<size_t>(f) * uiCh;
+    if (bUnderrun || !pNode->m_bPrimed)
+    {
+      plMemoryUtils::ZeroFill(pDst, uiCh);
+      continue;
+    }
+
+    const float fT = static_cast<float>(pNode->m_fPhase);
+    for (plUInt32 c = 0; c < uiCh; ++c)
+    {
+      pDst[c] = plMath::Lerp(pNode->m_PrevFrame[c], pNode->m_CurFrame[c], fT) * fVolume;
+    }
+    pNode->m_fPhase += fRatio;
+  }
+}
+
+// no inputs, one output; continuous processing so the graph pulls it even without an input signal
+static ma_node_vtable g_plMaPcmStreamNodeVTable = {plMaPcmStreamNodeProcess, nullptr, 0, 1, MA_NODE_FLAG_CONTINUOUS_PROCESSING};
+
+plResult plMiniAudioDsp::InitPcmStreamNode(ma_engine* pEngine, plMaPcmStreamNode* pNode, plUInt32 uiSourceChannels, plUInt32 uiSourceSampleRate, plUInt32 uiRingFrames)
+{
+  pNode->m_uiEngineChannels = plMath::Min(ma_engine_get_channels(pEngine), plMaPcmStreamNode::MaxChannels);
+  pNode->m_uiEngineSampleRate = ma_engine_get_sample_rate(pEngine);
+  pNode->m_uiSourceChannels = plMath::Clamp(uiSourceChannels, 1u, plMaPcmStreamNode::MaxChannels);
+  pNode->m_uiSourceSampleRate = plMath::Max(1u, uiSourceSampleRate);
+
+  if (ma_pcm_rb_init(ma_format_f32, pNode->m_uiSourceChannels, plMath::Max(1024u, uiRingFrames), nullptr, nullptr, &pNode->m_Ring) != MA_SUCCESS)
+    return PL_FAILURE;
+  pNode->m_bRingValid = true;
+
+  ma_node_config cfg = ma_node_config_init();
+  cfg.vtable = &g_plMaPcmStreamNodeVTable;
+  cfg.pInputChannels = nullptr;
+  cfg.pOutputChannels = &pNode->m_uiEngineChannels;
+
+  if (ma_node_init(ma_engine_get_node_graph(pEngine), &cfg, nullptr, &pNode->m_Base) != MA_SUCCESS)
+  {
+    ma_pcm_rb_uninit(&pNode->m_Ring);
+    pNode->m_bRingValid = false;
+    return PL_FAILURE;
+  }
+
+  return PL_SUCCESS;
+}
+
+void plMiniAudioDsp::UninitPcmStreamNode(plMaPcmStreamNode* pNode)
+{
+  ma_node_uninit(&pNode->m_Base, nullptr);
+  if (pNode->m_bRingValid)
+  {
+    ma_pcm_rb_uninit(&pNode->m_Ring);
+    pNode->m_bRingValid = false;
+  }
+}
+
+plUInt32 plMiniAudioDsp::WritePcmStreamFrames(plMaPcmStreamNode* pNode, const float* pInterleaved, plUInt32 uiFrames)
+{
+  if (!pNode->m_bRingValid || uiFrames == 0)
+    return 0;
+
+  const plUInt32 uiCh = pNode->m_uiSourceChannels;
+  plUInt32 uiWritten = 0;
+
+  // the ring may wrap: write in up to two pieces
+  for (plUInt32 uiPiece = 0; uiPiece < 2 && uiWritten < uiFrames; ++uiPiece)
+  {
+    ma_uint32 uiAvail = uiFrames - uiWritten;
+    void* pWrite = nullptr;
+    if (ma_pcm_rb_acquire_write(&pNode->m_Ring, &uiAvail, &pWrite) != MA_SUCCESS || uiAvail == 0)
+      break;
+
+    plMemoryUtils::Copy(static_cast<float*>(pWrite), pInterleaved + static_cast<size_t>(uiWritten) * uiCh, uiAvail * uiCh);
+    ma_pcm_rb_commit_write(&pNode->m_Ring, uiAvail);
+    uiWritten += uiAvail;
+  }
+
+  return uiWritten;
+}
+
+plUInt32 plMiniAudioDsp::GetPcmStreamFreeFrames(const plMaPcmStreamNode* pNode)
+{
+  if (!pNode->m_bRingValid)
+    return 0;
+  return ma_pcm_rb_available_write(const_cast<ma_pcm_rb*>(&pNode->m_Ring));
+}
+
 plResult plMiniAudioDsp::InitMeterNode(ma_engine* pEngine, plMaMeterNode* pNode)
 {
   pNode->m_uiChannels = ma_engine_get_channels(pEngine);

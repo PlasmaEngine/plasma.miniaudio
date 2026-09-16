@@ -71,10 +71,48 @@ struct plMaCompressorNode
   float m_fEnvelope = 0.0f;
 };
 
+/// \brief Source node fed with PCM by a producer thread (a video decoder) through a ring buffer.
+///
+/// No inputs, one output at the engine's channel count. Resamples from the source rate (times the pitch) with linear
+/// interpolation, maps mono / stereo / N channels onto the engine layout, and counts the source frames it consumed:
+/// that counter is the producer's playback clock, advancing exactly as fast as the device consumes.
+struct plMaPcmStreamNode
+{
+  static constexpr plUInt32 MaxChannels = 8;
+
+  ma_node_base m_Base; // must be first
+  plUInt32 m_uiEngineChannels = 0;
+  plUInt32 m_uiEngineSampleRate = 48000;
+  plUInt32 m_uiSourceChannels = 0;
+  plUInt32 m_uiSourceSampleRate = 48000;
+
+  ma_pcm_rb m_Ring = {};
+  bool m_bRingValid = false;
+
+  std::atomic<plUInt64> m_uiFramesRendered = 0;
+  std::atomic<float> m_fVolume = 1.0f;
+  std::atomic<float> m_fPitch = 1.0f;
+  std::atomic<bool> m_bPaused = false;
+  std::atomic<plUInt32> m_uiFlushRequested = 0; ///< generation the process callback still has to honour
+  plUInt32 m_uiFlushHandled = 0;
+
+  // resampler state, audio thread only
+  float m_PrevFrame[MaxChannels] = {};
+  float m_CurFrame[MaxChannels] = {};
+  double m_fPhase = 1.0; ///< starts at 1 so the first output frame pulls a source frame
+  bool m_bPrimed = false;
+};
+
 namespace plMiniAudioDsp
 {
   plResult InitMeterNode(ma_engine* pEngine, plMaMeterNode* pNode);
   void UninitMeterNode(plMaMeterNode* pNode);
+
+  plResult InitPcmStreamNode(ma_engine* pEngine, plMaPcmStreamNode* pNode, plUInt32 uiSourceChannels, plUInt32 uiSourceSampleRate, plUInt32 uiRingFrames);
+  void UninitPcmStreamNode(plMaPcmStreamNode* pNode);
+  /// \brief Producer side: copies interleaved source frames into the ring. Returns frames accepted.
+  plUInt32 WritePcmStreamFrames(plMaPcmStreamNode* pNode, const float* pInterleaved, plUInt32 uiFrames);
+  plUInt32 GetPcmStreamFreeFrames(const plMaPcmStreamNode* pNode);
 
   plResult InitReverbNode(ma_engine* pEngine, plMaReverbNode* pNode);
   void UninitReverbNode(plMaReverbNode* pNode);

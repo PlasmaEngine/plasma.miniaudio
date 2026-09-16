@@ -7,7 +7,7 @@
 
 class plMiniAudioSingleton;
 
-class PL_MINIAUDIOPLUGIN_DLL plMiniAudioMiddleware final : public plAudioMiddleware
+class PL_MINIAUDIOPLUGIN_DLL plMiniAudioMiddleware final : public plAudioMiddleware, public plAudioPcmStreamProvider
 {
   PL_DECLARE_SINGLETON_OF_INTERFACE(plMiniAudioMiddleware, plAudioMiddleware);
 
@@ -83,7 +83,32 @@ public:
   void GetProfilingInfo(plAudioSystemProfilingInfo& out_info) const override;
   void GetBusMeterInfo(plUInt32 uiBusIndex, plAudioBusMeterInfo& out_info) const override;
 
+  // PCM stream SPI: a plMaPcmStreamNode per stream, attached to its bus (or the endpoint without a mixer)
+  plResult CreatePcmStream(const plAudioPcmStreamDesc& desc, plUInt32& out_uiStreamId) override;
+  void DestroyPcmStream(plUInt32 uiStreamId) override;
+  plUInt32 WritePcmFrames(plUInt32 uiStreamId, plArrayPtr<const float> interleaved) override;
+  plUInt32 GetPcmStreamFreeFrames(plUInt32 uiStreamId) const override;
+  plUInt64 GetPcmStreamFramesRendered(plUInt32 uiStreamId) const override;
+  void SetPcmStreamVolume(plUInt32 uiStreamId, float fLinearGain) override;
+  void SetPcmStreamPitch(plUInt32 uiStreamId, float fPitch) override;
+  void SetPcmStreamPaused(plUInt32 uiStreamId, bool bPaused) override;
+  void FlushPcmStream(plUInt32 uiStreamId) override;
+
 private:
+  struct PcmStream
+  {
+    plUInt32 m_uiId = 0;
+    plString m_sBus;
+    plUniquePtr<plMaPcmStreamNode> m_pNode;
+  };
+
+  PcmStream* FindPcmStream(plUInt32 uiStreamId);
+  const PcmStream* FindPcmStream(plUInt32 uiStreamId) const;
+  void AttachPcmStream(PcmStream& ref_stream);
+  void ReattachPcmStreams();
+  void DetachPcmStreamsToEndpoint();
+  void DestroyAllPcmStreams();
+
   plMiniAudioSingleton* m_pBackend = nullptr;
 
   plMiniAudioBusGraph m_BusGraph;
@@ -91,4 +116,8 @@ private:
 
   /// environment ids this middleware registered for the current mixer (unregistered on unload)
   plHybridArray<plAudioSystemDataID, 4> m_RegisteredEnvironmentIds;
+
+  mutable plMutex m_PcmStreamMutex;
+  plHybridArray<PcmStream, 4> m_PcmStreams;
+  plUInt32 m_uiNextPcmStreamId = 1;
 };
