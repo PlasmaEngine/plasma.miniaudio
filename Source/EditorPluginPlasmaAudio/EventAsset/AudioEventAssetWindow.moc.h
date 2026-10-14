@@ -40,6 +40,12 @@ class QLineEdit;
 class QSlider;
 class QToolButton;
 class QVBoxLayout;
+class plQtAudioEventAutomationView;
+class plQtAudioEventDeckView;
+class plQtAudioEventTimelineView;
+class plQtAudioMeterView;
+class plQtAudioStatusRowView;
+class plQtEngineControlStrip;
 class plQtPropertyGridWidget;
 struct plDocumentObjectPropertyEvent;
 struct plDocumentObjectStructureEvent;
@@ -179,6 +185,9 @@ private:
 
 /// \brief FMOD-style audio event editor: multi-track timeline on top, mockup deck below
 /// (instrument playlist with weights, playback controls, automation curve), macros dock right.
+///
+/// The toolbar row with the OUT meter, the parameter tabs and timeline, the deck and the status row are
+/// engine-drawn; "-engineAudioEditors false" creates the Qt widgets instead.
 class plAudioEventAssetDocumentWindow : public plQtDocumentWindow
 {
   Q_OBJECT
@@ -203,6 +212,16 @@ private:
 
   /// \brief The automation shown in the deck: the selected one, else the first.
   const plDocumentObject* GetActiveAutomation() const;
+
+  void CreateQtCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout);
+  void CreateEngineCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout);
+
+  /// Session solo of the timeline tracks, from whichever timeline the window shows.
+  bool HasSoloTracks() const;
+  bool IsSoloTrack(const plUuid& instrumentGuid) const;
+
+  /// "..." of a playlist entry: picks its Audio Clip ("Set Playlist Clip").
+  void PickEntryClip(const plUuid& entryGuid);
 
   void OnAddInstrument();
   void OnAddParameter();
@@ -274,4 +293,17 @@ private:
   plQtAudioLevelMeterWidget* m_pLevelMeter = nullptr;
   QLabel* m_pMeterLabel = nullptr;
   QTimer* m_pMeterTimer = nullptr;
+
+  // engine-drawn views
+  bool m_bEngineViews = true;
+  plQtEngineControlStrip* m_pToolStrip = nullptr;
+  plUInt32 m_uiPlay = 0;
+  plUInt32 m_uiStop = 0;
+  plUInt32 m_uiAddInstrument = 0;
+  plUInt32 m_uiRemoveSelected = 0;
+  plQtAudioMeterView* m_pMeterView = nullptr;
+  plQtAudioEventTimelineView* m_pTimelineView = nullptr;
+  plQtAudioEventDeckView* m_pDeckView = nullptr;
+  plQtAudioEventAutomationView* m_pAutomationView = nullptr;
+  plQtAudioStatusRowView* m_pStatusView = nullptr;
 };

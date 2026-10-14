@@ -2,6 +2,7 @@
 
 #include <EditorFramework/Assets/AssetDocumentGenerator.h>
 #include <EditorFramework/Assets/SimpleAssetDocument.h>
+#include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
 
 class plMiniAudioSoundAssetProperties : public plReflectedClass
 {

@@ -2,6 +2,7 @@
 
 #include <PlasmaAudioPlugin/Mixer/AudioMixerData.h>
 #include <EditorFramework/Assets/SimpleAssetDocument.h>
+#include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
 
 /// \brief One insert effect on a mixer bus. Parameter slot meaning depends on the effect type
 /// (see plAudioEffectType documentation).

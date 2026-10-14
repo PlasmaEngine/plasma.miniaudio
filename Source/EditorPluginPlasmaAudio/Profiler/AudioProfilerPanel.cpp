@@ -1,6 +1,7 @@
 #include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
 #include <EditorEngineProcessFramework/EngineProcess/EngineProcessMessages.h>
+#include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorPluginPlasmaAudio/Profiler/AudioProfilerPanel.moc.h>
 #include <Foundation/IO/MemoryStream.h>
 #include <Foundation/Math/ColorScheme.h>
@@ -528,6 +529,33 @@ plQtAudioProfilerPanel::plQtAudioProfilerPanel()
 
   m_Accent = plToQtColor(plColorGammaUB(plColorScheme::GetCategoryColor("Audio", plColorScheme::CategoryColorUsage::BorderColor)));
 
+  if (plAudioEngineUi::UseEngineViews())
+  {
+    m_pView = new plQtAudioProfilerView(this);
+    m_pView->m_OnPauseToggled = [this](bool bPaused)
+    { OnPauseToggled(bPaused); };
+    setWidget(m_pView, ads::CDockWidget::ForceNoScrollArea);
+  }
+  else
+  {
+    CreateQtContent();
+  }
+
+  m_pTimer = new QTimer(this);
+  m_pTimer->setInterval(kPollIntervalMs);
+  connect(m_pTimer, &QTimer::timeout, this, &plQtAudioProfilerPanel::OnTick);
+  m_pTimer->start();
+
+  connect(this, &ads::CDockWidget::viewToggled, this, [this](bool) { OnTick(); });
+
+  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plQtAudioProfilerPanel::EngineProcessMsgHandler, this));
+
+  UpdateLinkIndicator();
+  UpdateStatusLine();
+}
+
+void plQtAudioProfilerPanel::CreateQtContent()
+{
   QWidget* pRoot = new QWidget(this);
   pRoot->setObjectName("AudioProfilerRoot");
   pRoot->setStyleSheet(ProfilerStyle(m_Accent));
@@ -742,18 +770,6 @@ plQtAudioProfilerPanel::plQtAudioProfilerPanel()
   }
 
   setWidget(pRoot);
-
-  m_pTimer = new QTimer(this);
-  m_pTimer->setInterval(kPollIntervalMs);
-  connect(m_pTimer, &QTimer::timeout, this, &plQtAudioProfilerPanel::OnTick);
-  m_pTimer->start();
-
-  connect(this, &ads::CDockWidget::viewToggled, this, [this](bool) { OnTick(); });
-
-  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plQtAudioProfilerPanel::EngineProcessMsgHandler, this));
-
-  UpdateLinkIndicator();
-  UpdateStatusLine();
 }
 
 plQtAudioProfilerPanel::~plQtAudioProfilerPanel()
@@ -893,6 +909,14 @@ void plQtAudioProfilerPanel::ApplyStats(const plVariant& stats)
   {
     m_LinkState = newState;
     UpdateLinkIndicator();
+  }
+
+  if (newState == LinkState::Live && m_pView != nullptr)
+  {
+    plHybridArray<LogLine, 32> newLines;
+    CollectNewLogLines(newLines);
+    m_pView->SetSnapshot(m_Snapshot, newLines);
+    return;
   }
 
   if (newState == LinkState::Live)
@@ -1304,7 +1328,7 @@ void plQtAudioProfilerPanel::RebuildMemory()
   m_pMemoryTotals->setText(sTotals);
 }
 
-void plQtAudioProfilerPanel::AppendLogEntries()
+void plQtAudioProfilerPanel::CollectNewLogLines(plHybridArray<LogLine, 32>& out_lines)
 {
   const plAudioProfilingSnapshot& s = m_Snapshot;
 
@@ -1318,13 +1342,12 @@ void plQtAudioProfilerPanel::AppendLogEntries()
   }
 
   plUInt64 uiFrom = uiFirst;
-  plHybridArray<LogLine, 32> newLines;
 
   if (m_bLogSequenceKnown)
   {
     if (uiFirst > m_uiLogNextSequence)
     {
-      LogLine& gap = newLines.ExpandAndGetRef();
+      LogLine& gap = out_lines.ExpandAndGetRef();
       gap.m_uiType = LogGapType;
       gap.m_uiLost = uiFirst - m_uiLogNextSequence;
       gap.m_fTime = s.m_EventLog.IsEmpty() ? 0.0 : s.m_EventLog[0].m_fTime;
@@ -1336,7 +1359,7 @@ void plQtAudioProfilerPanel::AppendLogEntries()
   for (plUInt64 uiSequence = uiFrom; uiSequence < uiEnd; ++uiSequence)
   {
     const plAudioEventLogSnapshotEntry& entry = s.m_EventLog[static_cast<plUInt32>(uiSequence - uiFirst)];
-    LogLine& line = newLines.ExpandAndGetRef();
+    LogLine& line = out_lines.ExpandAndGetRef();
     line.m_fTime = entry.m_fTime;
     line.m_uiType = entry.m_uiType;
     line.m_sName = entry.m_sName;
@@ -1345,6 +1368,12 @@ void plQtAudioProfilerPanel::AppendLogEntries()
 
   m_uiLogNextSequence = m_bLogSequenceKnown ? plMath::Max(m_uiLogNextSequence, uiEnd) : uiEnd;
   m_bLogSequenceKnown = true;
+}
+
+void plQtAudioProfilerPanel::AppendLogEntries()
+{
+  plHybridArray<LogLine, 32> newLines;
+  CollectNewLogLines(newLines);
 
   if (newLines.IsEmpty())
     return;
@@ -1654,6 +1683,10 @@ void plQtAudioProfilerPanel::UpdateDetails()
 
 void plQtAudioProfilerPanel::UpdateStatusLine()
 {
+  // the engine view draws its own status line
+  if (m_pView != nullptr)
+    return;
+
   const QString sDot = MiddleDot();
 
   if (!m_bHasSnapshot)
@@ -1678,6 +1711,12 @@ void plQtAudioProfilerPanel::UpdateStatusLine()
 
 void plQtAudioProfilerPanel::UpdateLinkIndicator()
 {
+  if (m_pView != nullptr)
+  {
+    m_pView->SetLinkState(m_LinkState == LinkState::Live ? plQtAudioProfilerView::LinkState::Live : (m_LinkState == LinkState::NoData ? plQtAudioProfilerView::LinkState::NoData : plQtAudioProfilerView::LinkState::NoEngine));
+    return;
+  }
+
   QColor dotColor = kOffColor;
   QString sText;
 

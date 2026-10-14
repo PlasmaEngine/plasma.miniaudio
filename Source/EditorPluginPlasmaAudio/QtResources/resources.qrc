@@ -13,6 +13,14 @@
   <qresource prefix="Icons">
     <file>SoundOn.svg</file>
     <file>SoundOff.svg</file>
-  </qresource>  
+  </qresource>
+  <qresource prefix="PlasmaAudioIcons">
+    <file>AudioBank.svg</file>
+    <file>AudioClip.svg</file>
+    <file>AudioEvent.svg</file>
+    <file>AudioMixer.svg</file>
+    <file>Mixer.svg</file>
+    <file>Sliders.svg</file>
+  </qresource>
 </RCC>
 

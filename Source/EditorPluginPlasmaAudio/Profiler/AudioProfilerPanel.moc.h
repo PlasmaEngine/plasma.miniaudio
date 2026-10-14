@@ -5,6 +5,7 @@
 #include <Foundation/Configuration/Singleton.h>
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/Time/Time.h>
+#include <EditorPluginPlasmaAudio/Profiler/AudioProfilerView.h>
 #include <GuiFoundation/DockPanels/ApplicationPanel.moc.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
 
@@ -31,6 +32,8 @@ class plQtAudioBusStripsWidget;
 /// to 10 (back to 0 when it closes) and polls the engine's stats map with plStatsSnapshotMsgToEngine every 250 ms, with
 /// at most one request in flight. The stat "PlasmaAudio/VoiceSnapshot" carries a serialized plAudioProfilingSnapshot.
 /// Pause freezes every tab and stops polling; log entries produced meanwhile are reported as lost.
+///
+/// The content is the engine-drawn plQtAudioProfilerView; "-engineAudioEditors false" creates the Qt widgets instead.
 class PL_EDITORPLUGINPLASMAAUDIO_DLL plQtAudioProfilerPanel : public plQtApplicationPanel
 {
   Q_OBJECT
@@ -67,16 +70,11 @@ private:
   void SendSnapshotRate(plInt32 iHz);
 
   /// One received event log entry, or a marker for lost entries (m_uiType == LogGapType).
-  struct LogLine
-  {
-    double m_fTime = 0.0;
-    plUInt8 m_uiType = 0;
-    plUInt64 m_uiLost = 0; ///< entries lost before this marker
-    plString m_sName;
-    plString m_sDetail;
-  };
+  using LogLine = plAudioProfilerLogLine;
 
-  static constexpr plUInt8 LogGapType = 0xFF;
+  static constexpr plUInt8 LogGapType = plAudioProfilerLogLine::GapType;
+
+  void CreateQtContent();
 
   QWidget* CreateBusesPage(QWidget* pParent);
   QWidget* CreateMemoryPage(QWidget* pParent);
@@ -90,6 +88,9 @@ private:
   void RebuildBuses();
   void RebuildMemory();
 
+  /// The log entries of m_Snapshot that were not seen yet, with a gap marker for lost ones.
+  void CollectNewLogLines(plHybridArray<LogLine, 32>& out_lines);
+
   /// Appends the log entries of m_Snapshot that were not seen yet.
   void AppendLogEntries();
 
@@ -101,6 +102,8 @@ private:
 
   void RebuildLogTable();
   void UpdateTabTexts();
+
+  plQtAudioProfilerView* m_pView = nullptr; ///< the engine-drawn content; null with the Qt widgets
 
   QLabel* m_pLinkDot = nullptr;
   QLabel* m_pLinkText = nullptr;

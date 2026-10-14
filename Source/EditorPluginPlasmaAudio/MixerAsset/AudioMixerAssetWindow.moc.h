@@ -11,6 +11,12 @@ class QListWidgetItem;
 class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
+class plQtAudioMixerRoutingView;
+class plQtAudioMixerSnapshotsView;
+class plQtAudioMixerStripsView;
+class plQtAudioStatusRowView;
+class plQtDocumentPanel;
+class plQtEngineControlStrip;
 struct plDocumentObjectPropertyEvent;
 struct plDocumentObjectStructureEvent;
 struct plSelectionManagerEvent;
@@ -66,6 +72,11 @@ private:
   float m_fDragValueDb = 0.0f;
 };
 
+/// \brief Audio mixer editor: the mixer console with its add buttons in the centre, the routing tree on the left, the
+/// snapshots and the properties of the selection on the right.
+///
+/// The console, routing tree, snapshot list and status row are engine-drawn; "-engineAudioEditors false" creates the
+/// Qt widgets instead.
 class plAudioMixerAssetDocumentWindow : public plQtDocumentWindow
 {
   Q_OBJECT
@@ -82,6 +93,10 @@ private:
   void SelectionEventHandler(const plSelectionManagerEvent& e);
 
   const plDocumentObject* GetPropertiesObject() const;
+
+  void CreateEngineViews();
+  void CreateQtViews();
+  void CreatePropertyDock();
 
   void OnAddBus(bool bAux);
   void OnAddVca();
@@ -108,4 +123,20 @@ private:
   QTimer* m_pMeterTimer = nullptr;
   QColor m_Accent;
   bool m_bRefreshQueued = false;
+
+  // engine-drawn views
+  bool m_bEngineViews = true;
+  bool m_bLiveMeters = true;
+  plQtEngineControlStrip* m_pToolStrip = nullptr;
+  plUInt32 m_uiAddBus = 0;
+  plUInt32 m_uiAddAuxBus = 0;
+  plUInt32 m_uiAddVca = 0;
+  plUInt32 m_uiAddSnapshot = 0;
+  plUInt32 m_uiRemoveSelected = 0;
+  plUInt32 m_uiLiveMeters = 0;
+  plQtAudioMixerStripsView* m_pStripsView = nullptr;
+  plQtAudioMixerRoutingView* m_pRoutingView = nullptr;
+  plQtAudioMixerSnapshotsView* m_pSnapshotsView = nullptr;
+  plQtDocumentPanel* m_pSnapshotPanel = nullptr;
+  plQtAudioStatusRowView* m_pStatusView = nullptr;
 };

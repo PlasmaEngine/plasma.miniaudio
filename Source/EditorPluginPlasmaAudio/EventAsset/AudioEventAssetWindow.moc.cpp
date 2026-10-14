@@ -3,7 +3,12 @@
 #include <EditorFramework/Assets/AssetBrowserDlg.moc.h>
 #include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
+#include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
+#include <EditorPluginPlasmaAudio/EngineUi/AudioEngineViews.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAssetWindow.moc.h>
+#include <EditorPluginPlasmaAudio/EventAsset/AudioEventDeckView.h>
+#include <EditorPluginPlasmaAudio/EventAsset/AudioEventTimelineView.h>
+#include <GuiFoundation/EngineUi/EngineUiControlStrip.h>
 #include <PlasmaAudioPlugin/Mixer/AudioMixerData.h>
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/IO/OSFile.h>
@@ -20,6 +25,7 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFrame>
+#include <QGridLayout>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMouseEvent>
@@ -1507,6 +1513,7 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
 {
   m_pAssetDoc = static_cast<plAudioEventAssetDocument*>(pDocument);
   m_Accent = AccentColor(pDocument);
+  m_bEngineViews = plAudioEngineUi::UseEngineViews();
   m_AuditionRng.InitializeFromCurrentTime();
 
   // Menu Bar
@@ -1534,12 +1541,192 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
   // Central
   {
     QWidget* pCentralWidget = new QWidget(this);
-    pCentralWidget->setStyleSheet(AudioToolStyle(m_Accent));
 
     QVBoxLayout* pCentralLayout = new QVBoxLayout(pCentralWidget);
     pCentralLayout->setContentsMargins(0, 0, 0, 0);
     pCentralLayout->setSpacing(0);
 
+    if (m_bEngineViews)
+      CreateEngineCentralWidget(pCentralWidget, pCentralLayout);
+    else
+      CreateQtCentralWidget(pCentralWidget, pCentralLayout);
+
+    plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, pDocument);
+    pCentral->setObjectName("AudioEventTimelineDockWidget");
+    pCentral->setWindowTitle("Audio Event");
+    pCentral->setWidget(pCentralWidget, ads::CDockWidget::ForceNoScrollArea);
+    m_pDockManager->setCentralWidget(pCentral);
+  }
+
+  // Right dock: event macros (root properties, pinned) + asset status
+  {
+    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, pDocument);
+    pPropertyPanel->setObjectName("AudioEventAssetDockWidget");
+    pPropertyPanel->setWindowTitle("Event Macros");
+    pPropertyPanel->show();
+
+    plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, pDocument, false);
+
+    plDeque<const plDocumentObject*> selection;
+    selection.PushBack(GetPropertiesObject());
+    pPropertyGrid->SetSelection(selection);
+
+    QWidget* pWidget = new QWidget();
+    pWidget->setObjectName("Group");
+    pWidget->setLayout(new QVBoxLayout());
+    pWidget->setContentsMargins(0, 0, 0, 0);
+    pWidget->layout()->setContentsMargins(0, 0, 0, 0);
+    pWidget->layout()->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
+    pWidget->layout()->addWidget(pPropertyGrid);
+
+    pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
+
+    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
+  }
+
+  pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
+
+  GetDocument()->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::PropertyEventHandler, this));
+  GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::StructureEventHandler, this));
+  GetDocument()->GetSelectionManager()->m_Events.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::SelectionEventHandler, this));
+
+  // poll the audition meter (only does work while something is auditioning)
+  m_pMeterTimer = new QTimer(this);
+  m_pMeterTimer->setInterval(50);
+  connect(m_pMeterTimer, &QTimer::timeout, this, [this]()
+    {
+      const float fPeak = plAudioPreviewService::GetSingleton().GetMasterPeak();
+
+      if (m_pMeterView != nullptr)
+        m_pMeterView->SetPeak(fPeak);
+
+      if (m_pLevelMeter != nullptr)
+        m_pLevelMeter->SetPeak(fPeak);
+
+      if (m_pMeterLabel != nullptr)
+      {
+        m_pMeterLabel->setText(fPeak <= 0.001f ? QString::fromUtf8("-\xE2\x88\x9E dB") : QString::asprintf("%.1f dB", plAudioMixerUtils::LinearToDb(fPeak)));
+      } });
+  m_pMeterTimer->start();
+
+  FinishWindowCreation();
+
+  QueueRefresh();
+}
+
+void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout)
+{
+  using plEditorUi::Icon;
+
+  // toolbar row: audition, edit buttons, the OUT meter
+  {
+    QWidget* pRow = new QWidget(pCentralWidget);
+    QHBoxLayout* pRowLayout = new QHBoxLayout(pRow);
+    pRowLayout->setContentsMargins(0, 0, 0, 0);
+    pRowLayout->setSpacing(0);
+
+    m_pToolStrip = new plQtEngineControlStrip(pRow);
+    m_pToolStrip->setObjectName("AudioEventToolStrip");
+    m_uiPlay = m_pToolStrip->AddIconButton(Icon::Play, "Auditions the event in the editor (respects per-track M mute and S solo)");
+    m_uiStop = m_pToolStrip->AddIconButton(Icon::Stop, "Stops the audition");
+    m_pToolStrip->AddSeparator();
+    m_uiAddInstrument = m_pToolStrip->AddIconTextButton(Icon::Add, "Instrument", "Adds an instrument track (fill its playlist with '+ Add Files...' in the deck; double-click a track header to rename)");
+    m_uiRemoveSelected = m_pToolStrip->AddIconTextButton(Icon::Remove, "Remove Selected", "Removes the selected instrument / parameter / automation");
+    m_pToolStrip->AddSpacer();
+    m_pToolStrip->AddLabel("OUT", -1.0f);
+
+    m_pToolStrip->m_OnChanged = [this](plUInt32 uiControl, plInt32 iValue)
+    {
+      PL_IGNORE_UNUSED(iValue);
+
+      if (uiControl == m_uiPlay)
+        OnPlayEvent();
+      else if (uiControl == m_uiStop)
+        OnStopEvent();
+      else if (uiControl == m_uiAddInstrument)
+        OnAddInstrument();
+      else if (uiControl == m_uiRemoveSelected)
+        OnRemoveSelected();
+    };
+
+    pRowLayout->addWidget(m_pToolStrip, 1);
+
+    m_pMeterView = new plQtAudioMeterView(pRow);
+    pRowLayout->addWidget(m_pMeterView);
+
+    pCentralLayout->addWidget(pRow);
+  }
+
+  QSplitter* pSplitter = new QSplitter(Qt::Vertical, pCentralWidget);
+  pSplitter->setHandleWidth(1);
+  pSplitter->setChildrenCollapsible(false);
+
+  // parameter tabs and the timeline
+  {
+    m_pTimelineView = new plQtAudioEventTimelineView(pSplitter, GetDocument());
+    m_pTimelineView->m_OnAddParameter = [this]()
+    { OnAddParameter(); };
+    pSplitter->addWidget(m_pTimelineView);
+  }
+
+  // deck: INSTRUMENT and PLAYBACK above, AUTOMATION and DETAILS below
+  {
+    QWidget* pDeck = new QWidget(pSplitter);
+    QGridLayout* pDeckLayout = new QGridLayout(pDeck);
+    pDeckLayout->setContentsMargins(0, 0, 0, 0);
+    pDeckLayout->setSpacing(0);
+    pDeckLayout->setColumnStretch(0, 1);
+    pDeckLayout->setColumnStretch(1, 1);
+
+    m_pDeckView = new plQtAudioEventDeckView(pDeck, GetDocument());
+    m_pDeckView->m_OnInstrumentPicked = [this](const plUuid& instrumentGuid)
+    {
+      m_ActiveInstrumentGuid = instrumentGuid;
+      if (const plDocumentObject* pObject = GetDocument()->GetObjectManager()->GetObject(instrumentGuid))
+        GetDocument()->GetSelectionManager()->SetSelection(pObject);
+    };
+    m_pDeckView->m_OnAddFiles = [this]()
+    { OnAddFilesToInstrument(); };
+    m_pDeckView->m_OnAddClip = [this]()
+    { OnAddClipToInstrument(); };
+    m_pDeckView->m_OnAddSilence = [this]()
+    { OnAddPlaylistEntry(); };
+    m_pDeckView->m_OnPickEntryClip = [this](const plUuid& entryGuid)
+    { PickEntryClip(entryGuid); };
+    pDeckLayout->addWidget(m_pDeckView, 0, 0, 1, 2);
+
+    m_pAutomationView = new plQtAudioEventAutomationView(pDeck, GetDocument());
+    m_pAutomationView->m_OnAddAutomation = [this](plUInt8 uiTarget, const plString& sParameter)
+    { OnAddAutomationFor(uiTarget, sParameter); };
+    pDeckLayout->addWidget(m_pAutomationView, 1, 0);
+
+    // DETAILS · selection: the property grid of the selected object
+    QWidget* pDetails = new QWidget(pDeck);
+    QVBoxLayout* pDetailsLayout = new QVBoxLayout(pDetails);
+    pDetailsLayout->setContentsMargins(0, 0, 0, 0);
+    pDetailsLayout->setSpacing(0);
+    pDetailsLayout->addWidget(new plQtAudioSectionHeaderView(pDetails, "Details \xC2\xB7 selection", plAudioEngineUi::AudioColor()));
+    pDetailsLayout->addWidget(new plQtPropertyGridWidget(pDetails, GetDocument()), 1);
+    pDeckLayout->addWidget(pDetails, 1, 1);
+    pDeckLayout->setRowStretch(1, 1);
+
+    pSplitter->addWidget(pDeck);
+  }
+
+  pSplitter->setStretchFactor(0, 3);
+  pSplitter->setStretchFactor(1, 2);
+  pCentralLayout->addWidget(pSplitter, 1);
+
+  m_pStatusView = new plQtAudioStatusRowView(pCentralWidget);
+  m_pStatusView->SetRight("backend: MiniAudio");
+  pCentralLayout->addWidget(m_pStatusView);
+}
+
+void plAudioEventAssetDocumentWindow::CreateQtCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout)
+{
+  pCentralWidget->setStyleSheet(AudioToolStyle(m_Accent));
+
+  {
     // edit button row
     {
       QWidget* pButtonRow = new QWidget(pCentralWidget);
@@ -1608,7 +1795,7 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
       pScroll->setWidgetResizable(true);
       pScroll->setFrameShape(QFrame::NoFrame);
 
-      m_pTimeline = new plQtAudioEventTimelineWidget(pScroll, pDocument, m_Accent);
+      m_pTimeline = new plQtAudioEventTimelineWidget(pScroll, GetDocument(), m_Accent);
       pScroll->setWidget(m_pTimeline);
 
       pSplitter->addWidget(pScroll);
@@ -1878,7 +2065,7 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
         m_pAutomationTargetLabel->setObjectName("DeckSubLabel");
         pBodyLayout->addWidget(m_pAutomationTargetLabel);
 
-        m_pCurvePreview = new plQtAudioCurvePreviewWidget(pBody, pDocument, m_Accent);
+        m_pCurvePreview = new plQtAudioCurvePreviewWidget(pBody, GetDocument(), m_Accent);
         pBodyLayout->addWidget(m_pCurvePreview, 1);
 
         QLabel* pAddLabel = new QLabel("Add target", pBody);
@@ -1909,7 +2096,7 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
         pHeader->setObjectName("DeckHeader");
         pColumnLayout->addWidget(pHeader);
 
-        plQtPropertyGridWidget* pDetailsGrid = new plQtPropertyGridWidget(pColumn, pDocument);
+        plQtPropertyGridWidget* pDetailsGrid = new plQtPropertyGridWidget(pColumn, GetDocument());
         pColumnLayout->addWidget(pDetailsGrid, 1);
 
         pDeckLayout->addWidget(pColumn, 3);
@@ -1931,66 +2118,7 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
       m_pStatusLabel->setObjectName("StatusBar");
       pCentralLayout->addWidget(m_pStatusLabel);
     }
-
-    plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, pDocument);
-    pCentral->setObjectName("AudioEventTimelineDockWidget");
-    pCentral->setWindowTitle("Audio Event");
-    pCentral->setWidget(pCentralWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->setCentralWidget(pCentral);
   }
-
-  // Right dock: event macros (root properties, pinned) + asset status
-  {
-    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, pDocument);
-    pPropertyPanel->setObjectName("AudioEventAssetDockWidget");
-    pPropertyPanel->setWindowTitle("Event Macros");
-    pPropertyPanel->show();
-
-    plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, pDocument, false);
-
-    plDeque<const plDocumentObject*> selection;
-    selection.PushBack(GetPropertiesObject());
-    pPropertyGrid->SetSelection(selection);
-
-    QWidget* pWidget = new QWidget();
-    pWidget->setObjectName("Group");
-    pWidget->setLayout(new QVBoxLayout());
-    pWidget->setContentsMargins(0, 0, 0, 0);
-    pWidget->layout()->setContentsMargins(0, 0, 0, 0);
-    pWidget->layout()->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
-    pWidget->layout()->addWidget(pPropertyGrid);
-
-    pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
-
-    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
-  }
-
-  pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
-
-  GetDocument()->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::PropertyEventHandler, this));
-  GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::StructureEventHandler, this));
-  GetDocument()->GetSelectionManager()->m_Events.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::SelectionEventHandler, this));
-
-  // poll the audition meter (only does work while something is auditioning)
-  m_pMeterTimer = new QTimer(this);
-  m_pMeterTimer->setInterval(50);
-  connect(m_pMeterTimer, &QTimer::timeout, this, [this]()
-    {
-      if (m_pLevelMeter == nullptr)
-        return;
-
-      const float fPeak = plAudioPreviewService::GetSingleton().GetMasterPeak();
-      m_pLevelMeter->SetPeak(fPeak);
-
-      if (m_pMeterLabel != nullptr)
-      {
-        m_pMeterLabel->setText(fPeak <= 0.001f ? QString::fromUtf8("-\xE2\x88\x9E dB") : QString::asprintf("%.1f dB", plAudioMixerUtils::LinearToDb(fPeak)));
-      } });
-  m_pMeterTimer->start();
-
-  FinishWindowCreation();
-
-  QueueRefresh();
 }
 
 plAudioEventAssetDocumentWindow::~plAudioEventAssetDocumentWindow()
@@ -2056,12 +2184,54 @@ const plDocumentObject* plAudioEventAssetDocumentWindow::GetActiveAutomation() c
 void plAudioEventAssetDocumentWindow::PropertyEventHandler(const plDocumentObjectPropertyEvent& e)
 {
   // a changed sound file must be re-measured for the timeline clip length (clip durations come from the curator, uncached)
-  if (m_pTimeline != nullptr && e.m_sProperty == "File")
+  if (e.m_sProperty == "File")
   {
-    m_pTimeline->m_DurationCache.Clear();
+    if (m_pTimeline != nullptr)
+      m_pTimeline->m_DurationCache.Clear();
+
+    if (m_pTimelineView != nullptr)
+      m_pTimelineView->ClearDurationCache();
   }
 
   QueueRefresh();
+}
+
+bool plAudioEventAssetDocumentWindow::HasSoloTracks() const
+{
+  if (m_pTimelineView != nullptr)
+    return m_pTimelineView->HasSolo();
+
+  return m_pTimeline != nullptr && !m_pTimeline->m_SoloTracks.IsEmpty();
+}
+
+bool plAudioEventAssetDocumentWindow::IsSoloTrack(const plUuid& instrumentGuid) const
+{
+  if (m_pTimelineView != nullptr)
+    return m_pTimelineView->IsSolo(instrumentGuid);
+
+  return m_pTimeline != nullptr && m_pTimeline->IsSolo(instrumentGuid);
+}
+
+void plAudioEventAssetDocumentWindow::PickEntryClip(const plUuid& entryGuid)
+{
+  const plDocumentObject* pEntry = GetDocument()->GetObjectManager()->GetObject(entryGuid);
+  if (pEntry == nullptr)
+    return;
+
+  plString sPicked;
+  if (!PickClip(pEntry->GetTypeAccessor().GetValue("Clip").ConvertTo<plString>(), sPicked))
+    return;
+
+  // looked up again: the asset browser runs its own event loop
+  pEntry = GetDocument()->GetObjectManager()->GetObject(entryGuid);
+  if (pEntry == nullptr)
+    return;
+
+  plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
+  accessor.StartTransaction("Set Playlist Clip");
+  accessor.SetValueByName(pEntry, "Clip", sPicked).IgnoreResult();
+  accessor.SetValueByName(pEntry, "File", plString()).IgnoreResult();
+  accessor.FinishTransaction();
 }
 
 void plAudioEventAssetDocumentWindow::StructureEventHandler(const plDocumentObjectStructureEvent& e)
@@ -2110,27 +2280,51 @@ void plAudioEventAssetDocumentWindow::QueueRefresh()
         }
       }
 
-      RebuildParameterTabs();
-      RebuildInstrumentCombo();
-      RebuildPlaylistPanel();
-      RefreshPlaybackControls();
-      RefreshAutomationColumn();
+      if (m_bEngineViews)
+      {
+        const plDocumentObject* pInstrument = GetActiveInstrument();
+        const plDocumentObject* pAutomation = GetActiveAutomation();
+
+        m_pTimelineView->Refresh();
+        m_pDeckView->SetInstrument(pInstrument != nullptr ? pInstrument->GetGuid() : plUuid());
+        m_pAutomationView->SetAutomation(pAutomation != nullptr ? pAutomation->GetGuid() : plUuid());
+      }
+      else
+      {
+        RebuildParameterTabs();
+        RebuildInstrumentCombo();
+        RebuildPlaylistPanel();
+        RefreshPlaybackControls();
+        RefreshAutomationColumn();
+      }
+
+      plHybridArray<const plDocumentObject*, 8> instruments, parameters, automations;
+      GatherChildrenOfProperty(GetPropertiesObject(), "Instruments", instruments);
+      GatherChildrenOfProperty(GetPropertiesObject(), "Parameters", parameters);
+      GatherChildrenOfProperty(GetPropertiesObject(), "Automations", automations);
+
+      plUInt32 uiSamples = 0;
+      for (const plDocumentObject* pInstrument : instruments)
+      {
+        plHybridArray<const plDocumentObject*, 8> playlist;
+        GatherChildrenOfProperty(pInstrument, "Playlist", playlist);
+        uiSamples += playlist.GetCount();
+      }
+
+      if (m_pStatusView != nullptr)
+      {
+        plStringBuilder sInstruments, sEntries, sParameters, sAutomations;
+        sInstruments.SetFormat("{}", instruments.GetCount());
+        sEntries.SetFormat("{}", uiSamples);
+        sParameters.SetFormat("{}", parameters.GetCount());
+        sAutomations.SetFormat("{}", automations.GetCount());
+
+        const plQtAudioStatusRowView::Part parts[] = {{sInstruments, "instruments"}, {sEntries, "playlist entries"}, {sParameters, "parameters"}, {sAutomations, "automations"}};
+        m_pStatusView->SetParts(parts);
+      }
 
       if (m_pStatusLabel != nullptr)
       {
-        plHybridArray<const plDocumentObject*, 8> instruments, parameters, automations;
-        GatherChildrenOfProperty(GetPropertiesObject(), "Instruments", instruments);
-        GatherChildrenOfProperty(GetPropertiesObject(), "Parameters", parameters);
-        GatherChildrenOfProperty(GetPropertiesObject(), "Automations", automations);
-
-        plUInt32 uiSamples = 0;
-        for (const plDocumentObject* pInstrument : instruments)
-        {
-          plHybridArray<const plDocumentObject*, 8> playlist;
-          GatherChildrenOfProperty(pInstrument, "Playlist", playlist);
-          uiSamples += playlist.GetCount();
-        }
-
         m_pStatusLabel->setText(QString::asprintf("%u instruments \xC2\xB7 %u playlist entries \xC2\xB7 %u parameters \xC2\xB7 %u automations \xC2\xB7 backend: MiniAudio",
           instruments.GetCount(), uiSamples, parameters.GetCount(), automations.GetCount()));
       } });
@@ -2867,7 +3061,7 @@ void plAudioEventAssetDocumentWindow::OnPlayEvent()
     return;
   }
 
-  const bool bAnySolo = m_pTimeline != nullptr && !m_pTimeline->m_SoloTracks.IsEmpty();
+  const bool bAnySolo = HasSoloTracks();
 
   // route the preview into the event's mixer bus, so the Mixer Console's meters respond
   const plString sOutputBus = GetPropertiesObject() != nullptr ? GetPropertiesObject()->GetTypeAccessor().GetValue("OutputBus").ConvertTo<plString>() : plString();
@@ -2886,7 +3080,7 @@ void plAudioEventAssetDocumentWindow::OnPlayEvent()
       continue;
     }
 
-    if (bAnySolo && (m_pTimeline == nullptr || !m_pTimeline->IsSolo(pInstrument->GetGuid())))
+    if (bAnySolo && !IsSoloTrack(pInstrument->GetGuid()))
     {
       ++uiSkipped;
       continue;

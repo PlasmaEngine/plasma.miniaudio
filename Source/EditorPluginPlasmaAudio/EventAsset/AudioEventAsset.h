@@ -3,7 +3,8 @@
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
 #include <EditorFramework/Assets/AssetDocumentGenerator.h>
 #include <EditorFramework/Assets/SimpleAssetDocument.h>
-#include <EditorPluginPlasmaAudio/EventAsset/AudioPropertyWidgets.moc.h>
+#include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
+#include <EditorPluginPlasmaAudio/EventAsset/AudioRolloffAttribute.h>
 
 /// \brief One entry of an instrument playlist.
 ///

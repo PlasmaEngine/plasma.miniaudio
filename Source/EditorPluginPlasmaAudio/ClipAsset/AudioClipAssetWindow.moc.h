@@ -15,6 +15,10 @@ class QMenu;
 class QTabBar;
 class QTimer;
 class QToolButton;
+class QVBoxLayout;
+class plQtAudioClipUsedByView;
+class plQtAudioClipWaveformView;
+class plQtEngineControlStrip;
 class plQtPropertyGridWidget;
 struct plAssetCuratorEvent;
 struct plDocumentObjectPropertyEvent;
@@ -110,6 +114,9 @@ private:
 
 /// \brief Audio Clip editor: waveform with loop markers, info and cost estimates for each platform tab, the property grid
 /// of the default settings or of the selected platform override, and the assets that use the clip.
+///
+/// The toolbar row, waveform dock body, platform label and "Used by" list are engine-drawn; "-engineAudioEditors false"
+/// creates the Qt widgets instead.
 class plAudioClipAssetDocumentWindow : public plQtDocumentWindow
 {
   Q_OBJECT
@@ -128,24 +135,58 @@ private:
   const plDocumentObject* GetPropertiesObject() const;
   const plDocumentObject* GetActiveOverrideObject() const;
 
+  void CreateQtCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout);
+  void CreateEngineCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout);
+
   void RebuildTabs();
   void OnTabChanged(int iIndex);
   void OnFillAddOverrideMenu();
   void OnTabContextMenu(const QPoint& pos);
   void UpdatePropertyGridSelection();
 
+  /// The asset profiles an override can be added for, and whether each one already has an override.
+  void GetOverrideProfiles(plDynamicArray<plString>& out_profiles, plDynamicArray<bool>& out_exists) const;
+  void AddPlatformOverride(const plString& sProfile);
+  void RemovePlatformOverride(const plUuid& overrideGuid);
+
+  /// The engine-drawn "+" menu and the override tab menu.
+  void ShowAddOverrideMenu(const plVec2& vPosition);
+  void ShowTabMenu(plUInt32 uiTab, const plVec2& vPosition);
+
+  /// Writes a loop dragged on the engine waveform (frames of the built clip) as source seconds.
+  void SetLoopPoints(plUInt64 uiStartFrame, plUInt64 uiEndFrame);
+
   void RequestPreview(bool bImmediate);
   void OnTimer();
   void StartPreviewIfNeeded();
   void ShowPreview(const plSharedPtr<plAudioClipPreview>& pPreview);
+  void ShowWaveformMessage(const QString& sMessage);
   void UpdateLoopLabel();
   void RefreshUsedBy();
+
+  void SetInfoText(const QString& sText);
+  void SetLoopText(const QString& sText);
+  void SetPlatformText(const QString& sText);
+  bool IsLoopEnabled() const;
 
   void OnPlay();
   void OnStop();
 
   plAudioClipAssetDocument* m_pAssetDoc = nullptr;
   QColor m_Accent;
+  bool m_bEngineViews = true;
+
+  // engine-drawn views
+  plQtEngineControlStrip* m_pToolStrip = nullptr;
+  plUInt32 m_uiPlay = 0;
+  plUInt32 m_uiStop = 0;
+  plUInt32 m_uiLoop = 0;
+  plUInt32 m_uiInfo = 0;
+  plUInt32 m_uiLoopLabel = 0;
+  plQtEngineControlStrip* m_pPlatformStrip = nullptr;
+  plUInt32 m_uiPlatform = 0;
+  plQtAudioClipWaveformView* m_pWaveView = nullptr;
+  plQtAudioClipUsedByView* m_pUsedByView = nullptr;
 
   plQtAudioWaveformWidget* m_pWaveform = nullptr;
   QTabBar* m_pTabBar = nullptr;

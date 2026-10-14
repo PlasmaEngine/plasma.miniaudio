@@ -4,7 +4,11 @@
 #include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAssetWindow.moc.h>
+#include <EditorPluginPlasmaAudio/ClipAsset/AudioClipWaveformView.h>
+#include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorPluginPlasmaAudio/Preview/AudioPreviewService.h>
+#include <EditorUi/Menu.h>
+#include <GuiFoundation/EngineUi/EngineUiControlStrip.h>
 #include <Foundation/IO/MemoryStream.h>
 #include <Foundation/IO/OSFile.h>
 #include <Foundation/Math/ColorScheme.h>
@@ -643,6 +647,7 @@ plAudioClipAssetDocumentWindow::plAudioClipAssetDocumentWindow(plDocument* pDocu
 {
   m_pAssetDoc = static_cast<plAudioClipAssetDocument*>(pDocument);
   m_Accent = AccentColor(pDocument);
+  m_bEngineViews = plAudioEngineUi::UseEngineViews();
 
   // Menu Bar
   {
@@ -669,12 +674,157 @@ plAudioClipAssetDocumentWindow::plAudioClipAssetDocumentWindow(plDocument* pDocu
   // Central: buttons, platform tabs, waveform, estimates
   {
     QWidget* pCentralWidget = new QWidget(this);
-    pCentralWidget->setStyleSheet(ClipToolStyle(m_Accent));
 
     QVBoxLayout* pCentralLayout = new QVBoxLayout(pCentralWidget);
     pCentralLayout->setContentsMargins(0, 0, 0, 0);
     pCentralLayout->setSpacing(0);
 
+    if (m_bEngineViews)
+      CreateEngineCentralWidget(pCentralWidget, pCentralLayout);
+    else
+      CreateQtCentralWidget(pCentralWidget, pCentralLayout);
+
+    plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, pDocument);
+    pCentral->setObjectName("AudioClipWaveformDockWidget");
+    pCentral->setWindowTitle("Audio Clip");
+    pCentral->setWidget(pCentralWidget, ads::CDockWidget::ForceNoScrollArea);
+    m_pDockManager->setCentralWidget(pCentral);
+  }
+
+  // Right dock: asset status, properties of the selected tab, users of the clip
+  {
+    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, pDocument);
+    pPropertyPanel->setObjectName("AudioClipAssetDockWidget");
+    pPropertyPanel->setWindowTitle("Clip Properties");
+    pPropertyPanel->show();
+
+    QWidget* pWidget = new QWidget();
+    pWidget->setObjectName("Group");
+    QVBoxLayout* pLayout = new QVBoxLayout(pWidget);
+    pLayout->setContentsMargins(0, 0, 0, 0);
+    pLayout->setSpacing(m_bEngineViews ? 0 : 2);
+
+    pLayout->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
+
+    if (m_bEngineViews)
+    {
+      m_pPlatformStrip = new plQtEngineControlStrip(pWidget);
+      m_pPlatformStrip->setObjectName("AudioClipPlatform");
+      m_uiPlatform = m_pPlatformStrip->AddCodeLabel("PLATFORM \xC2\xB7 Default", 0.0f);
+      m_pPlatformStrip->SetColor(m_uiPlatform, plEditorUi::Muted());
+      pLayout->addWidget(m_pPlatformStrip);
+    }
+    else
+    {
+      m_pPlatformLabel = new QLabel(pWidget);
+      m_pPlatformLabel->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: bold; padding: 6px 6px 2px 6px;").arg(m_Accent.name()));
+      pLayout->addWidget(m_pPlatformLabel);
+    }
+
+    m_pPropertyGrid = new plQtPropertyGridWidget(pWidget, pDocument, false);
+    pLayout->addWidget(m_pPropertyGrid, 1);
+
+    if (m_bEngineViews)
+    {
+      m_pUsedByView = new plQtAudioClipUsedByView(pWidget);
+      pLayout->addWidget(m_pUsedByView);
+    }
+    else
+    {
+      QLabel* pUsedByHeader = new QLabel("USED BY", pWidget);
+      pUsedByHeader->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: bold; padding: 6px 6px 2px 6px;").arg(m_Accent.name()));
+      pLayout->addWidget(pUsedByHeader);
+
+      m_pUsedByList = new QListWidget(pWidget);
+      m_pUsedByList->setMaximumHeight(140);
+      m_pUsedByList->setToolTip("Assets that reference this clip. Double-click to open one.");
+      connect(m_pUsedByList, &QListWidget::itemDoubleClicked, this, [](QListWidgetItem* pItem)
+        {
+          const QString sPath = pItem->data(Qt::UserRole).toString();
+          if (!sPath.isEmpty())
+            plQtEditorApp::GetSingleton()->OpenDocument(sPath.toUtf8().data(), plDocumentFlags::RequestWindow | plDocumentFlags::AddToRecentFilesList);
+        });
+      pLayout->addWidget(m_pUsedByList);
+    }
+
+    pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
+    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
+  }
+
+  pDocument->GetSelectionManager()->SetSelection(GetPropertiesObject());
+
+  GetDocument()->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plAudioClipAssetDocumentWindow::PropertyEventHandler, this));
+  GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plAudioClipAssetDocumentWindow::StructureEventHandler, this));
+  plAssetCurator::GetSingleton()->m_Events.AddEventHandler(plMakeDelegate(&plAudioClipAssetDocumentWindow::AssetCuratorEventHandler, this));
+
+  m_pTimer = new QTimer(this);
+  m_pTimer->setInterval(40);
+  connect(m_pTimer, &QTimer::timeout, this, &plAudioClipAssetDocumentWindow::OnTimer);
+  m_pTimer->start();
+
+  RebuildTabs();
+  RequestPreview(true);
+
+  FinishWindowCreation();
+}
+
+void plAudioClipAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout)
+{
+  using plEditorUi::Icon;
+
+  // toolbar row: transport, info line, loop label
+  {
+    m_pToolStrip = new plQtEngineControlStrip(pCentralWidget);
+    m_pToolStrip->setObjectName("AudioClipToolStrip");
+
+    m_uiPlay = m_pToolStrip->AddIconButton(Icon::Play, "Plays the clip as built for the selected platform tab (codec, rate and normalisation applied)");
+    m_uiStop = m_pToolStrip->AddIconButton(Icon::Stop, "Stops playback");
+    m_uiLoop = m_pToolStrip->AddIconButton(Icon::Repeat, "Repeats the loop region while playing. Drag across the waveform to set the loop, drag the markers to adjust it.", true);
+    m_pToolStrip->SetChecked(m_uiLoop, true);
+    m_pToolStrip->AddSeparator();
+    m_uiInfo = m_pToolStrip->AddCodeLabel("", 0.0f);
+    m_pToolStrip->SetColor(m_uiInfo, plEditorUi::Muted());
+    m_uiLoopLabel = m_pToolStrip->AddCodeLabel("no loop", plMath::Ceil(plEditorUi::MeasureCodeText("loop 000.00 s - 000.00 s", plEditorUi::FontSize - 1)) + 4.0f);
+    m_pToolStrip->SetColor(m_uiLoopLabel, plEditorUi::Muted());
+
+    m_pToolStrip->m_OnChanged = [this](plUInt32 uiControl, plInt32 iValue)
+    {
+      PL_IGNORE_UNUSED(iValue);
+
+      if (uiControl == m_uiPlay)
+        OnPlay();
+      else if (uiControl == m_uiStop)
+        OnStop();
+    };
+
+    pCentralLayout->addWidget(m_pToolStrip);
+  }
+
+  // platform tabs, ruler, waveform and the stat row
+  {
+    m_pWaveView = new plQtAudioClipWaveformView(pCentralWidget);
+
+    m_pWaveView->m_OnTabPicked = [this](plUInt32 uiTab)
+    { OnTabChanged(static_cast<int>(uiTab)); };
+
+    m_pWaveView->m_OnAddTab = [this](const plVec2& vPosition)
+    { ShowAddOverrideMenu(vPosition); };
+
+    m_pWaveView->m_OnTabMenu = [this](plUInt32 uiTab, const plVec2& vPosition)
+    { ShowTabMenu(uiTab, vPosition); };
+
+    m_pWaveView->m_OnLoopChanged = [this](plUInt64 uiStart, plUInt64 uiEnd)
+    { SetLoopPoints(uiStart, uiEnd); };
+
+    pCentralLayout->addWidget(m_pWaveView, 1);
+  }
+}
+
+void plAudioClipAssetDocumentWindow::CreateQtCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout)
+{
+  pCentralWidget->setStyleSheet(ClipToolStyle(m_Accent));
+
+  {
     // button row
     {
       QWidget* pRow = new QWidget(pCentralWidget);
@@ -751,7 +901,7 @@ plAudioClipAssetDocumentWindow::plAudioClipAssetDocumentWindow(plDocument* pDocu
       pCentralLayout->addWidget(pRow);
     }
 
-    m_pWaveform = new plQtAudioWaveformWidget(pCentralWidget, pDocument, m_Accent);
+    m_pWaveform = new plQtAudioWaveformWidget(pCentralWidget, GetDocument(), m_Accent);
     pCentralLayout->addWidget(m_pWaveform, 1);
 
     // estimates
@@ -779,70 +929,7 @@ plAudioClipAssetDocumentWindow::plAudioClipAssetDocumentWindow(plDocument* pDocu
 
       pCentralLayout->addWidget(pRow);
     }
-
-    plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, pDocument);
-    pCentral->setObjectName("AudioClipWaveformDockWidget");
-    pCentral->setWindowTitle("Audio Clip");
-    pCentral->setWidget(pCentralWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->setCentralWidget(pCentral);
   }
-
-  // Right dock: asset status, properties of the selected tab, users of the clip
-  {
-    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, pDocument);
-    pPropertyPanel->setObjectName("AudioClipAssetDockWidget");
-    pPropertyPanel->setWindowTitle("Clip Properties");
-    pPropertyPanel->show();
-
-    QWidget* pWidget = new QWidget();
-    pWidget->setObjectName("Group");
-    QVBoxLayout* pLayout = new QVBoxLayout(pWidget);
-    pLayout->setContentsMargins(0, 0, 0, 0);
-    pLayout->setSpacing(2);
-
-    pLayout->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
-
-    m_pPlatformLabel = new QLabel(pWidget);
-    m_pPlatformLabel->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: bold; padding: 6px 6px 2px 6px;").arg(m_Accent.name()));
-    pLayout->addWidget(m_pPlatformLabel);
-
-    m_pPropertyGrid = new plQtPropertyGridWidget(pWidget, pDocument, false);
-    pLayout->addWidget(m_pPropertyGrid, 1);
-
-    QLabel* pUsedByHeader = new QLabel("USED BY", pWidget);
-    pUsedByHeader->setStyleSheet(QString("color: %1; font-size: 10px; font-weight: bold; padding: 6px 6px 2px 6px;").arg(m_Accent.name()));
-    pLayout->addWidget(pUsedByHeader);
-
-    m_pUsedByList = new QListWidget(pWidget);
-    m_pUsedByList->setMaximumHeight(140);
-    m_pUsedByList->setToolTip("Assets that reference this clip. Double-click to open one.");
-    connect(m_pUsedByList, &QListWidget::itemDoubleClicked, this, [](QListWidgetItem* pItem)
-      {
-        const QString sPath = pItem->data(Qt::UserRole).toString();
-        if (!sPath.isEmpty())
-          plQtEditorApp::GetSingleton()->OpenDocument(sPath.toUtf8().data(), plDocumentFlags::RequestWindow | plDocumentFlags::AddToRecentFilesList);
-      });
-    pLayout->addWidget(m_pUsedByList);
-
-    pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
-  }
-
-  pDocument->GetSelectionManager()->SetSelection(GetPropertiesObject());
-
-  GetDocument()->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plAudioClipAssetDocumentWindow::PropertyEventHandler, this));
-  GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plAudioClipAssetDocumentWindow::StructureEventHandler, this));
-  plAssetCurator::GetSingleton()->m_Events.AddEventHandler(plMakeDelegate(&plAudioClipAssetDocumentWindow::AssetCuratorEventHandler, this));
-
-  m_pTimer = new QTimer(this);
-  m_pTimer->setInterval(40);
-  connect(m_pTimer, &QTimer::timeout, this, &plAudioClipAssetDocumentWindow::OnTimer);
-  m_pTimer->start();
-
-  RebuildTabs();
-  RequestPreview(true);
-
-  FinishWindowCreation();
 }
 
 plAudioClipAssetDocumentWindow::~plAudioClipAssetDocumentWindow()
@@ -915,15 +1002,13 @@ void plAudioClipAssetDocumentWindow::RebuildTabs()
   m_bTabsDirty = false;
   m_bUpdatingTabs = true;
 
-  while (m_pTabBar->count() > 0)
-    m_pTabBar->removeTab(0);
-
   m_TabOverrides.Clear();
 
-  m_pTabBar->addTab("Default");
+  plHybridArray<plString, 8> labels;
+  labels.PushBack("Default");
   m_TabOverrides.PushBack(plUuid());
 
-  int iSelect = 0;
+  plUInt32 uiSelect = 0;
 
   if (const plDocumentObject* pProps = GetPropertiesObject())
   {
@@ -933,18 +1018,32 @@ void plAudioClipAssetDocumentWindow::RebuildTabs()
         continue;
 
       const plString sProfile = pChild->GetTypeAccessor().GetValue("Profile").ConvertTo<plString>();
-      const int iTab = m_pTabBar->addTab(sProfile.IsEmpty() ? QString("(no profile)") : QString::fromUtf8(sProfile.GetData()));
+      labels.PushBack(sProfile.IsEmpty() ? plString("(no profile)") : sProfile);
       m_TabOverrides.PushBack(pChild->GetGuid());
 
       if (pChild->GetGuid() == m_ActiveOverrideGuid)
-        iSelect = iTab;
+        uiSelect = labels.GetCount() - 1;
     }
   }
 
-  if (iSelect == 0)
+  if (uiSelect == 0)
     m_ActiveOverrideGuid = plUuid();
 
-  m_pTabBar->setCurrentIndex(iSelect);
+  if (m_bEngineViews)
+  {
+    m_pWaveView->SetTabs(labels, uiSelect);
+  }
+  else
+  {
+    while (m_pTabBar->count() > 0)
+      m_pTabBar->removeTab(0);
+
+    for (const plString& sLabel : labels)
+      m_pTabBar->addTab(QString::fromUtf8(sLabel.GetData()));
+
+    m_pTabBar->setCurrentIndex(static_cast<int>(uiSelect));
+  }
+
   m_bUpdatingTabs = false;
 
   UpdatePropertyGridSelection();
@@ -972,7 +1071,7 @@ void plAudioClipAssetDocumentWindow::UpdatePropertyGridSelection()
 
   if (pOverride == nullptr)
   {
-    m_pPlatformLabel->setText(QString::fromUtf8("PLATFORM \xC2\xB7 Default"));
+    SetPlatformText(QString::fromUtf8("PLATFORM \xC2\xB7 Default"));
     return;
   }
 
@@ -988,13 +1087,11 @@ void plAudioClipAssetDocumentWindow::UpdatePropertyGridSelection()
   QString sText = QString::fromUtf8("PLATFORM \xC2\xB7 ") + QString::fromUtf8(sProfile.GetData());
   if (!bKnown)
     sText += " (no such asset profile)";
-  m_pPlatformLabel->setText(sText);
+  SetPlatformText(sText);
 }
 
-void plAudioClipAssetDocumentWindow::OnFillAddOverrideMenu()
+void plAudioClipAssetDocumentWindow::GetOverrideProfiles(plDynamicArray<plString>& out_profiles, plDynamicArray<bool>& out_exists) const
 {
-  m_pAddTabMenu->clear();
-
   const plAudioClipAssetProperties* pProps = m_pAssetDoc->GetProperties();
 
   for (plUInt32 i = 0; i < plAssetCurator::GetSingleton()->GetNumAssetProfiles(); ++i)
@@ -1008,46 +1105,105 @@ void plAudioClipAssetDocumentWindow::OnFillAddOverrideMenu()
         bExists = true;
     }
 
+    out_profiles.PushBack(sProfile);
+    out_exists.PushBack(bExists);
+  }
+}
+
+void plAudioClipAssetDocumentWindow::AddPlatformOverride(const plString& sProfile)
+{
+  const plDocumentObject* pProps = GetPropertiesObject();
+  if (pProps == nullptr)
+    return;
+
+  plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
+  accessor.StartTransaction("Add Platform Override");
+
+  plUuid guid;
+  if (accessor.AddObjectByName(pProps, "PlatformOverrides", -1, plGetStaticRTTI<plAudioClipPlatformOverride>(), guid).Failed())
+  {
+    accessor.CancelTransaction();
+    return;
+  }
+
+  const plDocumentObject* pOverride = GetDocument()->GetObjectManager()->GetObject(guid);
+  accessor.SetValueByName(pOverride, "Profile", sProfile).IgnoreResult();
+
+  // start from the default settings
+  for (const char* szProperty : {"LoadMode", "Codec", "OpusKbps", "SampleRate"})
+  {
+    accessor.SetValueByName(pOverride, szProperty, pProps->GetTypeAccessor().GetValue(szProperty)).IgnoreResult();
+  }
+
+  accessor.FinishTransaction();
+
+  m_ActiveOverrideGuid = guid;
+  RebuildTabs();
+  RequestPreview(true);
+}
+
+void plAudioClipAssetDocumentWindow::RemovePlatformOverride(const plUuid& overrideGuid)
+{
+  const plDocumentObject* pOverride = GetDocument()->GetObjectManager()->GetObject(overrideGuid);
+  if (pOverride == nullptr)
+    return;
+
+  plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
+  accessor.StartTransaction("Remove Platform Override");
+  accessor.RemoveObject(pOverride).IgnoreResult();
+  accessor.FinishTransaction();
+
+  RebuildTabs();
+  RequestPreview(true);
+}
+
+void plAudioClipAssetDocumentWindow::OnFillAddOverrideMenu()
+{
+  m_pAddTabMenu->clear();
+
+  plHybridArray<plString, 8> profiles;
+  plHybridArray<bool, 8> exists;
+  GetOverrideProfiles(profiles, exists);
+
+  for (plUInt32 i = 0; i < profiles.GetCount(); ++i)
+  {
+    const plString sProfile = profiles[i];
+
     QAction* pAction = m_pAddTabMenu->addAction(QString::fromUtf8(sProfile.GetData()));
-    pAction->setEnabled(!bExists);
+    pAction->setEnabled(!exists[i]);
 
     connect(pAction, &QAction::triggered, this, [this, sProfile]()
-      {
-        const plDocumentObject* pProps = GetPropertiesObject();
-        if (pProps == nullptr)
-          return;
-
-        plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
-        accessor.StartTransaction("Add Platform Override");
-
-        plUuid guid;
-        if (accessor.AddObjectByName(pProps, "PlatformOverrides", -1, plGetStaticRTTI<plAudioClipPlatformOverride>(), guid).Failed())
-        {
-          accessor.CancelTransaction();
-          return;
-        }
-
-        const plDocumentObject* pOverride = GetDocument()->GetObjectManager()->GetObject(guid);
-        accessor.SetValueByName(pOverride, "Profile", sProfile).IgnoreResult();
-
-        // start from the default settings
-        for (const char* szProperty : {"LoadMode", "Codec", "OpusKbps", "SampleRate"})
-        {
-          accessor.SetValueByName(pOverride, szProperty, pProps->GetTypeAccessor().GetValue(szProperty)).IgnoreResult();
-        }
-
-        accessor.FinishTransaction();
-
-        m_ActiveOverrideGuid = guid;
-        RebuildTabs();
-        RequestPreview(true);
-      });
+      { AddPlatformOverride(sProfile); });
   }
 
   if (m_pAddTabMenu->isEmpty())
   {
     m_pAddTabMenu->addAction("No asset profiles")->setEnabled(false);
   }
+}
+
+void plAudioClipAssetDocumentWindow::ShowAddOverrideMenu(const plVec2& vPosition)
+{
+  plHybridArray<plString, 8> profiles;
+  plHybridArray<bool, 8> exists;
+  GetOverrideProfiles(profiles, exists);
+
+  plEditorUiMenu menu;
+  for (plUInt32 i = 0; i < profiles.GetCount(); ++i)
+  {
+    menu.AddAction(profiles[i], i).m_bEnabled = !exists[i];
+  }
+
+  if (profiles.IsEmpty())
+  {
+    menu.AddAction("No asset profiles", 0).m_bEnabled = false;
+  }
+
+  plEditorUiMenuView::Show(*m_pWaveView->GetSurface(), vPosition, menu, [this, profiles](plUInt32 uiId)
+    {
+      if (uiId < profiles.GetCount())
+        AddPlatformOverride(profiles[uiId]);
+    });
 }
 
 void plAudioClipAssetDocumentWindow::OnTabContextMenu(const QPoint& pos)
@@ -1063,17 +1219,78 @@ void plAudioClipAssetDocumentWindow::OnTabContextMenu(const QPoint& pos)
   if (menu.exec(m_pTabBar->mapToGlobal(pos)) != pRemove)
     return;
 
-  const plDocumentObject* pOverride = GetDocument()->GetObjectManager()->GetObject(guid);
-  if (pOverride == nullptr)
+  RemovePlatformOverride(guid);
+}
+
+void plAudioClipAssetDocumentWindow::ShowTabMenu(plUInt32 uiTab, const plVec2& vPosition)
+{
+  if (uiTab == 0 || uiTab >= m_TabOverrides.GetCount())
+    return;
+
+  const plUuid guid = m_TabOverrides[uiTab];
+
+  plEditorUiMenu menu;
+  plEditorUiMenuItem& remove = menu.AddAction("Remove Override", 1);
+  remove.m_sIcon = plEditorUi::IconPath(plEditorUi::Icon::Remove);
+  remove.m_bDanger = true;
+
+  plEditorUiMenuView::Show(*m_pWaveView->GetSurface(), vPosition, menu, [this, guid](plUInt32 uiId)
+    {
+      if (uiId == 1)
+        RemovePlatformOverride(guid);
+    });
+}
+
+void plAudioClipAssetDocumentWindow::SetLoopPoints(plUInt64 uiStartFrame, plUInt64 uiEndFrame)
+{
+  const plSharedPtr<plAudioClipPreview>& pPreview = m_pShownPreview;
+  if (pPreview == nullptr || !pPreview->m_bSuccess || pPreview->m_Header.m_uiSampleRate == 0 || uiEndFrame <= uiStartFrame)
+    return;
+
+  // loop points are stored in source seconds
+  const plAudioClipHeader& header = pPreview->m_Header;
+  const double fStart = pPreview->m_fTrimOffset + static_cast<double>(uiStartFrame) / header.m_uiSampleRate;
+  const double fEnd = pPreview->m_fTrimOffset + static_cast<double>(uiEndFrame) / header.m_uiSampleRate;
+
+  const plDocumentObject* pProps = GetPropertiesObject();
+  if (pProps == nullptr)
     return;
 
   plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
-  accessor.StartTransaction("Remove Platform Override");
-  accessor.RemoveObject(pOverride).IgnoreResult();
+  accessor.StartTransaction("Set Loop Points");
+  accessor.SetValueByName(pProps, "OverrideLoop", true).IgnoreResult();
+  accessor.SetValueByName(pProps, "LoopStart", static_cast<float>(fStart)).IgnoreResult();
+  accessor.SetValueByName(pProps, "LoopEnd", static_cast<float>(fEnd)).IgnoreResult();
   accessor.FinishTransaction();
+}
 
-  RebuildTabs();
-  RequestPreview(true);
+void plAudioClipAssetDocumentWindow::SetInfoText(const QString& sText)
+{
+  if (m_bEngineViews)
+    m_pToolStrip->SetText(m_uiInfo, sText.toUtf8().data());
+  else
+    m_pInfoLabel->setText(sText);
+}
+
+void plAudioClipAssetDocumentWindow::SetLoopText(const QString& sText)
+{
+  if (m_bEngineViews)
+    m_pToolStrip->SetText(m_uiLoopLabel, sText.toUtf8().data());
+  else
+    m_pLoopLabel->setText(sText);
+}
+
+void plAudioClipAssetDocumentWindow::SetPlatformText(const QString& sText)
+{
+  if (m_bEngineViews)
+    m_pPlatformStrip->SetText(m_uiPlatform, sText.toUtf8().data());
+  else
+    m_pPlatformLabel->setText(sText);
+}
+
+bool plAudioClipAssetDocumentWindow::IsLoopEnabled() const
+{
+  return m_bEngineViews ? m_pToolStrip->IsChecked(m_uiLoop) : m_pLoopButton->isChecked();
 }
 
 void plAudioClipAssetDocumentWindow::RequestPreview(bool bImmediate)
@@ -1105,7 +1322,19 @@ void plAudioClipAssetDocumentWindow::OnTimer()
 
   StartPreviewIfNeeded();
 
-  m_pWaveform->SetPlayCursor(plAudioPreviewService::GetSingleton().GetPlayCursorFrames());
+  const plInt64 iCursor = plAudioPreviewService::GetSingleton().GetPlayCursorFrames();
+  if (m_bEngineViews)
+    m_pWaveView->SetPlayCursor(iCursor);
+  else
+    m_pWaveform->SetPlayCursor(iCursor);
+}
+
+void plAudioClipAssetDocumentWindow::ShowWaveformMessage(const QString& sMessage)
+{
+  if (m_bEngineViews)
+    m_pWaveView->SetMessage(sMessage.toUtf8().data());
+  else
+    m_pWaveform->SetMessage(sMessage);
 }
 
 void plAudioClipAssetDocumentWindow::StartPreviewIfNeeded()
@@ -1121,8 +1350,13 @@ void plAudioClipAssetDocumentWindow::StartPreviewIfNeeded()
   {
     m_uiWantedHash = 0;
     m_pShownPreview.Clear();
-    m_pWaveform->SetPreview(nullptr);
-    m_pWaveform->SetMessage(sMessage);
+
+    if (m_bEngineViews)
+      m_pWaveView->SetPreview(nullptr);
+    else
+      m_pWaveform->SetPreview(nullptr);
+
+    ShowWaveformMessage(sMessage);
     ShowPreview(nullptr);
   };
 
@@ -1185,7 +1419,7 @@ void plAudioClipAssetDocumentWindow::StartPreviewIfNeeded()
   pResult->m_Settings = settings;
 
   if (m_pShownPreview == nullptr)
-    m_pWaveform->SetMessage("Building preview...");
+    ShowWaveformMessage("Building preview...");
 
   m_pRunningJob = PL_DEFAULT_NEW(plAudioClipPreviewJob);
   m_pRunningJob->m_sAbsSourceFile = sAbsPath;
@@ -1203,19 +1437,41 @@ void plAudioClipAssetDocumentWindow::ShowPreview(const plSharedPtr<plAudioClipPr
   m_pShownPreview = pPreview;
 
   if (pPreview != nullptr)
-    m_pWaveform->SetPreview(pPreview);
+  {
+    if (m_bEngineViews)
+      m_pWaveView->SetPreview(pPreview);
+    else
+      m_pWaveform->SetPreview(pPreview);
+  }
 
   UpdateLoopLabel();
 
   const QString sDot = QString::fromUtf8(" \xC2\xB7 ");
 
+  // the stat row: label, value, tooltip
+  auto showStats = [this](const QString& sResident, const QString& sDisk, const QString& sDecode, const QString& sLoudness)
+  {
+    if (m_bEngineViews)
+    {
+      plQtAudioClipWaveformView::Stat stats[4];
+      stats[0] = {"Resident", sResident.toUtf8().data(), "Memory the clip holds while loaded"};
+      stats[1] = {"Disk", sDisk.toUtf8().data(), "Size of the built clip on disk (default language)"};
+      stats[2] = {"Decode cost", sDecode.toUtf8().data(), "CPU work per playing voice"};
+      stats[3] = {"Loudness", sLoudness.toUtf8().data(), ""};
+      m_pWaveView->SetStats(stats);
+      return;
+    }
+
+    m_pResidentLabel->setText(QString("Resident <b>%1</b>").arg(sResident));
+    m_pDiskLabel->setText(QString("Disk <b>%1</b>").arg(sDisk));
+    m_pDecodeLabel->setText(QString("Decode cost <b>%1</b>").arg(sDecode));
+    m_pLoudnessLabel->setText(QString("Loudness <b>%1</b>").arg(sLoudness));
+  };
+
   if (pPreview == nullptr || !pPreview->m_bSuccess)
   {
-    m_pInfoLabel->setText(pPreview != nullptr ? QString::fromUtf8(pPreview->m_sError.GetData()) : QString());
-    m_pResidentLabel->setText("Resident <b>-</b>");
-    m_pDiskLabel->setText("Disk <b>-</b>");
-    m_pDecodeLabel->setText("Decode cost <b>-</b>");
-    m_pLoudnessLabel->setText("Loudness <b>-</b>");
+    SetInfoText(pPreview != nullptr ? QString::fromUtf8(pPreview->m_sError.GetData()) : QString());
+    showStats("-", "-", "-", "-");
     return;
   }
 
@@ -1230,7 +1486,7 @@ void plAudioClipAssetDocumentWindow::ShowPreview(const plSharedPtr<plAudioClipPr
   if (plMath::IsFinite(fLufs))
     sInfo += sDot + QString::asprintf("%.1f LUFS", fLufs);
   sInfo += sDot + CodecName(header.m_eCodec) + sDot + LoadModeName(header.m_eLoadMode);
-  m_pInfoLabel->setText(sInfo);
+  SetInfoText(sInfo);
 
   // estimates
   const plAudioClipLanguageEntry& lang = header.m_Languages[0];
@@ -1275,9 +1531,6 @@ void plAudioClipAssetDocumentWindow::ShowPreview(const plSharedPtr<plAudioClipPr
   }
 
   QString sStreamNote = header.m_eLoadMode == plAudioClipLoadMode::Streamed ? QString(" per voice") : QString();
-  m_pResidentLabel->setText(QString("Resident <b>%1</b>%2").arg(FormatBytes(uiResident)).arg(sStreamNote));
-  m_pDiskLabel->setText(QString("Disk <b>%1</b>").arg(FormatBytes(pPreview->m_uiFileBytes)));
-  m_pDecodeLabel->setText(QString("Decode cost <b>%1</b>").arg(sDecode));
 
   QString sLoudness;
   if (!plMath::IsFinite(header.m_fMeasuredLufs))
@@ -1286,37 +1539,53 @@ void plAudioClipAssetDocumentWindow::ShowPreview(const plSharedPtr<plAudioClipPr
     sLoudness = QString::asprintf("normalised to %.1f LUFS (gain %+.1f dB)", fLufs, header.m_fAppliedGainDb);
   else
     sLoudness = QString::asprintf("%.1f LUFS (not normalised)", header.m_fMeasuredLufs);
-  m_pLoudnessLabel->setText(QString("Loudness <b>%1</b>").arg(sLoudness));
+
+  showStats(FormatBytes(uiResident) + sStreamNote, FormatBytes(pPreview->m_uiFileBytes), sDecode, sLoudness);
 }
 
 void plAudioClipAssetDocumentWindow::UpdateLoopLabel()
 {
   if (m_pShownPreview == nullptr || !m_pShownPreview->m_bSuccess || !m_pShownPreview->m_Header.m_bHasLoop || m_pShownPreview->m_Header.m_uiSampleRate == 0)
   {
-    m_pLoopLabel->setText("no loop");
+    SetLoopText("no loop");
     return;
   }
 
   const plAudioClipHeader& header = m_pShownPreview->m_Header;
-  m_pLoopLabel->setText(QString::asprintf("loop %.2f s - %.2f s", static_cast<double>(header.m_uiLoopStart) / header.m_uiSampleRate, static_cast<double>(header.m_uiLoopEnd) / header.m_uiSampleRate));
+  SetLoopText(QString::asprintf("loop %.2f s - %.2f s", static_cast<double>(header.m_uiLoopStart) / header.m_uiSampleRate, static_cast<double>(header.m_uiLoopEnd) / header.m_uiSampleRate));
 }
 
 void plAudioClipAssetDocumentWindow::RefreshUsedBy()
 {
   m_bUsedByDirty = false;
-  m_pUsedByList->clear();
 
   plSet<plUuid> uses;
   plAssetCurator::GetSingleton()->FindAllUses(GetDocument()->GetGuid(), uses, false);
 
+  plHybridArray<plQtAudioClipUsedByView::Entry, 8> entries;
   for (const plUuid& guid : uses)
   {
     plAssetCurator::plLockedSubAsset pSubAsset = plAssetCurator::GetSingleton()->GetSubAsset(guid);
     if (pSubAsset == nullptr || pSubAsset->m_pAssetInfo == nullptr)
       continue;
 
-    QListWidgetItem* pItem = new QListWidgetItem(QString::fromUtf8(pSubAsset->m_pAssetInfo->m_Path.GetDataDirParentRelativePath().GetStartPointer(), static_cast<int>(pSubAsset->m_pAssetInfo->m_Path.GetDataDirParentRelativePath().GetElementCount())));
-    pItem->setData(Qt::UserRole, QString::fromUtf8(pSubAsset->m_pAssetInfo->m_Path.GetAbsolutePath().GetData()));
+    plQtAudioClipUsedByView::Entry& entry = entries.ExpandAndGetRef();
+    entry.m_sPath = pSubAsset->m_pAssetInfo->m_Path.GetDataDirParentRelativePath();
+    entry.m_sAbsPath = pSubAsset->m_pAssetInfo->m_Path.GetAbsolutePath();
+  }
+
+  if (m_bEngineViews)
+  {
+    m_pUsedByView->SetEntries(entries);
+    return;
+  }
+
+  m_pUsedByList->clear();
+
+  for (const plQtAudioClipUsedByView::Entry& entry : entries)
+  {
+    QListWidgetItem* pItem = new QListWidgetItem(QString::fromUtf8(entry.m_sPath.GetData()));
+    pItem->setData(Qt::UserRole, QString::fromUtf8(entry.m_sAbsPath.GetData()));
     m_pUsedByList->addItem(pItem);
   }
 
@@ -1335,7 +1604,7 @@ void plAudioClipAssetDocumentWindow::OnPlay()
     return;
 
   const plAudioClipHeader& header = pPreview->m_Header;
-  const bool bLoop = m_pLoopButton->isChecked() && header.m_bHasLoop;
+  const bool bLoop = IsLoopEnabled() && header.m_bHasLoop;
 
   plAudioPreviewService::GetSingleton().PlayPcm(pPreview->m_Pcm.GetData(), header.m_uiFrames, header.m_uiChannels, header.m_uiSampleRate, header.m_uiLoopStart, header.m_uiLoopEnd, bLoop).IgnoreResult();
 }

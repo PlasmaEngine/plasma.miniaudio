@@ -1,7 +1,11 @@
 ﻿#include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
 #include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
+#include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
+#include <EditorPluginPlasmaAudio/EngineUi/AudioEngineViews.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAssetWindow.moc.h>
+#include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerViews.h>
+#include <GuiFoundation/EngineUi/EngineUiControlStrip.h>
 #include <EditorPluginPlasmaAudio/Preview/AudioEnumRegistry.h>
 #include <EditorPluginPlasmaAudio/Preview/AudioPreviewService.h>
 #include <Foundation/Math/ColorScheme.h>
@@ -610,6 +614,7 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
 {
   m_pAssetDoc = static_cast<plAudioMixerAssetDocument*>(pDocument);
   m_Accent = AccentColor(pDocument);
+  m_bEngineViews = plAudioEngineUi::UseEngineViews();
 
   // Menu Bar
   {
@@ -633,6 +638,128 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
     addToolBar(pToolBar);
   }
 
+  if (m_bEngineViews)
+    CreateEngineViews();
+  else
+    CreateQtViews();
+
+  CreatePropertyDock();
+
+  // the snapshot list is the right column's first tab
+  if (m_pSnapshotPanel != nullptr)
+    m_pSnapshotPanel->setAsCurrentTab();
+
+  pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
+
+  GetDocument()->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::PropertyEventHandler, this));
+  GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::StructureEventHandler, this));
+  GetDocument()->GetSelectionManager()->m_Events.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::SelectionEventHandler, this));
+
+  // redraw the strips while anything is auditioning, so the meters animate
+  m_pMeterTimer = new QTimer(this);
+  m_pMeterTimer->setInterval(50);
+  connect(m_pMeterTimer, &QTimer::timeout, this, [this]()
+    {
+      if (!plAudioPreviewService::GetSingleton().HasMixer())
+        return;
+
+      if (m_pStrips != nullptr)
+        m_pStrips->update();
+
+      if (m_pStripsView != nullptr && m_bLiveMeters)
+        m_pStripsView->UpdateMeters(); });
+  m_pMeterTimer->start();
+
+  FinishWindowCreation();
+
+  QueueRefresh();
+}
+
+void plAudioMixerAssetDocumentWindow::CreateEngineViews()
+{
+  using plEditorUi::Icon;
+
+  // Central: add buttons and the live toggle, the strips, the status row
+  {
+    QWidget* pCentralWidget = new QWidget(this);
+    QVBoxLayout* pCentralLayout = new QVBoxLayout(pCentralWidget);
+    pCentralLayout->setContentsMargins(0, 0, 0, 0);
+    pCentralLayout->setSpacing(0);
+
+    m_pToolStrip = new plQtEngineControlStrip(pCentralWidget);
+    m_pToolStrip->setObjectName("AudioMixerToolStrip");
+    m_uiAddBus = m_pToolStrip->AddIconTextButton(Icon::Add, "Bus", "Adds a mixer bus (the first bus is the Master bus)");
+    m_uiAddAuxBus = m_pToolStrip->AddIconTextButton(Icon::Add, "Aux Bus", "Adds an aux/return bus (reverb; set its Environment name to feed it from environment components)");
+    m_uiAddVca = m_pToolStrip->AddIconTextButton(Icon::Add, "VCA", "Adds a VCA (options-menu volume group over a set of buses)");
+    m_uiAddSnapshot = m_pToolStrip->AddIconTextButton(Icon::Add, "Snapshot", "Adds a blendable mixer snapshot");
+    m_uiRemoveSelected = m_pToolStrip->AddIconTextButton(Icon::Remove, "Remove Selected", "Removes the selected bus / VCA / snapshot");
+    m_pToolStrip->AddSpacer();
+    m_uiLiveMeters = m_pToolStrip->AddIconButton(Icon::Volume, "Preview the mixer in the editor (meters)", true);
+    m_pToolStrip->SetChecked(m_uiLiveMeters, m_bLiveMeters);
+
+    m_pToolStrip->m_OnChanged = [this](plUInt32 uiControl, plInt32 iValue)
+    {
+      if (uiControl == m_uiAddBus)
+        OnAddBus(false);
+      else if (uiControl == m_uiAddAuxBus)
+        OnAddBus(true);
+      else if (uiControl == m_uiAddVca)
+        OnAddVca();
+      else if (uiControl == m_uiAddSnapshot)
+        OnAddSnapshot();
+      else if (uiControl == m_uiRemoveSelected)
+        OnRemoveSelected();
+      else if (uiControl == m_uiLiveMeters)
+      {
+        m_bLiveMeters = iValue != 0;
+        m_pStripsView->SetLiveMeters(m_bLiveMeters);
+        QueueRefresh();
+      }
+    };
+
+    pCentralLayout->addWidget(m_pToolStrip);
+
+    m_pStripsView = new plQtAudioMixerStripsView(pCentralWidget, GetDocument());
+    pCentralLayout->addWidget(m_pStripsView, 1);
+
+    m_pStatusView = new plQtAudioStatusRowView(pCentralWidget);
+    pCentralLayout->addWidget(m_pStatusView);
+
+    plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, GetDocument());
+    pCentral->setObjectName("AudioMixerConsoleDockWidget");
+    pCentral->setWindowTitle("Mixer Console");
+    pCentral->setWidget(pCentralWidget, ads::CDockWidget::ForceNoScrollArea);
+    m_pDockManager->setCentralWidget(pCentral);
+  }
+
+  // Left dock: routing tree
+  {
+    plQtDocumentPanel* pRoutingPanel = new plQtDocumentPanel(this, GetDocument());
+    pRoutingPanel->setObjectName("AudioMixerRoutingDockWidget");
+    pRoutingPanel->setWindowTitle("Routing");
+    pRoutingPanel->show();
+
+    m_pRoutingView = new plQtAudioMixerRoutingView(pRoutingPanel, GetDocument());
+    pRoutingPanel->setWidget(m_pRoutingView, ads::CDockWidget::ForceNoScrollArea);
+    m_pDockManager->addDockWidget(ads::LeftDockWidgetArea, pRoutingPanel);
+  }
+
+  // Right dock 1: snapshots
+  {
+    plQtDocumentPanel* pSnapshotPanel = new plQtDocumentPanel(this, GetDocument());
+    pSnapshotPanel->setObjectName("AudioMixerSnapshotsDockWidget");
+    pSnapshotPanel->setWindowTitle("Snapshots");
+    pSnapshotPanel->show();
+    m_pSnapshotPanel = pSnapshotPanel;
+
+    m_pSnapshotsView = new plQtAudioMixerSnapshotsView(pSnapshotPanel, GetDocument());
+    pSnapshotPanel->setWidget(m_pSnapshotsView, ads::CDockWidget::ForceNoScrollArea);
+    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pSnapshotPanel);
+  }
+}
+
+void plAudioMixerAssetDocumentWindow::CreateQtViews()
+{
   // Central: add-button row + strips + status bar
   {
     QWidget* pCentralWidget = new QWidget(this);
@@ -679,7 +806,7 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
     pScroll->setWidgetResizable(true);
     pScroll->setFrameShape(QFrame::NoFrame);
 
-    m_pStrips = new plQtAudioMixerStripsWidget(pScroll, pDocument, m_Accent);
+    m_pStrips = new plQtAudioMixerStripsWidget(pScroll, GetDocument(), m_Accent);
     pScroll->setWidget(m_pStrips);
     pCentralLayout->addWidget(pScroll);
 
@@ -690,7 +817,7 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
       pCentralLayout->addWidget(m_pStatusLabel);
     }
 
-    plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, pDocument);
+    plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, GetDocument());
     pCentral->setObjectName("AudioMixerConsoleDockWidget");
     pCentral->setWindowTitle("Mixer Console");
     pCentral->setWidget(pCentralWidget, ads::CDockWidget::ForceNoScrollArea);
@@ -699,7 +826,7 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
 
   // Left dock: routing tree
   {
-    plQtDocumentPanel* pRoutingPanel = new plQtDocumentPanel(this, pDocument);
+    plQtDocumentPanel* pRoutingPanel = new plQtDocumentPanel(this, GetDocument());
     pRoutingPanel->setObjectName("AudioMixerRoutingDockWidget");
     pRoutingPanel->setWindowTitle("Routing");
     pRoutingPanel->show();
@@ -727,7 +854,7 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
 
   // Right dock 1: snapshots
   {
-    plQtDocumentPanel* pSnapshotPanel = new plQtDocumentPanel(this, pDocument);
+    plQtDocumentPanel* pSnapshotPanel = new plQtDocumentPanel(this, GetDocument());
     pSnapshotPanel->setObjectName("AudioMixerSnapshotsDockWidget");
     pSnapshotPanel->setWindowTitle("Snapshots");
     pSnapshotPanel->show();
@@ -752,14 +879,18 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
     m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pSnapshotPanel);
   }
 
+}
+
+void plAudioMixerAssetDocumentWindow::CreatePropertyDock()
+{
   // Right dock 2: properties of the current selection
   {
-    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, pDocument);
+    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, GetDocument());
     pPropertyPanel->setObjectName("AudioMixerAssetDockWidget");
     pPropertyPanel->setWindowTitle("Properties");
     pPropertyPanel->show();
 
-    plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, pDocument);
+    plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, GetDocument());
 
     QWidget* pWidget = new QWidget();
     pWidget->setObjectName("Group");
@@ -773,27 +904,6 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
 
     m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
   }
-
-  pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
-
-  GetDocument()->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::PropertyEventHandler, this));
-  GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::StructureEventHandler, this));
-  GetDocument()->GetSelectionManager()->m_Events.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::SelectionEventHandler, this));
-
-  // repaint the strips while anything is auditioning, so the meters animate
-  m_pMeterTimer = new QTimer(this);
-  m_pMeterTimer->setInterval(50);
-  connect(m_pMeterTimer, &QTimer::timeout, this, [this]()
-    {
-      if (m_pStrips != nullptr && plAudioPreviewService::GetSingleton().HasMixer())
-      {
-        m_pStrips->update();
-      } });
-  m_pMeterTimer->start();
-
-  FinishWindowCreation();
-
-  QueueRefresh();
 }
 
 plAudioMixerAssetDocumentWindow::~plAudioMixerAssetDocumentWindow()
@@ -841,37 +951,60 @@ void plAudioMixerAssetDocumentWindow::QueueRefresh()
     {
       m_bRefreshQueued = false;
 
-      if (m_pStrips != nullptr)
+      if (m_bEngineViews)
       {
-        m_pStrips->updateGeometry();
-        m_pStrips->update();
+        m_pStripsView->Refresh();
+        m_pRoutingView->Refresh();
+        m_pSnapshotsView->Refresh();
       }
+      else
+      {
+        if (m_pStrips != nullptr)
+        {
+          m_pStrips->updateGeometry();
+          m_pStrips->update();
+        }
 
-      RebuildSnapshotList();
-      RebuildRoutingTree();
+        RebuildSnapshotList();
+        RebuildRoutingTree();
+      }
 
       // keep the preview graph in step with edits, so meters and audible bus volumes match the asset
       PushMixerToPreview();
 
+      plHybridArray<const plDocumentObject*, 12> buses, snapshots;
+      plHybridArray<const plDocumentObject*, 4> vcas;
+      GatherChildrenOfProperty(GetPropertiesObject(), "Buses", buses);
+      GatherChildrenOfProperty4(GetPropertiesObject(), "VCAs", vcas);
+      GatherChildrenOfProperty(GetPropertiesObject(), "Snapshots", snapshots);
+
+      plUInt32 uiEffects = 0;
+      plUInt32 uiAux = 0;
+      for (const plDocumentObject* pBus : buses)
+      {
+        plHybridArray<const plDocumentObject*, 12> effects;
+        GatherChildrenOfProperty(pBus, "Effects", effects);
+        uiEffects += effects.GetCount();
+        if (pBus->GetTypeAccessor().GetValue("IsAux").ConvertTo<bool>())
+          ++uiAux;
+      }
+
+      if (m_pStatusView != nullptr)
+      {
+        plStringBuilder sBuses, sAux, sVcas, sSnapshots, sEffects;
+        sBuses.SetFormat("{}", buses.GetCount());
+        sAux.SetFormat("({} aux)", uiAux);
+        sVcas.SetFormat("{}", vcas.GetCount());
+        sSnapshots.SetFormat("{}", snapshots.GetCount());
+        sEffects.SetFormat("{}", uiEffects);
+
+        const plQtAudioStatusRowView::Part parts[] = {{sBuses, "buses"}, {sAux, ""}, {sVcas, "VCAs"}, {sSnapshots, "snapshots"}, {sEffects, "insert effects"}};
+        m_pStatusView->SetParts(parts);
+        m_pStatusView->SetRight(m_bLiveMeters ? "backend: MiniAudio \xC2\xB7 preview meters" : "backend: MiniAudio \xC2\xB7 live meters need a running engine");
+      }
+
       if (m_pStatusLabel != nullptr)
       {
-        plHybridArray<const plDocumentObject*, 12> buses, snapshots;
-        plHybridArray<const plDocumentObject*, 4> vcas;
-        GatherChildrenOfProperty(GetPropertiesObject(), "Buses", buses);
-        GatherChildrenOfProperty4(GetPropertiesObject(), "VCAs", vcas);
-        GatherChildrenOfProperty(GetPropertiesObject(), "Snapshots", snapshots);
-
-        plUInt32 uiEffects = 0;
-        plUInt32 uiAux = 0;
-        for (const plDocumentObject* pBus : buses)
-        {
-          plHybridArray<const plDocumentObject*, 12> effects;
-          GatherChildrenOfProperty(pBus, "Effects", effects);
-          uiEffects += effects.GetCount();
-          if (pBus->GetTypeAccessor().GetValue("IsAux").ConvertTo<bool>())
-            ++uiAux;
-        }
-
         m_pStatusLabel->setText(QString::asprintf("%u buses (%u aux) \xC2\xB7 %u VCAs \xC2\xB7 %u snapshots \xC2\xB7 %u insert effects \xC2\xB7 backend: MiniAudio \xC2\xB7 live meters need a running engine",
           buses.GetCount(), uiAux, vcas.GetCount(), snapshots.GetCount(), uiEffects));
       } });

@@ -155,10 +155,6 @@ void OnLoadPlugin()
   plPropertyMetaState::GetSingleton()->m_Events.AddEventHandler(plAudioMixerAssetProperties::PropertyMetaStateEventHandler);
   plPropertyMetaState::GetSingleton()->m_Events.AddEventHandler(plAudioClipAssetProperties::PropertyMetaStateEventHandler);
 
-  // inline attenuation curve for the event's Rolloff property
-  plQtPropertyGridWidget::GetFactory().RegisterCreator(plGetStaticRTTI<plAudioRolloffCurveWidgetAttribute>(),
-    [](const plRTTI* pRtti) -> plQtPropertyWidget* { PL_IGNORE_UNUSED(pRtti); return new plQtAudioRolloffPropertyWidget(); });
-
   // Mesh
   {
     // Menu Bar
@@ -261,7 +257,6 @@ void OnUnloadPlugin()
   plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(plAudioEventAssetProperties::PropertyMetaStateEventHandler);
   plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(plAudioMixerAssetProperties::PropertyMetaStateEventHandler);
   plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(plAudioClipAssetProperties::PropertyMetaStateEventHandler);
-  plQtPropertyGridWidget::GetFactory().UnregisterCreator(plGetStaticRTTI<plAudioRolloffCurveWidgetAttribute>());
 }
 
 static void ToolsProjectEventHandler(const plToolsProjectEvent& e)
