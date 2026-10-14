@@ -1,0 +1,18 @@
+<RCC>
+  <qresource prefix="AssetIcons">
+    <file>AudioBank.svg</file>
+    <file>AudioClip.svg</file>
+    <file>AudioEvent.svg</file>
+    <file>AudioMixer.svg</file>
+    <file>MiniAudioSound.svg</file>
+  </qresource>
+  <qresource prefix="TypeIcons">
+    <file>plMiniAudioListenerComponent.svg</file>
+    <file>plMiniAudioSoundComponent.svg</file>
+  </qresource>  
+  <qresource prefix="Icons">
+    <file>SoundOn.svg</file>
+    <file>SoundOff.svg</file>
+  </qresource>  
+</RCC>
+

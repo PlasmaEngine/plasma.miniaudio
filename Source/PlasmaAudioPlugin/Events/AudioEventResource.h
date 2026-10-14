@@ -1,0 +1,284 @@
+#pragma once
+
+#include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
+
+#include <Core/ResourceManager/Resource.h>
+#include <Foundation/Containers/DynamicArray.h>
+#include <Foundation/Containers/HybridArray.h>
+#include <Foundation/Reflection/Reflection.h>
+#include <Foundation/Strings/String.h>
+#include <Foundation/Time/Time.h>
+#include <Foundation/Tracks/Curve1D.h>
+#include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
+
+using plAudioEventResourceHandle = plTypedResourceHandle<class plAudioEventResource>;
+using plDataBuffer = plDynamicArray<plUInt8>;
+
+/// \brief How a multi-sound instrument advances through its playlist.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventPlaylistMode
+{
+  using StorageType = plUInt8;
+
+  enum Enum : StorageType
+  {
+    Random = 0,     ///< weighted random pick, repeats allowed
+    Shuffle = 1,    ///< weighted random pick, never repeats the previous entry
+    Sequential = 2, ///< round-robin through the playlist
+
+    Default = Random
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PLASMAAUDIOPLUGIN_DLL, plAudioEventPlaylistMode);
+
+/// \brief Which playing instance gets killed when an event exceeds its max instance count.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventStealingMode
+{
+  using StorageType = plUInt8;
+
+  enum Enum : StorageType
+  {
+    None = 0,     ///< the new instance is simply not started
+    Oldest = 1,   ///< the longest-playing instance is stopped
+    Quietest = 2, ///< the instance with the lowest effective volume is stopped
+
+    Default = Oldest
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PLASMAAUDIOPLUGIN_DLL, plAudioEventStealingMode);
+
+/// \brief What happens to a voice of the event when the voice manager takes its real voice away (voice budget
+/// exceeded, or started beyond the max distance).
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventVirtualMode
+{
+  using StorageType = plUInt8;
+
+  enum Enum : StorageType
+  {
+    Resume = 0,  ///< the voice keeps its timeline while virtual and continues at the matching position when it becomes real again
+    Restart = 1, ///< the voice starts again from the beginning of its sample when it becomes real again
+    Kill = 2,    ///< the event instance is stopped instead of going virtual
+
+    Default = Resume
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PLASMAAUDIOPLUGIN_DLL, plAudioEventVirtualMode);
+
+/// \brief One entry of an instrument playlist.
+///
+/// An entry plays the audio clip m_sClip when set, otherwise the embedded sample m_uiSample (or silence).
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventPlaylistEntryDesc
+{
+  /// \brief Index into plAudioEventDesc::m_SampleNames, or 0xFFFF for a silence entry. Unused when m_sClip is set.
+  plUInt16 m_uiSample = 0xFFFF;
+  float m_fWeight = 1.0f;
+
+  /// \brief Resource id of the plAudioClipResource this entry plays. Empty = the embedded sample m_uiSample.
+  plString m_sClip;
+
+  void Save(plStreamWriter& inout_stream) const;
+  void Load(plStreamReader& inout_stream, plTypeVersion uiVersion);
+};
+
+constexpr plUInt16 plAudioEventSilenceSample = 0xFFFF;
+
+/// \brief One instrument of an audio event: a (possibly single-entry) playlist with
+/// randomization, placed on the event timeline at a start delay.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventInstrumentDesc
+{
+  plString m_sName;
+  plTime m_StartDelay = plTime::MakeZero();
+  plAudioEventPlaylistMode::Enum m_ePlaylistMode = plAudioEventPlaylistMode::Default;
+
+  /// \brief When true, the instrument re-triggers its playlist every time the current entry
+  /// finishes, for as long as the event instance is active (looping ambiences, scatterers).
+  bool m_bLoop = false;
+
+  /// \brief A muted (disabled) instrument is skipped entirely, in the editor audition and at runtime.
+  bool m_bMute = false;
+
+  /// \brief Optional switch filter ("Surface/Grass"). When set, this instrument only plays while
+  /// the entity's switch state of that group matches. Empty means "always play".
+  plString m_sSwitchState;
+
+  /// \brief Extra randomized delay between loop re-triggers (scatterer behavior). Zero = gapless.
+  plTime m_MinRetriggerDelay = plTime::MakeZero();
+  plTime m_MaxRetriggerDelay = plTime::MakeZero();
+
+  float m_fVolumeDb = 0.0f;
+  float m_fVolumeRandDb = 0.0f;       ///< +/- random range applied per trigger
+  float m_fPitchSemitones = 0.0f;
+  float m_fPitchRandSemitones = 0.0f; ///< +/- random range applied per trigger
+
+  plHybridArray<plAudioEventPlaylistEntryDesc, 4> m_Playlist;
+
+  void Save(plStreamWriter& inout_stream) const;
+  void Load(plStreamReader& inout_stream, plTypeVersion uiVersion);
+};
+
+/// \brief A named, ranged event parameter. The parameter named "Distance" is built-in and fed
+/// with the entity-to-listener distance automatically.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventParameterDesc
+{
+  plString m_sName;
+  float m_fMin = 0.0f;
+  float m_fMax = 1.0f;
+  float m_fDefault = 0.0f;
+
+  void Save(plStreamWriter& inout_stream) const;
+  void Load(plStreamReader& inout_stream);
+};
+
+/// \brief What an automation curve modulates.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventAutomationTarget
+{
+  using StorageType = plUInt8;
+
+  enum Enum : StorageType
+  {
+    EventVolume = 0, ///< curve value = linear volume multiplier
+    EventPitch = 1,  ///< curve value = pitch factor multiplier
+
+    Default = EventVolume
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PLASMAAUDIOPLUGIN_DLL, plAudioEventAutomationTarget);
+
+/// \brief A curve driven by an event parameter, modulating a target property of the instance.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventAutomationDesc
+{
+  plUInt8 m_uiParameter = 0; ///< index into plAudioEventDesc::m_Parameters
+  plAudioEventAutomationTarget::Enum m_eTarget = plAudioEventAutomationTarget::Default;
+  plCurve1D m_Curve; ///< x = parameter value (in parameter range), y = multiplier
+
+  void Save(plStreamWriter& inout_stream) const;
+  void Load(plStreamReader& inout_stream);
+};
+
+/// \brief The full serialized description of an audio event.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventDesc
+{
+  plString m_sOutputBus; ///< mixer bus name; empty = master
+
+  // polyphony / lifetime macros
+  plUInt8 m_uiMaxInstances = 8;
+  plAudioEventStealingMode::Enum m_eStealing = plAudioEventStealingMode::Default;
+
+  /// \brief Voice priority: when the real voice budget is exceeded, voices of higher priority stay real before any
+  /// audibility comparison.
+  plUInt8 m_uiPriority = 128;
+  plAudioEventVirtualMode::Enum m_eVirtualMode = plAudioEventVirtualMode::Default;
+
+  plTime m_Cooldown = plTime::MakeZero(); ///< minimum time between two starts of this event
+  plTime m_FadeIn = plTime::MakeZero();   ///< voices fade in over this time when the event starts
+  plTime m_StopFadeOut = plTime::MakeFromSeconds(0.1);
+
+  /// \brief When set, a looping event repeats the [m_LoopStart, m_LoopEnd] window of its timeline
+  /// instead of replaying from zero.
+  bool m_bLoopRegion = false;
+  plTime m_LoopStart = plTime::MakeZero();
+  plTime m_LoopEnd = plTime::MakeFromSeconds(1.0);
+
+  // spatializer
+  bool m_bSpatialize = true;
+  float m_fMinDistance = 1.0f;
+  float m_fMaxDistance = 100.0f;
+  float m_fRolloff = 1.0f;
+  float m_fDopplerFactor = 0.0f;
+
+  plDynamicArray<plAudioEventInstrumentDesc> m_Instruments;
+  plDynamicArray<plAudioEventParameterDesc> m_Parameters;
+  plDynamicArray<plAudioEventAutomationDesc> m_Automations;
+
+  /// \brief Original file names of the embedded samples (debug / editor roundtrip).
+  plDynamicArray<plString> m_SampleNames;
+
+  plResult Save(plStreamWriter& inout_stream) const;
+  plResult Load(plStreamReader& inout_stream);
+
+  plUInt32 FindParameterByName(plStringView sName) const;
+};
+
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventResourceDescriptor
+{
+  plAudioEventDesc m_Desc;
+  plDynamicArray<plDataBuffer> m_SampleData;
+};
+
+/// \brief Runtime resource for an audio event (compiled from a .plAudioEventAsset).
+///
+/// Holds the event description, the embedded encoded sample payloads (wav/ogg bytes, decoded by
+/// the backend at voice start) and a handle per playlist entry that references an audio clip.
+/// The referenced clips are preloaded when the event is loaded or created. Activating an ATL
+/// trigger whose name references this resource plays the event through the active middleware.
+class PL_PLASMAAUDIOPLUGIN_DLL plAudioEventResource : public plResource
+{
+  PL_ADD_DYNAMIC_REFLECTION(plAudioEventResource, plResource);
+  PL_RESOURCE_DECLARE_COMMON_CODE(plAudioEventResource);
+  PL_RESOURCE_DECLARE_CREATEABLE(plAudioEventResource, plAudioEventResourceDescriptor);
+
+public:
+  plAudioEventResource();
+  ~plAudioEventResource();
+
+  const plAudioEventDesc& GetDescriptor() const { return m_Desc; }
+
+  plUInt32 GetNumSamples() const { return m_SampleData.GetCount(); }
+  const plDataBuffer& GetSampleData(plUInt32 uiIndex) const { return m_SampleData[uiIndex]; }
+
+  /// \brief Length in frames and sample rate of the decoded embedded sample uiIndex; both 0 when it cannot be decoded.
+  ///
+  /// The first query per sample probes the sample with a decoder and caches the result. Callers hold the resource
+  /// manager mutex (the event manager's contract), which serializes the cache.
+  void GetSampleLength(plUInt32 uiIndex, plUInt64& out_uiFrames, plUInt32& out_uiSampleRate) const;
+
+  /// \brief The clip of playlist entry uiEntry of instrument uiInstrument; an invalid handle when the entry has no clip.
+  const plAudioClipResourceHandle& GetClip(plUInt32 uiInstrument, plUInt32 uiEntry) const;
+
+  /// \brief Replaces out_events with an entry per loaded event resource (name and embedded sample bytes). Any thread.
+  ///
+  /// Events are listed from their own registry of loaded events, not through the resource manager: an event enters it
+  /// when its content finished loading and leaves it before its data is cleared or it is destroyed.
+  static void GatherLoadedEvents(plDynamicArray<plAudioEventMemorySnapshotEntry>& out_events);
+
+private:
+  /// Adds the event to the registry of loaded events.
+  void LinkLoaded();
+
+  /// Removes the event from the registry of loaded events.
+  void UnlinkLoaded();
+
+  /// registry of loaded events: an intrusive list, guarded by s_LoadedMutex
+  static plMutex s_LoadedMutex;
+  static plAudioEventResource* s_pFirstLoaded;
+  plAudioEventResource* m_pPrevLoaded = nullptr;
+  plAudioEventResource* m_pNextLoaded = nullptr;
+  plUInt64 m_uiSampleBytes = 0; ///< bytes of the embedded samples, set when the event enters the registry
+  bool m_bLinkedLoaded = false;
+
+  virtual plResourceLoadDesc UnloadData(Unload WhatToUnload) override;
+  virtual plResourceLoadDesc UpdateContent(plStreamReader* pStream) override;
+  virtual void UpdateMemoryUsage(MemoryUsage& out_NewMemoryUsage) override;
+
+  /// \brief Fills m_Clips and m_InstrumentClipOffsets from m_Desc and preloads the clips.
+  void SetupClips();
+
+  plAudioEventDesc m_Desc;
+  plDynamicArray<plDataBuffer> m_SampleData;
+
+  /// \brief One handle per playlist entry of every instrument, instrument major; invalid for entries without a clip.
+  plDynamicArray<plAudioClipResourceHandle> m_Clips;
+  plDynamicArray<plUInt32> m_InstrumentClipOffsets; ///< index into m_Clips of the first entry of each instrument
+
+  struct SampleLength
+  {
+    plUInt64 m_uiFrames = 0;
+    plUInt32 m_uiSampleRate = 0;
+    bool m_bProbed = false;
+  };
+
+  mutable plDynamicArray<SampleLength> m_SampleLengths; ///< per embedded sample, filled by GetSampleLength
+};

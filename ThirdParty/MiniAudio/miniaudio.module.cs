@@ -12,7 +12,6 @@ public class MiniAudioModule : ModuleRules
         PublicDefinitions.Add("BUILDSYSTEM_ENABLE_MINIAUDIO_SUPPORT");
         PublicDefinitions.Add("MA_DLL");
 
-        PrivateDefinitions.Add("MA_NO_FLAC");
         PrivateDefinitions.Add("MA_NO_ENCODING");
         PrivateDefinitions.Add("MA_NO_GENERATION");
         PrivateDefinitions.Add("MA_NO_CUSTOM");

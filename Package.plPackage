@@ -1,4 +1,4 @@
-// plasma.miniaudio — MiniAudio.
+// plasma.audio — PlasmaAudio.
 //
 // The AUTHORED manifest, kept in source next to the plugin. Component hashes and sizes are NOT
 // here: the packaging step computes those and emits them into the published manifest.
@@ -7,34 +7,32 @@
 
 PackageInfo
 {
-	string %Id{"plasma.miniaudio"}
-	string %Version{"1.1.5"}
+	string %Id{"plasma.audio"}
+	string %Version{"2.0.0"}
 	string %Publisher{"PlasmaTechnology"}
 	string %License{"MIT"}
 	string %Homepage{"https://plasmagameengine.com"}
 
-	string %MinEngineVersion{"0.9.2"}
-	string %MaxEngineVersion{"0.9.2"}
-	string %AbiTag{"win64-msvc19-0.9.2-abi2-dev"}
+	string %MinEngineVersion{"0.10.0"}
+	string %MaxEngineVersion{"0.10.0"}
+	string %AbiTag{"win64-msvc19-0.10.0-abi4-dev"}
 
-	string %DisplayName{"MiniAudio"}
+	string %DisplayName{"PlasmaAudio"}
 	string %Category{"Audio"}
-	string %Description{"Adds support for sound via MiniAudio.
+	string %Description{"PlasmaAudio: event-based audio with mixer, snapshots and DSP. Built on miniaudio, compiled into the plugin."}
+	string %Icon{"Branding/PlasmaAudioIcon.png"}
+	string %Banner{"Branding/PlasmaAudioBanner.png"}
 
-MiniAudio is compiled into the plugin, so there is nothing else to install."}
-	string %Icon{"Branding/MiniAudioIcon.png"}
-	string %Banner{"Branding/MiniAudioBanner.png"}
-
-	string %EditorPlugins{"plEditorPluginMiniAudio"}
+	string %EditorPlugins{"plEditorPluginPlasmaAudio"}
 	string %EditorEnginePlugins{}
-	string %RuntimePlugins{"plMiniAudioPlugin"}
+	string %RuntimePlugins{"plPlasmaAudioPlugin"}
 	string %PackageDependencies{"MiniAudio.dll"}
 
 	// ---- assets ---------------------------------------------------------------
 	// Mounted as a data directory when the package is installed. The layout below Assets/
 	// mirrors where this content sat inside the engine, so every shader include, shape icon
 	// lookup and asset reference resolves exactly as it did before.
-	Mount { string %Path{"Assets"} string %RootName{"plasma.miniaudio"} bool %Writable{false} }
+	Mount { string %Path{"Assets"} string %RootName{"plasma.audio"} bool %Writable{false} }
 
 	Component { string %Name{"assets"} string %Platform{"any"} }
 	Component { string %Name{"manifest"} string %Platform{"any"} }

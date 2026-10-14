@@ -1,0 +1,253 @@
+#pragma once
+
+#include <AudioSystem/Core/AudioMiddleware.h>
+#include <Foundation/Configuration/CVar.h>
+#include <PlasmaAudioPlugin/Banks/AudioBankResource.h>
+#include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
+#include <PlasmaAudioPlugin/Events/AudioEventResource.h>
+#include <PlasmaAudioPlugin/Events/MiniAudioAudioEvents.h>
+#include <PlasmaAudioPlugin/Mixer/AudioMixerService.h>
+#include <PlasmaAudioPlugin/Mixer/MiniAudioBusGraph.h>
+#include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
+#include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
+#include <PlasmaAudioPlugin/Streaming/AudioStreamService.h>
+
+#include <atomic>
+
+class plMiniAudioSingleton;
+
+class PL_PLASMAAUDIOPLUGIN_DLL plPlasmaAudioMiddleware final : public plAudioMiddleware, public plAudioPcmStreamProvider
+{
+  PL_DECLARE_SINGLETON_OF_INTERFACE(plPlasmaAudioMiddleware, plAudioMiddleware);
+
+public:
+  plPlasmaAudioMiddleware();
+  ~plPlasmaAudioMiddleware() override;
+
+  plResult LoadConfiguration(const plOpenDdlReaderElement& reader) override;
+  plResult Startup() override;
+  void Update(plTime delta) override;
+  plResult Shutdown() override;
+  plResult Release() override;
+  plResult StopAllSounds() override;
+  plResult AddEntity(plAudioSystemEntityData* pEntityData, const char* szEntityName) override;
+  plResult ResetEntity(plAudioSystemEntityData* pEntityData) override;
+  plResult UpdateEntity(plAudioSystemEntityData* pEntityData) override;
+  plResult RemoveEntity(plAudioSystemEntityData* pEntityData) override;
+  plResult SetEntityTransform(plAudioSystemEntityData* pEntityData, const plAudioSystemTransform& Transform) override;
+  plResult LoadTrigger(plAudioSystemEntityData* pEntityData, const plAudioSystemTriggerData* pTriggerData, plAudioSystemEventData* pEventData) override;
+  plResult ActivateTrigger(plAudioSystemEntityData* pEntityData, const plAudioSystemTriggerData* pTriggerData, plAudioSystemEventData* pEventData) override;
+  plResult UnloadTrigger(plAudioSystemEntityData* pEntityData, const plAudioSystemTriggerData* pTriggerData) override;
+  plResult StopEvent(plAudioSystemEntityData* pEntityData, const plAudioSystemEventData* pEventData) override;
+  plResult StopAllEvents(plAudioSystemEntityData* pEntityData) override;
+  plResult SetRtpc(plAudioSystemEntityData* pEntityData, const plAudioSystemRtpcData* pRtpcData, float fValue) override;
+  plResult ResetRtpc(plAudioSystemEntityData* pEntityData, const plAudioSystemRtpcData* pRtpcData) override;
+  plResult SetSwitchState(plAudioSystemEntityData* pEntityData, const plAudioSystemSwitchStateData* pSwitchStateData) override;
+  plResult SetObstructionAndOcclusion(plAudioSystemEntityData* pEntityData, float fObstruction, float fOcclusion) override;
+  plResult SetEnvironmentAmount(plAudioSystemEntityData* pEntityData, const plAudioSystemEnvironmentData* pEnvironmentData, float fAmount) override;
+  plResult AddListener(plAudioSystemListenerData* pListenerData, const char* szListenerName, bool bIsDefault) override;
+  plResult ResetListener(plAudioSystemListenerData* pListenerData) override;
+  plResult RemoveListener(plAudioSystemListenerData* pListenerData) override;
+  plResult SetListenerTransform(plAudioSystemListenerData* pListenerData, const plAudioSystemTransform& Transform) override;
+  plResult LoadBank(plAudioSystemBankData* pBankData) override;
+  plResult UnloadBank(plAudioSystemBankData* pBankData) override;
+  plAudioSystemEntityData* CreateWorldEntity(plAudioSystemDataID uiEntityId) override;
+  plAudioSystemEntityData* CreateEntityData(plAudioSystemDataID uiEntityId) override;
+  plResult DestroyEntityData(plAudioSystemEntityData* pEntityData) override;
+  plAudioSystemListenerData* CreateListenerData(plAudioSystemDataID uiListenerId) override;
+  plResult DestroyListenerData(plAudioSystemListenerData* pListenerData) override;
+  plAudioSystemEventData* CreateEventData(plAudioSystemDataID uiEventId) override;
+  plResult ResetEventData(plAudioSystemEventData* pEventData) override;
+  plResult DestroyEventData(plAudioSystemEventData* pEventData) override;
+  plResult DestroyBank(plAudioSystemBankData* pBankData) override;
+  plResult DestroyTriggerData(plAudioSystemTriggerData* pTriggerData) override;
+  plResult DestroyRtpcData(plAudioSystemRtpcData* pRtpcData) override;
+  plResult DestroySwitchStateData(plAudioSystemSwitchStateData* pSwitchStateData) override;
+  plResult DestroyEnvironmentData(plAudioSystemEnvironmentData* pEnvironmentData) override;
+  plResult SetLanguage(const char* szLanguage) override;
+  const char* GetMiddlewareName() const override;
+  float GetMasterGain() const override;
+  bool GetMute() const override;
+  void OnMasterGainChange(float fGain) override;
+  void OnMuteChange(bool bMute) override;
+  void OnMasterPauseChange(bool bPaused) override;
+  bool GetMasterPaused() const override;
+  void SetSoundGroupVolume(plStringView sGroupGuid, float fVolume) override;
+  float GetSoundGroupVolume(plStringView sGroupGuid) const override;
+  void SetNumListeners(plUInt8 uiNumListeners) override;
+  plUInt8 GetNumListeners() const override;
+  void OnLoseFocus() override;
+  void OnGainFocus() override;
+
+  /// \brief Global parameters feed every event parameter of the same name that has no instance-local value.
+  /// Thread-safe; the event manager picks up changes on the next Update.
+  void SetGlobalParameter(plStringView sName, float fValue) override;
+  float GetGlobalParameter(plStringView sName) const override;
+
+  bool IsEventDataPlaying(const plAudioSystemEventData* pEventData) const override;
+
+  // name-based mixer SPI: the resource is loaded here, the bus graph is built from it and
+  // plAudioMixerService blends VCAs and snapshots into per-bus values
+  plResult LoadMixer(plStringView sMixerResourceId) override;
+  plResult UnloadMixer() override;
+  plResult SetBusVolume(plStringView sBusName, float fVolumeDb) override;
+  plResult SetVcaVolume(plStringView sVcaName, float fVolumeDb) override;
+  plResult SetSnapshotIntensity(plStringView sSnapshotName, float fIntensity) override;
+  void StopAllSnapshots() override;
+  plResult SetEventParameter(plAudioSystemEntityData* pEntityData, plStringView sParamName, float fValue) override;
+  void GetProfilingInfo(plAudioSystemProfilingInfo& out_info) const override;
+
+  /// \brief Wall time the last Update() took, in milliseconds. Any thread.
+  float GetLastUpdateMilliseconds() const { return m_fLastUpdateMs.load(std::memory_order_relaxed); }
+
+  /// \brief Publishes the latest profiling snapshot of the audio thread as plStats: "PlasmaAudio/VoiceSnapshot" (the
+  /// serialized plAudioProfilingSnapshot as a plDataBuffer) and the scalars "PlasmaAudio/RealVoices",
+  /// "PlasmaAudio/VirtualVoices", "PlasmaAudio/DspLoad" and "PlasmaAudio/UpdateMs". The stats are set only when a new
+  /// snapshot arrived and removed once PlasmaAudio.ProfilerSnapshotHz is 0. Main thread only (plStats is not
+  /// synchronized with its readers).
+  void PublishStats();
+
+  /// \brief Removes the stats PublishStats set, if any. Main thread only.
+  void RemoveProfilingStats();
+
+  /// \brief Peak and RMS of a bus of the loaded mixer (zero without a mixer). Audio thread only.
+  void GetBusMeter(plUInt32 uiBusIndex, float& out_fPeak, float& out_fRms) const;
+
+  /// \brief Whether the bank was loaded through LoadBank and the load of its events and clips has been started.
+  /// Audio thread only.
+  bool IsBankContentRequested(plAudioSystemDataID uiBankId) const;
+
+  /// \brief The language clips are loaded in ("" = default language). SetLanguage() takes effect on the next Update().
+  plString GetLanguage() const;
+
+  // PCM stream SPI: a plMaPcmStreamNode per stream, attached to its bus (or the endpoint without a mixer)
+  plResult CreatePcmStream(const plAudioPcmStreamDesc& desc, plUInt32& out_uiStreamId) override;
+  void DestroyPcmStream(plUInt32 uiStreamId) override;
+  plUInt32 WritePcmFrames(plUInt32 uiStreamId, plArrayPtr<const float> interleaved) override;
+  plUInt32 GetPcmStreamFreeFrames(plUInt32 uiStreamId) const override;
+  plUInt64 GetPcmStreamFramesRendered(plUInt32 uiStreamId) const override;
+  void SetPcmStreamVolume(plUInt32 uiStreamId, float fLinearGain) override;
+  void SetPcmStreamPitch(plUInt32 uiStreamId, float fPitch) override;
+  void SetPcmStreamPaused(plUInt32 uiStreamId, bool bPaused) override;
+  void FlushPcmStream(plUInt32 uiStreamId) override;
+
+private:
+  struct PcmStream
+  {
+    plUInt32 m_uiId = 0;
+    plString m_sBus;
+    plUInt32 m_uiChannels = 0;
+    plUInt32 m_uiSampleRate = 0;
+    plUInt32 m_uiRingFrames = 0;
+    plUniquePtr<plMaPcmStreamNode> m_pNode;
+  };
+
+  PcmStream* FindPcmStream(plUInt32 uiStreamId);
+  const PcmStream* FindPcmStream(plUInt32 uiStreamId) const;
+  void AttachPcmStream(PcmStream& ref_stream);
+  void ReattachPcmStreams();
+  void DetachPcmStreamsToEndpoint();
+  void DestroyAllPcmStreams();
+
+  /// \brief Recreates the miniaudio engine on the requested / default output device and rebuilds what hangs off it.
+  void RecoverDevice();
+
+  plMiniAudioSingleton* m_pBackend = nullptr;
+
+  /// duration of the last Update(), written by the audio thread
+  std::atomic<float> m_fLastUpdateMs = 0.0f;
+
+  /// resource id of the mixer loaded through LoadMixer (empty without one), reloaded after a device re-init
+  plString m_sLoadedMixerId;
+
+  /// which listener slots 1..MaxListeners-1 are taken by a listener; slot 0 is shared by default listeners
+  bool m_bListenerSlotTaken[4] = {};
+
+  plMiniAudioBusGraph m_BusGraph;
+  plAudioMixerService m_MixerService;
+
+  /// declared before the event manager: voices of streamed clips release their streams into it
+  plAudioStreamService m_StreamService;
+  plPlasmaAudioEventManager m_EventManager;
+
+  /// environment ids this middleware registered for the current mixer (unregistered on unload)
+  plHybridArray<plAudioSystemDataID, 4> m_RegisteredEnvironmentIds;
+
+  /// global parameters (name hash -> value); copied into the event manager in Update when dirty
+  mutable plMutex m_GlobalParameterMutex;
+  plHashTable<plUInt64, float> m_GlobalParameters;
+  bool m_bGlobalParametersDirty = false;
+
+  mutable plMutex m_PcmStreamMutex;
+  plHybridArray<PcmStream, 4> m_PcmStreams;
+  plUInt32 m_uiNextPcmStreamId = 1;
+
+  /// A bank loaded through LoadBank: the bank resource and, once its content list is loaded, a handle per listed
+  /// event and clip. The held handles keep those resources from being freed.
+  struct LoadedBank
+  {
+    plAudioBankResourceHandle m_hBank;
+    plDynamicArray<plAudioEventResourceHandle> m_Events;
+    plDynamicArray<plAudioClipResourceHandle> m_Clips;
+    bool m_bContentRequested = false;
+  };
+
+  /// Starts loading the events and clips of the bank once its resource is loaded. Returns false while it is still loading.
+  bool RequestBankContent(LoadedBank& ref_bank);
+  void UpdatePendingBanks();
+
+  /// Applies a language set through SetLanguage (audio thread).
+  void ApplyPendingLanguage();
+
+  void OnLanguageCVarEvent(const plCVarEvent& e);
+
+  plHashTable<plAudioSystemDataID, LoadedBank> m_Banks;
+
+  /// banks in m_Banks whose content has not been requested yet
+  plHybridArray<plAudioSystemDataID, 4> m_PendingBanks;
+
+  /// language requested through SetLanguage, applied in Update
+  mutable plMutex m_LanguageMutex;
+  plString m_sPendingLanguage;
+  bool m_bLanguagePending = false;
+
+  plCVar* m_pLanguageCVar = nullptr;
+  plEventSubscriptionID m_LanguageCVarSubscription = 0;
+
+  /// Serializes a profiling snapshot when PlasmaAudio.ProfilerSnapshotHz asks for one (audio thread).
+  void UpdateProfilingSnapshot();
+
+  /// Fills the bus section of m_ProfilingSnapshot from the mixer service and the bus graph meters (audio thread).
+  void FillBusSnapshot();
+
+  /// Fills the memory section of m_ProfilingSnapshot from the clip, event and bank registries (audio thread).
+  void FillMemorySnapshot();
+
+  /// audio thread: the snapshot and its serialized form are reused, so their capacity carries over
+  plAudioProfilingSnapshot m_ProfilingSnapshot;
+  plDataBuffer m_ProfilingScratch;
+  plTime m_LastProfilingSnapshot;
+
+  /// A snapshot carries the event log entries added since the last ProfilingLogOverlap snapshots, so a reader that
+  /// polls the published snapshot less often than it is produced still sees every entry.
+  static constexpr plUInt32 ProfilingLogOverlap = 8;
+
+  /// the event log's next sequence number at each of the last ProfilingLogOverlap snapshots, a ring
+  plUInt64 m_ProfilingLogCursors[ProfilingLogOverlap] = {};
+  plUInt32 m_uiProfilingLogCursorSlot = 0;
+
+  /// The latest serialized snapshot, swapped in by the audio thread and copied out by PublishStats, both under
+  /// m_ProfilingMutex. The audio thread holds it only for the swap.
+  plMutex m_ProfilingMutex;
+  plDataBuffer m_ProfilingPublished;
+  plUInt32 m_uiProfilingGeneration = 0;
+  plUInt32 m_uiProfilingPublishedReal = 0;
+  plUInt32 m_uiProfilingPublishedVirtual = 0;
+  float m_fProfilingPublishedDspLoad = 0.0f;
+  float m_fProfilingPublishedUpdateMs = 0.0f;
+
+  /// main thread (PublishStats)
+  plDataBuffer m_ProfilingStatBuffer;
+  plUInt32 m_uiProfilingGenerationSeen = 0;
+  bool m_bProfilingStatsSet = false;
+};

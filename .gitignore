@@ -10,8 +10,8 @@ Output/
 *.dll
 *.link.rsp
 
-# Generated Qt sources (moc/uic/rcc)
-*.moc.cpp
+# Generated Qt sources (moc/uic/rcc). Hand-written *.moc.cpp files are source and stay tracked;
+# generated moc output lives under Intermediate/.
 *_moc.cpp
 ui_*.h
 qrc_*.cpp
