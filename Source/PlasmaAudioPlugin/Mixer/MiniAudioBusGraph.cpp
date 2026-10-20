@@ -36,7 +36,7 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
 
     if (ma_sound_group_init(pEngine, 0, nullptr, &bus.m_Group) != MA_SUCCESS)
     {
-      plLog::Error("MiniAudio: failed to create mixer bus '{0}'.", desc.m_Buses[i].m_sName);
+      plLog::Error("PlasmaAudio: failed to create mixer bus '{0}'.", desc.m_Buses[i].m_sName);
       Teardown();
       return PL_FAILURE;
     }
@@ -64,7 +64,7 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
     // meter
     if (plMiniAudioDsp::InitMeterNode(pEngine, &bus.m_Meter).Failed())
     {
-      plLog::Error("MiniAudio: failed to create meter node for bus '{0}'.", busDesc.m_sName);
+      plLog::Error("PlasmaAudio: failed to create meter node for bus '{0}'.", busDesc.m_sName);
       Teardown();
       return PL_FAILURE;
     }
@@ -79,7 +79,7 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
 
       if (ma_splitter_node_init(ma_engine_get_node_graph(pEngine), &cfg, nullptr, bus.m_pSplitter) != MA_SUCCESS)
       {
-        plLog::Error("MiniAudio: failed to create send splitter for bus '{0}'.", busDesc.m_sName);
+        plLog::Error("PlasmaAudio: failed to create send splitter for bus '{0}'.", busDesc.m_sName);
         PL_DEFAULT_DELETE(bus.m_pSplitter);
         Teardown();
         return PL_FAILURE;
@@ -133,7 +133,7 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
 
   InitBusValues();
 
-  plLog::Info("MiniAudio: mixer graph built ({0} buses).", desc.m_Buses.GetCount());
+  plLog::Info("PlasmaAudio: mixer graph built ({0} buses).", desc.m_Buses.GetCount());
   return PL_SUCCESS;
 }
 
