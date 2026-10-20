@@ -2,6 +2,7 @@
 
 #include <AudioSystem/Mixer/AudioMixerData.h>
 #include <Foundation/Containers/Deque.h>
+#include <Foundation/Containers/HashSet.h>
 #include <MiniAudio/miniaudio.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioDspNodes.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
@@ -90,6 +91,7 @@ private:
   void InitBusValues();
 
   plAudioMixerDesc m_Desc;
+  mutable plHashSet<plString> m_WarnedUnknownBuses; ///< output bus names ResolveBus already warned about
   plDeque<Bus> m_Buses; // deque: stable addresses for miniaudio node structs
   plDynamicArray<BusValues> m_BusValues;
   ma_engine* m_pEngine = nullptr;

@@ -3,6 +3,7 @@
 #include <Foundation/IO/FileSystem/FileSystem.h>
 #include <Foundation/IO/FileSystem/FileWriter.h>
 #include <Foundation/IO/MemoryStream.h>
+#include <Foundation/Threading/ThreadUtils.h>
 #include <Foundation/Utilities/AssetFileHeader.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipBuilder.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
@@ -615,6 +616,16 @@ PL_CREATE_SIMPLE_TEST(ClipEvent, EventUnloadStopsVoices)
 
   plAudioEventResourceHandle hEvent = plResourceManager::LoadResource<plAudioEventResource>(sEventPath);
 
+  // activating an event that is not loaded queues the start (see PendingStart); loaded here, so it starts right away
+  auto LoadEvent = [&]()
+  {
+    plResourceLock<plAudioEventResource> pEvent(hEvent, plResourceAcquireMode::BlockTillLoaded);
+    return pEvent.GetAcquireResult() == plResourceAcquireResult::Final;
+  };
+
+  if (!PL_TEST_BOOL(LoadEvent()))
+    return;
+
   plOfflineAudioEngine engine;
   if (!PL_TEST_BOOL(engine.IsValid()))
     return;
@@ -639,11 +650,82 @@ PL_CREATE_SIMPLE_TEST(ClipEvent, EventUnloadStopsVoices)
   PL_TEST_INT(manager.GetInstanceCount(), 0);
 
   // the event loads again and plays in new instances
+  PL_TEST_BOOL(LoadEvent());
   PL_TEST_RESULT(manager.ActivateEvent(sEventPath, nullptr, &eventData, engine.GetBusGraph(), engine.GetEngine()));
   const plUInt32 uiRestartFrame = output.GetCount();
   engine.RenderBlocks(10, &manager, &output);
   PL_TEST_INT(manager.GetActiveVoiceCount(), 1);
   PL_TEST_BOOL(MaxAbs(output, uiRestartFrame) > 0.4f);
+}
+
+PL_CREATE_SIMPLE_TEST(ClipEvent, PendingStart)
+{
+  if (!PL_TEST_RESULT(plFileSystem::AddDataDirectory(">pltest/", "PlasmaAudioPendingTest", "pendingtest", plDataDirUsage::AllowWrites)))
+    return;
+
+  PL_SCOPE_EXIT(plFileSystem::RemoveDataDirectoryGroup("PlasmaAudioPendingTest"));
+
+  const plStringView sEventPath = ":pendingtest/PendingEvent.plAudioEvent";
+  const plStringView sStoppedPath = ":pendingtest/StoppedEvent.plAudioEvent";
+  if (!PL_TEST_RESULT(WriteEventFile(sEventPath, MakeEmbeddedEvent(ToPcm16(plAudioTestUtils::MakeDc(plOfflineAudioEngine::SampleRate, 0.5f))))))
+    return;
+  if (!PL_TEST_RESULT(WriteEventFile(sStoppedPath, MakeEmbeddedEvent(ToPcm16(plAudioTestUtils::MakeDc(plOfflineAudioEngine::SampleRate, 0.5f))))))
+    return;
+
+  plOfflineAudioEngine engine;
+  if (!PL_TEST_BOOL(engine.IsValid()))
+    return;
+
+  plPlasmaAudioEventManager manager;
+  plDynamicArray<float> output;
+
+  // renders until no start waits any more; the loader runs on its own threads, so this waits in wall-clock time
+  auto RenderUntilStarted = [&]()
+  {
+    const plTime tEnd = plTime::Now() + plTime::MakeFromSeconds(5);
+    while (manager.GetPendingActivationCount() > 0 && plTime::Now() < tEnd)
+    {
+      engine.RenderBlocks(1, &manager, &output);
+      plThreadUtils::Sleep(plTime::MakeFromMilliseconds(1));
+    }
+  };
+
+  // an event that is not loaded: the start is queued and the audio thread does not wait for the file
+  {
+    plPlasmaAudioEventData eventData;
+    PL_TEST_RESULT(manager.ActivateEvent(sEventPath, nullptr, &eventData, engine.GetBusGraph(), engine.GetEngine()));
+    PL_TEST_INT(manager.GetActiveVoiceCount(), 0);
+    PL_TEST_BOOL(manager.IsEventPlaying(&eventData));
+
+    RenderUntilStarted();
+    PL_TEST_INT(manager.GetPendingActivationCount(), 0);
+    PL_TEST_INT(manager.GetActiveVoiceCount(), 1);
+
+    const plUInt32 uiStart = output.GetCount();
+    engine.RenderBlocks(5, &manager, &output);
+    PL_TEST_BOOL(MaxAbs(output, uiStart) > 0.4f);
+
+    manager.StopAll(true);
+  }
+
+  // a stop before the event finished loading drops the start
+  {
+    plPlasmaAudioEventData eventData;
+    PL_TEST_RESULT(manager.ActivateEvent(sStoppedPath, nullptr, &eventData, engine.GetBusGraph(), engine.GetEngine()));
+    PL_TEST_INT(manager.GetPendingActivationCount(), 1);
+
+    PL_TEST_RESULT(manager.StopEvent(&eventData, false));
+    PL_TEST_INT(manager.GetPendingActivationCount(), 0);
+    PL_TEST_BOOL(!manager.IsEventPlaying(&eventData));
+
+    // the load that was requested keeps running; it finishes before the data directory goes away
+    {
+      plResourceLock<plAudioEventResource> pEvent(plResourceManager::LoadResource<plAudioEventResource>(sStoppedPath), plResourceAcquireMode::BlockTillLoaded);
+    }
+
+    engine.RenderBlocks(5, &manager, &output);
+    PL_TEST_INT(manager.GetInstanceCount(), 0);
+  }
 }
 
 PL_CREATE_SIMPLE_TEST(ClipEvent, LanguageSwitchReloadsStaleClip)

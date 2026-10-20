@@ -251,6 +251,24 @@ PL_CREATE_SIMPLE_TEST(AudioBank, Language)
   // held for the whole test, like a playing voice would
   plAudioClipResourceHandle hClip = plResourceManager::LoadResource<plAudioClipResource>(":banktest/Speech.plBinAudioClip");
 
+  // The resource manager skips a reload while the load task of the clip still finishes (right after a blocking load
+  // returned); the middleware tries again on its next updates. Updates until the clip is in sLanguage, at most 2 s.
+  auto UpdateUntilLanguage = [&](plStringView sLanguage)
+  {
+    const plTime tEnd = plTime::Now() + plTime::MakeFromSeconds(2);
+    while (plTime::Now() < tEnd)
+    {
+      {
+        plResourceLock<plAudioClipResource> pClip(hClip, plResourceAcquireMode::BlockTillLoaded);
+        if (pClip.GetAcquireResult() == plResourceAcquireResult::Final && pClip->GetActiveLanguage() == sLanguage)
+          return;
+      }
+
+      plThreadUtils::Sleep(plTime::MakeFromMilliseconds(1));
+      pMiddleware->Update(plTime::MakeZero());
+    }
+  };
+
   PL_TEST_BLOCK(plTestBlock::Enabled, "Default language")
   {
     plResourceLock<plAudioClipResource> pClip(hClip, plResourceAcquireMode::BlockTillLoaded);
@@ -270,6 +288,8 @@ PL_CREATE_SIMPLE_TEST(AudioBank, Language)
     pMiddleware->Update(plTime::MakeZero());
     PL_TEST_STRING(pMiddleware->GetLanguage(), "de");
     PL_TEST_STRING(plAudioClipResourceLoader::GetLanguage(), "de");
+
+    UpdateUntilLanguage("de");
 
     plResourceLock<plAudioClipResource> pClip(hClip, plResourceAcquireMode::BlockTillLoaded);
     if (!PL_TEST_BOOL(pClip.GetAcquireResult() == plResourceAcquireResult::Final))
@@ -294,6 +314,7 @@ PL_CREATE_SIMPLE_TEST(AudioBank, Language)
   {
     PL_TEST_RESULT(pMiddleware->SetLanguage(""));
     pMiddleware->Update(plTime::MakeZero());
+    UpdateUntilLanguage("");
 
     plResourceLock<plAudioClipResource> pClip(hClip, plResourceAcquireMode::BlockTillLoaded);
     if (!PL_TEST_BOOL(pClip.GetAcquireResult() == plResourceAcquireResult::Final))

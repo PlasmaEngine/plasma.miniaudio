@@ -65,9 +65,25 @@ namespace
     {
       void* pInnerOut = (pFramesOut != nullptr) ? ma_offset_pcm_frames_ptr(pFramesOut, uiRead, pSource->m_eFormat, pSource->m_uiChannels) : nullptr;
 
+      ma_uint64 uiCursorBefore = 0;
+      const bool bCursorBefore = ma_data_source_get_cursor_in_pcm_frames(pSource->m_pInner, &uiCursorBefore) == MA_SUCCESS;
+
       ma_uint64 uiInnerRead = 0;
       const ma_result res = ma_data_source_read_pcm_frames(pSource->m_pInner, pInnerOut, uiFrameCount - uiRead, &uiInnerRead);
       uiRead += uiInnerRead;
+
+      // Publish the position for the audio thread. Frames returned without the cursor advancing are the silence a
+      // starved stream plays; a cursor that moved backwards looped, which says nothing about starvation.
+      ma_uint64 uiCursorAfter = 0;
+      if (ma_data_source_get_cursor_in_pcm_frames(pSource->m_pInner, &uiCursorAfter) == MA_SUCCESS)
+      {
+        pSource->m_iPublishedCursor = static_cast<plInt64>(uiCursorAfter);
+
+        if (bCursorBefore && uiCursorAfter >= uiCursorBefore && uiInnerRead > uiCursorAfter - uiCursorBefore)
+        {
+          pSource->m_iStarvedFrames.Add(static_cast<plInt64>(uiInnerRead - (uiCursorAfter - uiCursorBefore)));
+        }
+      }
 
       if (res != MA_SUCCESS && res != MA_AT_END)
       {
@@ -98,6 +114,7 @@ namespace
     pSource->m_uiLeadFramesRemaining = 0;
     pSource->m_bLeadResolved = true;
     pSource->m_bPadded = false;
+    pSource->m_iPublishedCursor = static_cast<plInt64>(uiFrameIndex);
     return ma_data_source_seek_to_pcm_frame(pSource->m_pInner, uiFrameIndex);
   }
 
@@ -131,6 +148,12 @@ namespace
     pSource->m_bLeadResolved = false;
     pSource->m_bStartFadeApplied = false;
     pSource->m_bPadded = false;
+    pSource->m_iStarvedFrames = 0;
+
+    // the inner source may already have been sought to where a realized voice resumes
+    ma_uint64 uiCursor = 0;
+    ma_data_source_get_cursor_in_pcm_frames(pInner, &uiCursor);
+    pSource->m_iPublishedCursor = static_cast<plInt64>(uiCursor);
 
     const ma_result formatResult = ma_data_source_get_data_format(pInner, &pSource->m_eFormat, &pSource->m_uiChannels, nullptr, nullptr, 0);
     if (formatResult != MA_SUCCESS)
@@ -362,28 +385,106 @@ ma_uint64 plPlasmaAudioEventInstance::RollRetriggerGap(const plAudioEventInstrum
   return ToFrames(plTime::MakeFromSeconds(fGap));
 }
 
+double plPlasmaAudioEventInstance::GetSourceFramesPerEngineFrame(const Voice& voice) const
+{
+  const double fPitch = plMath::Max(static_cast<double>(voice.m_fBasePitch * m_fCurrentPitchMultiplier), 0.01);
+  return fPitch * static_cast<double>(voice.m_uiSourceSampleRate) / static_cast<double>(m_uiSampleRate);
+}
+
+void plPlasmaAudioEventInstance::AdvanceVirtualCursor(Voice& voice, ma_uint64 uiNow) const
+{
+  // the timeline does not move before the voice's start frame
+  const ma_uint64 uiFrom = plMath::Max(voice.m_uiVirtualCursorFrame, voice.m_uiStartFrame);
+  if (uiNow > uiFrom && voice.m_uiSourceSampleRate > 0)
+  {
+    voice.m_fVirtualCursor += static_cast<double>(uiNow - uiFrom) * GetSourceFramesPerEngineFrame(voice);
+  }
+
+  voice.m_uiVirtualCursorFrame = plMath::Max(voice.m_uiVirtualCursorFrame, uiNow);
+}
+
 ma_uint64 plPlasmaAudioEventInstance::EstimateVoiceEndFrame(const Voice& voice, ma_uint64 uiNow) const
 {
   if (!voice.m_bActive || voice.m_bNativeLoop || voice.m_uiLengthSourceFrames == 0 || voice.m_uiSourceSampleRate == 0)
     return UnknownFrame;
 
-  const double fRateRatio = static_cast<double>(m_uiSampleRate) / static_cast<double>(voice.m_uiSourceSampleRate);
-  const float fPitchNow = voice.m_fBasePitch * m_fCurrentPitchMultiplier;
-  const double fPitch = plMath::Max(static_cast<double>(fPitchNow), 0.01);
+  const double fFramesPerEngineFrame = GetSourceFramesPerEngineFrame(voice);
+  const double fLength = static_cast<double>(voice.m_uiLengthSourceFrames);
 
-  // unchanged pitch (or not yet playing): exact frame arithmetic from the start frame; a virtual voice has no cursor
-  // and uses the same arithmetic with the current pitch
-  if (fPitchNow == voice.m_fStartPitch || uiNow <= voice.m_uiStartFrame || voice.m_pInner == nullptr)
+  auto EndFrom = [&](ma_uint64 uiFrame, double fSourceFramesLeft)
   {
-    return voice.m_uiStartFrame + static_cast<ma_uint64>(static_cast<double>(voice.m_uiLengthSourceFrames) * fRateRatio / fPitch + 0.5);
+    return uiFrame + static_cast<ma_uint64>(plMath::Max(fSourceFramesLeft, 0.0) / fFramesPerEngineFrame + 0.5);
+  };
+
+  // not playing yet: the whole length at the current pitch
+  if (uiNow <= voice.m_uiStartFrame)
+    return EndFrom(voice.m_uiStartFrame, fLength);
+
+  // virtual: the cursor Update advances, carried on to now
+  if (voice.m_bVirtual)
+  {
+    const ma_uint64 uiFrom = plMath::Max(voice.m_uiVirtualCursorFrame, voice.m_uiStartFrame);
+    const double fCursor = voice.m_fVirtualCursor + ((uiNow > uiFrom) ? static_cast<double>(uiNow - uiFrom) * fFramesPerEngineFrame : 0.0);
+    return EndFrom(uiNow, fLength - fCursor);
   }
 
-  ma_uint64 uiCursor = 0;
-  if (voice.m_pInner == nullptr || ma_data_source_get_cursor_in_pcm_frames(voice.m_pInner, &uiCursor) != MA_SUCCESS)
-    return UnknownFrame;
+  if (!voice.m_bSourceValid)
+    return EndFrom(voice.m_uiStartFrame, fLength);
 
-  const ma_uint64 uiRemaining = (uiCursor < voice.m_uiLengthSourceFrames) ? (voice.m_uiLengthSourceFrames - uiCursor) : 0;
-  return uiNow + static_cast<ma_uint64>(static_cast<double>(uiRemaining) * fRateRatio / fPitch + 0.5);
+  // Unchanged pitch: exact frame arithmetic from the start frame, delayed by the silence a starved stream played (the
+  // stream resumes where it stopped). Otherwise the cursor the device thread published, at the current pitch.
+  const double fStarved = static_cast<double>(static_cast<plInt64>(voice.m_Source.m_iStarvedFrames));
+  if (voice.m_fBasePitch * m_fCurrentPitchMultiplier == voice.m_fStartPitch)
+    return EndFrom(voice.m_uiStartFrame, fLength + fStarved);
+
+  const double fCursor = static_cast<double>(static_cast<plInt64>(voice.m_Source.m_iPublishedCursor));
+  return EndFrom(uiNow, fLength - fCursor);
+}
+
+float plPlasmaAudioEventInstance::GetDistanceFade() const
+{
+  if (m_pResource == nullptr || m_pEntity == nullptr || m_pEntity->m_bGlobalEntity)
+    return 1.0f;
+
+  const auto& desc = m_pResource->GetDescriptor();
+  if (!desc.m_bSpatialize || desc.m_fMaxDistance <= desc.m_fMinDistance)
+    return 1.0f;
+
+  // the last 15 % of [min, max] fade linearly to silence, which is where the voice manager virtualizes the event
+  constexpr float fFadeShare = 0.15f;
+  const float fDistance = (m_pEntity->m_LastTransform.m_vPosition - m_vListenerPos).GetLength();
+  const float fRange = desc.m_fMaxDistance - desc.m_fMinDistance;
+  const float fFadeStart = desc.m_fMaxDistance - fFadeShare * fRange;
+
+  if (fDistance <= fFadeStart)
+    return 1.0f;
+
+  return plMath::Clamp((desc.m_fMaxDistance - fDistance) / (fFadeShare * fRange), 0.0f, 1.0f);
+}
+
+void plPlasmaAudioEventInstance::SelectListener(plArrayPtr<const plVec3> listeners)
+{
+  if (listeners.IsEmpty())
+    return;
+
+  if (m_pEntity == nullptr || m_pEntity->m_bGlobalEntity)
+  {
+    m_vListenerPos = listeners[0];
+    return;
+  }
+
+  const plVec3 vEntity = m_pEntity->m_LastTransform.m_vPosition;
+  float fClosest = plMath::MaxValue<float>();
+
+  for (const plVec3& vListener : listeners)
+  {
+    const float fDistanceSq = (vEntity - vListener).GetLengthSquared();
+    if (fDistanceSq < fClosest)
+    {
+      fClosest = fDistanceSq;
+      m_vListenerPos = vListener;
+    }
+  }
 }
 
 void plPlasmaAudioEventInstance::ApplyGlobalParameters()
@@ -468,7 +569,10 @@ plResult plPlasmaAudioEventInstance::InitClipSource(Voice& voice, const plAudioC
     if (state == plResourceState::LoadedResourceMissing)
       return PL_FAILURE;
 
-    plResourceManager::PreloadResource(hClip);
+    if (m_pDeferredLoads != nullptr)
+    {
+      m_pDeferredLoads->Preload(hClip);
+    }
     out_bNotLoaded = true;
     return PL_FAILURE;
   }
@@ -477,10 +581,10 @@ plResult plPlasmaAudioEventInstance::InitClipSource(Voice& voice, const plAudioC
   // in the previous language and is reloaded before it plays. Clips with a single language sound the same in every
   // language. When the clip cannot be reloaded (created from memory) it plays as it is.
   if (pClip->GetLanguageGeneration() != plAudioClipResourceLoader::GetLanguageGeneration() && pClip->GetHeader().m_Languages.GetCount() > 1 &&
-      plResourceManager::ReloadResource(hClip, true))
+      pClip->GetBaseResourceFlags().IsSet(plResourceFlags::IsReloadable) && m_pDeferredLoads != nullptr)
   {
     plResourceManager::EndAcquireResource(pClip);
-    plResourceManager::PreloadResource(hClip);
+    m_pDeferredLoads->Reload(hClip);
     out_bNotLoaded = true;
     return PL_FAILURE;
   }
@@ -561,7 +665,10 @@ void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSl
       }
 
       // the clip is still loading: try again one look-ahead span later
-      plResourceManager::PreloadResource(hClip);
+      if (m_pDeferredLoads != nullptr)
+      {
+        m_pDeferredLoads->Preload(hClip);
+      }
       state.m_uiNextTriggerFrame = uiStartFrame + plPlasmaAudioEventManager::GetLookAheadFrames(m_pEngine);
       state.m_bPendingTrigger = true;
       return;
@@ -649,6 +756,8 @@ void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSl
     voice.m_hClip = hClip;
     voice.m_uiStartFrame = uiStartFrame;
     voice.m_fStartPitch = voice.m_fBasePitch * m_fCurrentPitchMultiplier;
+    voice.m_fVirtualCursor = 0.0;
+    voice.m_uiVirtualCursorFrame = uiStartFrame;
     voice.m_bVirtual = true;
     voice.m_bActive = true;
     state.m_uiCurrentSlot = static_cast<plUInt8>(uiSlot);
@@ -847,12 +956,12 @@ plPlasmaAudioEventInstance::BuildResult plPlasmaAudioEventInstance::BuildVoiceCh
   // "PlasmaAudio/miniaudio" allocator for the backend's engine); the same callbacks uninitialize them.
   ma_node* pCurrent = reinterpret_cast<ma_node*>(&voice.m_Sound);
 
-  const ma_lpf_node_config lpfCfg = ma_lpf_node_config_init(ma_engine_get_channels(m_pEngine), ma_engine_get_sample_rate(m_pEngine), GetOcclusionCutoff(), 2);
-  if (ma_lpf_node_init(ma_engine_get_node_graph(m_pEngine), &lpfCfg, &m_pEngine->allocationCallbacks, &voice.m_OcclusionLpf) == MA_SUCCESS)
+  // the occlusion filter's cutoff follows the occlusion through atomics the device thread applies (plMaFilterNode)
+  if (plMiniAudioDsp::InitFilterNode(m_pEngine, &voice.m_OcclusionFilter, plMaFilterNode::Type::LowPass, 2, GetOcclusionCutoff(), 2, 0.0f, 1.0f, &m_pEngine->allocationCallbacks).Succeeded())
   {
     voice.m_bOcclusionLpfValid = true;
-    ma_node_attach_output_bus(pCurrent, 0, reinterpret_cast<ma_node*>(&voice.m_OcclusionLpf), 0);
-    pCurrent = reinterpret_cast<ma_node*>(&voice.m_OcclusionLpf);
+    ma_node_attach_output_bus(pCurrent, 0, reinterpret_cast<ma_node*>(&voice.m_OcclusionFilter), 0);
+    pCurrent = reinterpret_cast<ma_node*>(&voice.m_OcclusionFilter);
   }
 
   // environment splitter only when the mixer actually has environment aux buses
@@ -994,6 +1103,10 @@ void plPlasmaAudioEventInstance::VirtualizeVoice(plUInt32 uiVoice)
   const ma_uint64 uiNow = ma_engine_get_time_in_pcm_frames(m_pEngine);
   const ma_uint64 uiFadeFrames = ToFrames(VirtualFadeDuration);
 
+  // the timeline continues from where the device thread last read the data (or from the start, when it has not begun)
+  voice.m_fVirtualCursor = (voice.m_bSourceValid && voice.m_uiStartFrame <= uiNow) ? static_cast<double>(static_cast<plInt64>(voice.m_Source.m_iPublishedCursor)) : 0.0;
+  voice.m_uiVirtualCursorFrame = plMath::Max(uiNow, voice.m_uiStartFrame);
+
   voice.m_bVirtual = true;
   voice.m_uiLastFlipFrame = uiNow;
 
@@ -1047,9 +1160,16 @@ bool plPlasmaAudioEventInstance::RealizeVoice(plUInt32 uiVoice)
 
   if (!bRestart && uiResume > voice.m_uiStartFrame && voice.m_uiSourceSampleRate > 0)
   {
-    const float fPitchNow = voice.m_fBasePitch * m_fCurrentPitchMultiplier;
-    const double fSourceFramesPerEngineFrame = static_cast<double>(plMath::Max(fPitchNow, 0.01f)) * static_cast<double>(voice.m_uiSourceSampleRate) / static_cast<double>(m_uiSampleRate);
-    uiCursor = static_cast<ma_uint64>(static_cast<double>(uiResume - voice.m_uiStartFrame) * fSourceFramesPerEngineFrame + 0.5);
+    // the cursor integrated over the pitch history up to now, carried on to the resume frame at the current pitch
+    AdvanceVirtualCursor(voice, uiNow);
+
+    const ma_uint64 uiCursorFrom = plMath::Max(uiNow, voice.m_uiStartFrame);
+    double fCursor = voice.m_fVirtualCursor;
+    if (uiResume > uiCursorFrom)
+    {
+      fCursor += static_cast<double>(uiResume - uiCursorFrom) * GetSourceFramesPerEngineFrame(voice);
+    }
+    uiCursor = static_cast<ma_uint64>(fCursor + 0.5);
 
     if (voice.m_bNativeLoop)
     {
@@ -1186,10 +1306,11 @@ void plPlasmaAudioEventInstance::ReleaseVoiceChain(Voice& voice)
     ma_splitter_node_uninit(&voice.m_EnvSplitter, &m_pEngine->allocationCallbacks);
     voice.m_bEnvSplitterValid = false;
   }
+  voice.m_pEnvAux = nullptr;
 
   if (voice.m_bOcclusionLpfValid)
   {
-    ma_lpf_node_uninit(&voice.m_OcclusionLpf, &m_pEngine->allocationCallbacks);
+    plMiniAudioDsp::UninitFilterNode(&voice.m_OcclusionFilter);
     voice.m_bOcclusionLpfValid = false;
   }
 
@@ -1319,6 +1440,23 @@ void plPlasmaAudioEventInstance::SetParameter(plStringView sName, float fValue)
   m_ParameterLocal[uiParam] = true;
 }
 
+void plPlasmaAudioEventInstance::ResetParameter(plStringView sName)
+{
+  if (m_pResource == nullptr)
+    return;
+
+  const auto& desc = m_pResource->GetDescriptor();
+  const plUInt32 uiParam = desc.FindParameterByName(sName);
+
+  if (uiParam == plInvalidIndex || uiParam >= m_ParameterValues.GetCount())
+    return;
+
+  // the default now; a global parameter of the same name takes over below and in every Update
+  m_ParameterValues[uiParam] = desc.m_Parameters[uiParam].m_fDefault;
+  m_ParameterLocal[uiParam] = false;
+  ApplyGlobalParameters();
+}
+
 void plPlasmaAudioEventInstance::ApplyModulation()
 {
   const auto& desc = m_pResource->GetDescriptor();
@@ -1354,6 +1492,9 @@ void plPlasmaAudioEventInstance::ApplyModulation()
     fVolume *= plMath::Max(m_pEntity->m_fVolumeMultiplier, 0.0f);
     fPitch *= plMath::Clamp(m_pEntity->m_fPitchMultiplier, 0.01f, 10.0f);
   }
+
+  // fades to silence toward the max distance, where the audibility reaches 0 and the voice is virtualized
+  fVolume *= GetDistanceFade();
 
   m_fCurrentVolumeMultiplier = fVolume;
   m_fCurrentPitchMultiplier = fPitch;
@@ -1470,18 +1611,27 @@ void plPlasmaAudioEventInstance::AppendSnapshotVoices(plDynamicArray<plAudioVoic
   }
 }
 
-bool plPlasmaAudioEventInstance::Update(plTime delta, const plVec3& vListenerPos, plRandom& ref_rng)
+bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> listeners, plRandom& ref_rng)
 {
   if (m_pResource == nullptr)
     return false;
 
   m_Elapsed += delta;
-  m_vListenerPos = vListenerPos;
+  SelectListener(listeners);
 
   const auto& desc = m_pResource->GetDescriptor();
 
   const ma_uint64 uiNow = ma_engine_get_time_in_pcm_frames(m_pEngine);
   const ma_uint64 uiHorizon = uiNow + plPlasmaAudioEventManager::GetLookAheadFrames(m_pEngine);
+
+  // virtual timelines advance at the pitch that applied since the last update, before this update changes it
+  for (auto& voice : m_Voices)
+  {
+    if (voice.m_bActive && voice.m_bVirtual)
+    {
+      AdvanceVirtualCursor(voice, uiNow);
+    }
+  }
 
   // smooth occlusion state on the entity (shared by all instances on it; cheap to repeat)
   if (m_pEntity != nullptr)
@@ -1500,7 +1650,7 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, const plVec3& vListenerPos
     const plUInt32 uiDistanceParam = desc.FindParameterByName("Distance");
     if (uiDistanceParam != plInvalidIndex && uiDistanceParam < m_ParameterValues.GetCount())
     {
-      const float fDistance = (m_pEntity->m_LastTransform.m_vPosition - vListenerPos).GetLength();
+      const float fDistance = (m_pEntity->m_LastTransform.m_vPosition - m_vListenerPos).GetLength();
       m_ParameterValues[uiDistanceParam] = plMath::Clamp(fDistance, desc.m_Parameters[uiDistanceParam].m_fMin, desc.m_Parameters[uiDistanceParam].m_fMax);
     }
   }
@@ -1609,11 +1759,10 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, const plVec3& vListenerPos
           ma_sound_set_pitch(&voice.m_Sound, voice.m_fBasePitch * m_fCurrentPitchMultiplier);
         }
 
-        // occlusion low-pass
+        // occlusion low-pass; unchanged cutoffs are not passed on
         if (voice.m_bOcclusionLpfValid)
         {
-          const ma_lpf_config lpfCfg = ma_lpf_config_init(ma_format_f32, ma_engine_get_channels(m_pEngine), ma_engine_get_sample_rate(m_pEngine), fOcclusionCutoff, 2);
-          ma_lpf_node_reinit(&lpfCfg, &voice.m_OcclusionLpf);
+          plMiniAudioDsp::SetFilter(&voice.m_OcclusionFilter, fOcclusionCutoff, 2, 0.0f, 1.0f);
         }
 
         // environment send
@@ -1625,7 +1774,12 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, const plVec3& vListenerPos
           {
             if (ma_sound_group* pAux = m_pBusGraph->GetEnvironmentAuxBus(pDominantEnv->m_sName))
             {
-              ma_node_attach_output_bus(pSplitter, 1, reinterpret_cast<ma_node*>(pAux), 0);
+              // re-attaching is only needed when the dominant environment changed
+              if (voice.m_pEnvAux != pAux)
+              {
+                ma_node_attach_output_bus(pSplitter, 1, reinterpret_cast<ma_node*>(pAux), 0);
+                voice.m_pEnvAux = pAux;
+              }
               ma_node_set_output_bus_volume(pSplitter, 1, plMath::Clamp(pDominantEnv->m_fAmount, 0.0f, 1.0f));
             }
           }
@@ -1739,7 +1893,7 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, const plVec3& vListenerPos
     }
   }
 
-  m_fDistance = (m_pEntity != nullptr) ? (m_pEntity->m_LastTransform.m_vPosition - vListenerPos).GetLength() : 0.0f;
+  m_fDistance = (m_pEntity != nullptr) ? (m_pEntity->m_LastTransform.m_vPosition - m_vListenerPos).GetLength() : 0.0f;
   m_fAudibility = ComputeAudibility(bAnyVoice ? fMaxBaseVolume : 1.0f);
 
   return bAnyActive || bAnyPending || bHoldOpen;
@@ -1820,7 +1974,7 @@ plPlasmaAudioEventManager::~plPlasmaAudioEventManager()
 {
   plResourceManager::GetResourceEvents().RemoveEventHandler(m_ResourceEventSubscription);
 
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
   m_Instances.Clear();
   m_FreeInstances.Clear();
 }
@@ -1864,8 +2018,9 @@ void plPlasmaAudioEventManager::OnResourceEvent(const plResourceEvent& e)
   if (!bClip && !pType->IsDerivedFrom<plAudioEventResource>())
     return;
 
-  // already held by the resource manager while it broadcasts; taken again in case an unload path does not hold it
-  PL_LOCK(plResourceManager::GetMutex());
+  // The resource manager holds its own mutex while it broadcasts; that mutex is always taken before this one (see the
+  // class description). Waits for the audio thread's update of the instances, which never waits for the resource manager.
+  PL_LOCK(m_Mutex);
 
   for (auto& pInstance : m_Instances)
   {
@@ -1880,13 +2035,207 @@ void plPlasmaAudioEventManager::OnResourceEvent(const plResourceEvent& e)
   }
 }
 
+namespace
+{
+  /// The loading state of a resource; PointerOnly never blocks or takes the resource manager's mutex.
+  template <typename ResourceType>
+  plResourceState GetLoadingState(const plTypedResourceHandle<ResourceType>& hResource)
+  {
+    ResourceType* pResource = plResourceManager::BeginAcquireResource(hResource, plResourceAcquireMode::PointerOnly);
+    const plResourceState state = pResource->GetLoadingState();
+    plResourceManager::EndAcquireResource(pResource);
+    return state;
+  }
+} // namespace
+
+void plPlasmaAudioDeferredLoads::Preload(const plAudioClipResourceHandle& hClip)
+{
+  if (!m_Preload.Contains(hClip))
+  {
+    m_Preload.PushBack(hClip);
+  }
+}
+
+void plPlasmaAudioDeferredLoads::Reload(const plAudioClipResourceHandle& hClip)
+{
+  if (!m_Reload.Contains(hClip))
+  {
+    m_Reload.PushBack(hClip);
+  }
+}
+
 plResult plPlasmaAudioEventManager::ActivateEvent(plStringView sEventResourceId, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine)
 {
   const plAudioEventResourceHandle hEvent = plResourceManager::LoadResource<plAudioEventResource>(sEventResourceId);
   if (!hEvent.IsValid())
     return PL_FAILURE;
 
-  return ActivateEventInternal(hEvent, sEventResourceId, pEntity, pEventData, pBusGraph, pEngine);
+  const plResourceState state = GetLoadingState(hEvent);
+
+  if (state == plResourceState::LoadedResourceMissing)
+    return PL_FAILURE;
+
+  if (state != plResourceState::Loaded)
+  {
+    // the audio thread does not wait for the file: the start is queued until the event is loaded
+    plResourceManager::PreloadResource(hEvent);
+
+    PendingActivation activation;
+    activation.m_hEvent = hEvent;
+    activation.m_sEventId = sEventResourceId;
+    activation.m_pEntity = pEntity;
+    activation.m_pEventData = pEventData;
+    activation.m_pBusGraph = pBusGraph;
+    activation.m_pEngine = pEngine;
+    QueuePendingActivation(std::move(activation));
+    return PL_SUCCESS;
+  }
+
+  const plResult result = ActivateEventInternal(hEvent, sEventResourceId, pEntity, pEventData, pBusGraph, pEngine);
+  FlushDeferredLoads();
+  return result;
+}
+
+void plPlasmaAudioEventManager::QueuePendingActivation(PendingActivation&& activation)
+{
+  activation.m_RequestTime = m_Now;
+  activation.m_bLooping = activation.m_pEventData != nullptr && activation.m_pEventData->m_bLooping;
+
+  PL_LOCK(m_Mutex);
+
+  m_EventLog.Add(plAudioLogEventType::EventLoadWait, activation.m_sEventId, activation.m_bLooping ? "starts once loaded" : "starts once loaded, within 1 s");
+
+  // the event data now waits for this activation; a start it was still waiting for is replaced
+  if (activation.m_pEventData != nullptr)
+  {
+    for (plUInt32 i = m_PendingActivations.GetCount(); i > 0; --i)
+    {
+      if (m_PendingActivations[i - 1].m_pEventData == activation.m_pEventData)
+      {
+        m_PendingActivations.RemoveAtAndCopy(i - 1);
+      }
+    }
+  }
+
+  m_PendingActivations.PushBack(std::move(activation));
+}
+
+void plPlasmaAudioEventManager::ProcessPendingActivations()
+{
+  // Collected under the mutex, started outside it: starting may create a legacy event resource, which takes the
+  // resource manager's mutex. Everything that changes the pending list runs on the audio thread, as this does.
+  plHybridArray<PendingActivation, 4> ready;
+
+  {
+    PL_LOCK(m_Mutex);
+
+    for (plUInt32 i = 0; i < m_PendingActivations.GetCount();)
+    {
+      PendingActivation& activation = m_PendingActivations[i];
+
+      plResourceState state = plResourceState::Unloaded;
+      if (activation.m_hLegacySound.IsValid())
+      {
+        state = GetLoadingState(activation.m_hLegacySound);
+      }
+      else
+      {
+        state = GetLoadingState(activation.m_hEvent);
+      }
+
+      const bool bExpired = !activation.m_bLooping && (m_Now - activation.m_RequestTime) > MaxPendingStartTime;
+
+      if (state == plResourceState::Loaded || state == plResourceState::LoadedResourceMissing || bExpired)
+      {
+        if (state == plResourceState::Loaded)
+        {
+          ready.PushBack(std::move(activation));
+        }
+        else
+        {
+          m_EventLog.Add(plAudioLogEventType::EventDropped, activation.m_sEventId, bExpired ? "not loaded in time" : "event missing");
+        }
+
+        m_PendingActivations.RemoveAtAndCopy(i);
+      }
+      else
+      {
+        ++i;
+      }
+    }
+  }
+
+  for (PendingActivation& activation : ready)
+  {
+    plAudioEventResourceHandle hEvent = activation.m_hEvent;
+
+    if (activation.m_hLegacySound.IsValid())
+    {
+      hEvent = GetLegacyEvent(activation.m_hLegacySound);
+      if (!hEvent.IsValid())
+        continue;
+    }
+
+    ActivateEventInternal(hEvent, hEvent.GetResourceID(), activation.m_pEntity, activation.m_pEventData, activation.m_pBusGraph, activation.m_pEngine).IgnoreResult();
+  }
+}
+
+void plPlasmaAudioEventManager::FlushDeferredLoads()
+{
+  plPlasmaAudioDeferredLoads loads;
+
+  {
+    PL_LOCK(m_Mutex);
+    if (m_DeferredLoads.IsEmpty())
+      return;
+
+    loads.m_Preload.Swap(m_DeferredLoads.m_Preload);
+    loads.m_Reload.Swap(m_DeferredLoads.m_Reload);
+  }
+
+  // without the manager's mutex: these take the resource manager's mutex, and a reload unloads the clip, which calls
+  // OnResourceEvent and takes the manager's mutex in turn
+  for (const plAudioClipResourceHandle& hClip : loads.m_Reload)
+  {
+    if (plResourceManager::ReloadResource(hClip, true))
+    {
+      plResourceManager::PreloadResource(hClip);
+    }
+  }
+
+  for (const plAudioClipResourceHandle& hClip : loads.m_Preload)
+  {
+    plResourceManager::PreloadResource(hClip);
+  }
+}
+
+plVec3 plPlasmaAudioEventManager::GetClosestListener(const plPlasmaAudioEntityData* pEntity) const
+{
+  if (m_Listeners.IsEmpty())
+    return plVec3::MakeZero();
+
+  if (pEntity == nullptr || pEntity->m_bGlobalEntity)
+    return m_Listeners[0];
+
+  plVec3 vClosest = m_Listeners[0];
+  float fClosest = plMath::MaxValue<float>();
+  for (const plVec3& vListener : m_Listeners)
+  {
+    const float fDistanceSq = (pEntity->m_LastTransform.m_vPosition - vListener).GetLengthSquared();
+    if (fDistanceSq < fClosest)
+    {
+      fClosest = fDistanceSq;
+      vClosest = vListener;
+    }
+  }
+
+  return vClosest;
+}
+
+plUInt32 plPlasmaAudioEventManager::GetPendingActivationCount() const
+{
+  PL_LOCK(m_Mutex);
+  return m_PendingActivations.GetCount();
 }
 
 plResult plPlasmaAudioEventManager::ActivateLegacySound(const plMiniAudioSoundResourceHandle& hSound, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine)
@@ -1894,14 +2243,46 @@ plResult plPlasmaAudioEventManager::ActivateLegacySound(const plMiniAudioSoundRe
   if (!hSound.IsValid())
     return PL_FAILURE;
 
+  const plResourceState state = GetLoadingState(hSound);
+
+  if (state == plResourceState::LoadedResourceMissing)
+    return PL_FAILURE;
+
+  if (state != plResourceState::Loaded)
+  {
+    plResourceManager::PreloadResource(hSound);
+
+    PendingActivation activation;
+    activation.m_hLegacySound = hSound;
+    activation.m_sEventId = hSound.GetResourceID();
+    activation.m_pEntity = pEntity;
+    activation.m_pEventData = pEventData;
+    activation.m_pBusGraph = pBusGraph;
+    activation.m_pEngine = pEngine;
+    QueuePendingActivation(std::move(activation));
+    return PL_SUCCESS;
+  }
+
+  const plAudioEventResourceHandle hEvent = GetLegacyEvent(hSound);
+  if (!hEvent.IsValid())
+    return PL_FAILURE;
+
+  const plResult result = ActivateEventInternal(hEvent, hEvent.GetResourceID(), pEntity, pEventData, pBusGraph, pEngine);
+  FlushDeferredLoads();
+  return result;
+}
+
+plAudioEventResourceHandle plPlasmaAudioEventManager::GetLegacyEvent(const plMiniAudioSoundResourceHandle& hSound)
+{
   const plString sSoundId = hSound.GetResourceID();
 
   plAudioEventResourceHandle hEvent;
   if (!m_LegacyEvents.TryGetValue(sSoundId, hEvent))
   {
-    plResourceLock<plMiniAudioSoundResource> pSound(hSound, plResourceAcquireMode::BlockTillLoaded_NeverFail);
-    if (pSound.GetAcquireResult() != plResourceAcquireResult::Final || pSound->GetNumVariants() == 0)
-      return PL_FAILURE;
+    // the sound is loaded (the caller checked); PointerOnly does not wait
+    plResourceLock<plMiniAudioSoundResource> pSound(hSound, plResourceAcquireMode::PointerOnly);
+    if (pSound->GetLoadingState() != plResourceState::Loaded || pSound->GetNumVariants() == 0)
+      return {};
 
     plAudioEventResourceDescriptor res;
     plAudioEventDesc& desc = res.m_Desc;
@@ -1956,7 +2337,7 @@ plResult plPlasmaAudioEventManager::ActivateLegacySound(const plMiniAudioSoundRe
     m_LegacyEvents.Insert(sSoundId, hEvent);
   }
 
-  return ActivateEventInternal(hEvent, hEvent.GetResourceID(), pEntity, pEventData, pBusGraph, pEngine);
+  return hEvent;
 }
 
 plResult plPlasmaAudioEventManager::ActivateEventInternal(const plAudioEventResourceHandle& hEvent, plStringView sEventResourceId, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine)
@@ -1974,16 +2355,10 @@ plResult plPlasmaAudioEventManager::ActivateEventInternal(const plAudioEventReso
   plAudioEventStealingMode::Enum eStealing = plAudioEventStealingMode::Default;
   plTime cooldown = plTime::MakeZero();
 
-  // loads the resource; this may wait for a loader thread, so it happens before the resource manager mutex is taken
-  {
-    plResourceLock<plAudioEventResource> pResource(hEvent, plResourceAcquireMode::BlockTillLoaded_NeverFail);
-    if (pResource.GetAcquireResult() != plResourceAcquireResult::Final)
-      return PL_FAILURE;
-  }
+  PL_LOCK(m_Mutex);
 
-  PL_LOCK(plResourceManager::GetMutex());
-
-  // the name for log entries; the resource stays alive through hEvent and is not unloaded while the mutex is held
+  // The callers checked the event is loaded. While the mutex is held its content is not freed: the unload handler waits
+  // for the mutex before the resource manager frees anything. The name is for log entries.
   plStringView sLogName = sEventResourceId;
 
   {
@@ -2049,10 +2424,11 @@ plResult plPlasmaAudioEventManager::ActivateEventInternal(const plAudioEventReso
 
         case plAudioEventStealingMode::Quietest:
         {
+          // quietest at the listener: the audibility includes distance, occlusion and bus gains, not only the volume
           plPlasmaAudioEventInstance* pQuietest = groupInstances[0];
           for (auto* pInstance : groupInstances)
           {
-            if (pInstance->GetEffectiveVolume() < pQuietest->GetEffectiveVolume())
+            if (pInstance->GetAudibility() < pQuietest->GetAudibility())
               pQuietest = pInstance;
           }
           m_EventLog.Add(plAudioLogEventType::Stolen, pQuietest->GetDisplayName(), "quietest");
@@ -2069,7 +2445,8 @@ plResult plPlasmaAudioEventManager::ActivateEventInternal(const plAudioEventReso
   pInstance->m_pStreams = m_pStreamService;
   pInstance->m_pVoiceManager = &m_VoiceManager;
   pInstance->m_pEventLog = &m_EventLog;
-  pInstance->m_vListenerPos = m_vListenerPos;
+  pInstance->m_pDeferredLoads = &m_DeferredLoads;
+  pInstance->m_vListenerPos = GetClosestListener(pEntity);
   pInstance->m_uiSerial = m_uiNextInstanceSerial++;
 
   if (pInstance->Start(hEvent, pEntity, pEventData, pBusGraph, pEngine, &m_GlobalParameters, m_Rng).Failed())
@@ -2087,7 +2464,18 @@ plResult plPlasmaAudioEventManager::ActivateEventInternal(const plAudioEventReso
 
 plResult plPlasmaAudioEventManager::StopEvent(const plPlasmaAudioEventData* pEventData, bool bImmediate)
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
+
+  // a start that still waits for its event is simply dropped
+  for (plUInt32 i = 0; i < m_PendingActivations.GetCount(); ++i)
+  {
+    if (m_PendingActivations[i].m_pEventData == pEventData)
+    {
+      m_EventLog.Add(plAudioLogEventType::Stop, m_PendingActivations[i].m_sEventId, "before it was loaded");
+      m_PendingActivations.RemoveAtAndCopy(i);
+      return PL_SUCCESS;
+    }
+  }
 
   for (auto& pInstance : m_Instances)
   {
@@ -2107,9 +2495,26 @@ void plPlasmaAudioEventManager::DetachEventData(plPlasmaAudioEventData* pEventDa
   if (pEventData == nullptr)
     return;
 
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
 
   pEventData->m_pInstance = nullptr;
+
+  // a waiting one-shot still starts, unbound; a waiting looping start would have nothing left to stop it
+  for (plUInt32 i = m_PendingActivations.GetCount(); i > 0; --i)
+  {
+    PendingActivation& activation = m_PendingActivations[i - 1];
+    if (activation.m_pEventData != pEventData)
+      continue;
+
+    if (activation.m_bLooping)
+    {
+      m_PendingActivations.RemoveAtAndCopy(i - 1);
+    }
+    else
+    {
+      activation.m_pEventData = nullptr;
+    }
+  }
 
   for (auto& pInstance : m_Instances)
   {
@@ -2130,7 +2535,15 @@ void plPlasmaAudioEventManager::DetachEventData(plPlasmaAudioEventData* pEventDa
 
 void plPlasmaAudioEventManager::StopAllOnEntity(const plPlasmaAudioEntityData* pEntity, bool bImmediate)
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
+
+  for (plUInt32 i = m_PendingActivations.GetCount(); i > 0; --i)
+  {
+    if (m_PendingActivations[i - 1].m_pEntity == pEntity)
+    {
+      m_PendingActivations.RemoveAtAndCopy(i - 1);
+    }
+  }
 
   for (auto& pInstance : m_Instances)
   {
@@ -2154,7 +2567,7 @@ void plPlasmaAudioEventManager::StopAllOnEntity(const plPlasmaAudioEntityData* p
 
 void plPlasmaAudioEventManager::StopAll(bool bImmediate)
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
 
   // one entry for all instances
   if (!m_Instances.IsEmpty())
@@ -2163,6 +2576,8 @@ void plPlasmaAudioEventManager::StopAll(bool bImmediate)
     sDetail.SetFormat("{} instances, {}", m_Instances.GetCount(), bImmediate ? "immediate" : "fade out");
     m_EventLog.Add(plAudioLogEventType::Stop, "<all>", sDetail);
   }
+
+  m_PendingActivations.Clear();
 
   for (auto& pInstance : m_Instances)
   {
@@ -2185,7 +2600,7 @@ void plPlasmaAudioEventManager::StopAll(bool bImmediate)
 
 void plPlasmaAudioEventManager::SetEventParameter(const plPlasmaAudioEntityData* pEntity, plStringView sParamName, float fValue)
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
 
   for (auto& pInstance : m_Instances)
   {
@@ -2196,9 +2611,28 @@ void plPlasmaAudioEventManager::SetEventParameter(const plPlasmaAudioEntityData*
   }
 }
 
+void plPlasmaAudioEventManager::ResetEventParameter(const plPlasmaAudioEntityData* pEntity, plStringView sParamName)
+{
+  PL_LOCK(m_Mutex);
+
+  for (auto& pInstance : m_Instances)
+  {
+    if (pInstance->m_pEntity == pEntity)
+    {
+      pInstance->ResetParameter(sParamName);
+    }
+  }
+}
+
 bool plPlasmaAudioEventManager::IsEventPlaying(const plPlasmaAudioEventData* pEventData) const
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
+
+  for (const PendingActivation& activation : m_PendingActivations)
+  {
+    if (activation.m_pEventData == pEventData)
+      return true;
+  }
 
   for (const auto& pInstance : m_Instances)
   {
@@ -2209,12 +2643,37 @@ bool plPlasmaAudioEventManager::IsEventPlaying(const plPlasmaAudioEventData* pEv
   return false;
 }
 
-void plPlasmaAudioEventManager::Update(plTime delta, const plVec3& vListenerPos)
+void plPlasmaAudioEventManager::Update(plTime delta, plArrayPtr<const plVec3> listeners)
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  {
+    PL_LOCK(m_Mutex);
 
-  m_Now += delta;
-  m_vListenerPos = vListenerPos;
+    m_Now += delta;
+
+    if (!listeners.IsEmpty())
+    {
+      m_Listeners.Clear();
+      for (const plVec3& vListener : listeners)
+      {
+        m_Listeners.PushBack(vListener);
+      }
+    }
+  }
+
+  // starts whose events finished loading; outside the mutex, which ActivateEventInternal takes itself
+  ProcessPendingActivations();
+
+  UpdateInstances(delta);
+
+  // the clip loads the instances asked for, without the mutex (see the class description)
+  FlushDeferredLoads();
+}
+
+void plPlasmaAudioEventManager::UpdateInstances(plTime delta)
+{
+  PL_LOCK(m_Mutex);
+
+  const plArrayPtr<const plVec3> listeners = m_Listeners.GetArrayPtr();
 
   // The ranking of the last update stays in use while the instances update, so voices that start in their updates are
   // admitted against it; RecycleInstance drops the candidates of each finished instance.
@@ -2223,7 +2682,7 @@ void plPlasmaAudioEventManager::Update(plTime delta, const plVec3& vListenerPos)
 
     for (plUInt32 i = 0; i < m_Instances.GetCount();)
     {
-      if (!m_Instances[i]->Update(delta, vListenerPos, m_Rng))
+      if (!m_Instances[i]->Update(delta, listeners, m_Rng))
       {
         plStringBuilder sDetail;
         sDetail.SetFormat("after {} s", plArgF(m_Instances[i]->GetAge().GetSeconds(), 2));
@@ -2262,7 +2721,7 @@ void plPlasmaAudioEventManager::Update(plTime delta, const plVec3& vListenerPos)
 
 plUInt32 plPlasmaAudioEventManager::GetRealVoiceCount() const
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
 
   plUInt32 uiCount = 0;
   for (const auto& pInstance : m_Instances)
@@ -2274,7 +2733,7 @@ plUInt32 plPlasmaAudioEventManager::GetRealVoiceCount() const
 
 plUInt32 plPlasmaAudioEventManager::GetVirtualVoiceCount() const
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
 
   plUInt32 uiCount = 0;
   for (const auto& pInstance : m_Instances)
@@ -2286,7 +2745,7 @@ plUInt32 plPlasmaAudioEventManager::GetVirtualVoiceCount() const
 
 void plPlasmaAudioEventManager::GetEventVoiceCounts(const plPlasmaAudioEventData* pEventData, plUInt32& out_uiReal, plUInt32& out_uiVirtual) const
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
 
   out_uiReal = 0;
   out_uiVirtual = 0;
@@ -2303,13 +2762,13 @@ void plPlasmaAudioEventManager::GetEventVoiceCounts(const plPlasmaAudioEventData
 
 plUInt64 plPlasmaAudioEventManager::GetVoiceFlipCount() const
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
   return m_VoiceManager.GetFlipCount();
 }
 
 void plPlasmaAudioEventManager::FillSnapshot(plAudioProfilingSnapshot& out_snapshot) const
 {
-  PL_LOCK(plResourceManager::GetMutex());
+  PL_LOCK(m_Mutex);
 
   out_snapshot.m_uiMaxReal = plAudioVoiceManager::GetMaxRealVoices();
   out_snapshot.m_uiMaxVirtual = plAudioVoiceManager::GetMaxVirtualVoices();

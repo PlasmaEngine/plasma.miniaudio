@@ -2,6 +2,7 @@
 
 #include <AudioSystem/Mixer/AudioMixerData.h>
 #include <Foundation/Containers/HybridArray.h>
+#include <Foundation/Threading/AtomicInteger.h>
 #include <MiniAudio/miniaudio.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
 
@@ -40,12 +41,12 @@ struct plMaReverbNode
   ma_node_base m_Base; // must be first
   plUInt32 m_uiChannels = 0;
 
-  // parameters (audio-thread written, mixer-thread written — floats, tolerated)
-  float m_fRoomSize = 0.5f;
-  float m_fDamping = 0.5f;
-  float m_fWidth = 1.0f;
-  float m_fWet = 1.0f;
-  float m_fDry = 0.0f;
+  // parameters: written by the audio thread, read once per processed chunk by the device thread
+  std::atomic<float> m_fRoomSize = 0.5f;
+  std::atomic<float> m_fDamping = 0.5f;
+  std::atomic<float> m_fWidth = 1.0f; ///< stereo spread of the wet signal between channel pairs (0 = mono, 1 = full)
+  std::atomic<float> m_fWet = 1.0f;
+  std::atomic<float> m_fDry = 0.0f;
 
   // per channel: NumCombs combs + NumAllpasses allpasses
   Comb* m_pCombs = nullptr;         // [channels * NumCombs]
@@ -59,16 +60,98 @@ struct plMaCompressorNode
   plUInt32 m_uiChannels = 0;
   plUInt32 m_uiSampleRate = 48000;
 
-  float m_fThresholdDb = -18.0f;
-  float m_fRatio = 3.0f;
-  float m_fAttackMs = 10.0f;
-  float m_fReleaseMs = 120.0f;
-  float m_fMakeupDb = 0.0f;
+  // parameters: written by the audio thread, read once per processed chunk by the device thread
+  std::atomic<float> m_fThresholdDb = -18.0f;
+  std::atomic<float> m_fRatio = 3.0f;
+  std::atomic<float> m_fAttackMs = 10.0f;
+  std::atomic<float> m_fReleaseMs = 120.0f;
+  std::atomic<float> m_fMakeupDb = 0.0f;
 
   /// \brief When true the node acts as a hard limiter: m_fThresholdDb is the ceiling, ratio is ignored.
   bool m_bLimiter = false;
 
-  float m_fEnvelope = 0.0f;
+  float m_fEnvelope = 0.0f; ///< device thread only
+};
+
+/// \brief A biquad-based filter (low pass and high pass of order 1..8, low shelf, peak, high shelf) whose settings can
+/// change while it plays.
+///
+/// Set...() stores the new settings and bumps a generation counter; the device thread applies them at the start of the
+/// next chunk it processes, so the filter state is never touched from another thread. A changed frequency, gain or Q
+/// recomputes the coefficients and keeps the filter state; a changed low/high pass order re-initializes the filter in
+/// memory reserved for the maximum order at init, without allocating. The setters must be called from one thread.
+struct plMaFilterNode
+{
+  enum class Type : plUInt8
+  {
+    LowPass,
+    HighPass,
+    LowShelf,
+    Peak,
+    HighShelf,
+  };
+
+  static constexpr plUInt32 MaxOrder = 8;
+
+  /// filter heap that fits a 2nd order low/high pass of up to 8 channels; larger ones are allocated at init
+  static constexpr plUInt32 InlineHeapBytes = 1024;
+
+  ma_node_base m_Base; // must be first
+  Type m_eType = Type::LowPass;
+  plUInt32 m_uiChannels = 0;
+  plUInt32 m_uiSampleRate = 48000;
+  plUInt32 m_uiMaxOrder = 2;
+
+  // settings: stored by the writer, applied by the device thread when m_uiGeneration changed
+  plAtomicInteger32 m_iFrequencyBits; ///< float bits, Hz
+  plAtomicInteger32 m_iGainDbBits;    ///< float bits, shelves and peak only
+  plAtomicInteger32 m_iQBits;         ///< float bits, peak only
+  plAtomicInteger32 m_iOrder;         ///< low and high pass only, 1..m_uiMaxOrder
+  plAtomicInteger32 m_iGeneration;
+
+  // device thread
+  plInt32 m_iAppliedGeneration = 0;
+  plUInt32 m_uiAppliedOrder = 0;
+
+  // writer thread: the last stored values, so unchanged settings are not re-applied
+  float m_fLastFrequency = -1.0f;
+  float m_fLastGainDb = 0.0f;
+  float m_fLastQ = 0.0f;
+  plUInt32 m_uiLastOrder = 0;
+
+  void* m_pHeap = nullptr;          ///< filter heap: m_InlineHeap or allocated with m_AllocationCallbacks
+  ma_allocation_callbacks m_AllocationCallbacks = {};
+  alignas(16) plUInt8 m_InlineHeap[InlineHeapBytes];
+
+  union
+  {
+    ma_lpf m_Lpf;
+    ma_hpf m_Hpf;
+    ma_loshelf2 m_LoShelf;
+    ma_peak2 m_Peak;
+    ma_hishelf2 m_HiShelf;
+  };
+
+  bool m_bValid = false;
+};
+
+/// \brief A feedback delay whose delay time can change while it plays (up to the maximum given at init).
+struct plMaDelayNode
+{
+  ma_node_base m_Base; // must be first
+  plUInt32 m_uiChannels = 0;
+  plUInt32 m_uiSampleRate = 48000;
+  plUInt32 m_uiMaxDelayFrames = 0;
+
+  // parameters: written by the audio thread, read once per processed chunk by the device thread
+  std::atomic<plUInt32> m_uiDelayFrames = 1;
+  std::atomic<float> m_fFeedback = 0.3f;
+  std::atomic<float> m_fWet = 0.35f;
+  std::atomic<float> m_fDry = 1.0f;
+
+  // device thread
+  float* m_pBuffer = nullptr; ///< m_uiMaxDelayFrames frames, interleaved
+  plUInt32 m_uiWriteFrame = 0;
 };
 
 /// \brief Source node fed with PCM by a producer thread (a video decoder) through a ring buffer.
@@ -142,15 +225,36 @@ namespace plMiniAudioDsp
 
   plResult InitCompressorNode(ma_engine* pEngine, plMaCompressorNode* pNode, bool bLimiter);
   void UninitCompressorNode(plMaCompressorNode* pNode);
+
+  /// \brief Initializes the filter with its first settings. uiMaxOrder bounds the low / high pass order the filter can
+  /// later be set to. pCallbacks (may be null for miniaudio's default heap) allocates the node and a filter heap that
+  /// does not fit inline; the node keeps them for UninitFilterNode.
+  PL_PLASMAAUDIOPLUGIN_DLL plResult InitFilterNode(ma_engine* pEngine, plMaFilterNode* pNode, plMaFilterNode::Type type, plUInt32 uiMaxOrder, float fFrequency, plUInt32 uiOrder, float fGainDb, float fQ, const ma_allocation_callbacks* pCallbacks);
+  PL_PLASMAAUDIOPLUGIN_DLL void UninitFilterNode(plMaFilterNode* pNode);
+
+  /// \brief Changes the settings of a playing filter (see plMaFilterNode). Settings equal to the last ones are ignored;
+  /// uiOrder is clamped to the node's maximum order. One writer thread only.
+  PL_PLASMAAUDIOPLUGIN_DLL void SetFilter(plMaFilterNode* pNode, float fFrequency, plUInt32 uiOrder, float fGainDb, float fQ);
+
+  /// \brief Initializes the delay with room for uiMaxDelayFrames frames of delay.
+  plResult InitDelayNode(ma_engine* pEngine, plMaDelayNode* pNode, plUInt32 uiMaxDelayFrames);
+  void UninitDelayNode(plMaDelayNode* pNode);
 } // namespace plMiniAudioDsp
 
 /// \brief One instantiated insert effect: owns the miniaudio node(s) realizing a plAudioEffectDesc.
 ///
 /// Effects are node chains of their own (Eq3 uses three filter nodes); GetHead()/GetTail()
-/// expose the ends for splicing into a bus or voice chain.
+/// expose the ends for splicing into a bus or voice chain. An effect whose creation failed has no nodes: it keeps its
+/// slot on the bus (so effect indices stay as authored) and acts as a bypass.
+///
+/// Parameter changes reach the device thread through the nodes' atomics; nothing the device thread reads is modified
+/// in place.
 class plMiniAudioEffect
 {
 public:
+  /// \brief Longest delay a Delay effect can be set to while it plays (or its authored delay, when longer).
+  static constexpr float MaxLiveDelayMs = 2000.0f;
+
   plResult Create(ma_engine* pEngine, const plAudioEffectDesc& desc);
   void Destroy();
 
@@ -163,7 +267,8 @@ public:
   plAudioEffectType::Enum GetType() const { return m_eType; }
 
 private:
-  void ReinitFilters();
+  /// \brief Pushes the current m_fParams to the filter nodes of a LowPass, HighPass or Eq3 effect.
+  void ApplyFilterParams();
 
   plAudioEffectType::Enum m_eType = plAudioEffectType::Default;
   float m_fParams[plAudioEffectMaxParams] = {};

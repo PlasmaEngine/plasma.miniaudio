@@ -14,6 +14,15 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
   if (pEngine == nullptr || desc.m_Buses.IsEmpty())
     return PL_FAILURE;
 
+  // mixers transformed by current editors are valid; older content is built anyway, with what the checks below drop
+  {
+    plStringBuilder sErrors;
+    if (desc.Validate(sErrors).Failed())
+    {
+      plLog::Error("PlasmaAudio: the mixer has routing errors; affected parents and sends are not connected:\n{0}", sErrors);
+    }
+  }
+
   m_Desc = desc;
   m_pEngine = pEngine;
 
@@ -42,14 +51,13 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
     const auto& busDesc = desc.m_Buses[i];
     auto& bus = m_Buses[i];
 
-    // effects
+    // effects: a failed one stays in its slot as a bypass, so the effect indices of snapshot overrides stay valid
     for (const auto& effectDesc : busDesc.m_Effects)
     {
       auto& effect = bus.m_Effects.ExpandAndGetRef();
       if (effect.Create(pEngine, effectDesc).Failed())
       {
-        plLog::Warning("MiniAudio: failed to create insert effect {0} on bus '{1}' — skipping.", bus.m_Effects.GetCount() - 1, busDesc.m_sName);
-        bus.m_Effects.PopBack();
+        plLog::Warning("PlasmaAudio: insert effect {0} on bus '{1}' could not be created and is bypassed.", bus.m_Effects.GetCount() - 1, busDesc.m_sName);
       }
     }
 
@@ -82,6 +90,9 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
     ma_node* pCurrent = reinterpret_cast<ma_node*>(&bus.m_Group);
     for (auto& effect : bus.m_Effects)
     {
+      if (effect.GetHead() == nullptr)
+        continue;
+
       ma_node_attach_output_bus(pCurrent, 0, effect.GetHead(), 0);
       pCurrent = effect.GetTail();
     }
@@ -95,21 +106,22 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
       pCurrent = reinterpret_cast<ma_node*>(bus.m_pSplitter);
     }
 
-    // tail -> parent (or endpoint for the master bus)
+    // tail -> parent (or endpoint for the master bus); a parent that routes back to this bus would close a feedback
+    // loop, so the bus goes to the endpoint instead
     ma_node* pParent = pEndpoint;
-    if (busDesc.m_uiParent != 0xFF && busDesc.m_uiParent < m_Buses.GetCount() && busDesc.m_uiParent != i)
+    if (busDesc.m_uiParent != 0xFF && busDesc.m_uiParent < m_Buses.GetCount() && busDesc.m_uiParent != i && !desc.IsRoutedTo(busDesc.m_uiParent, i))
     {
       pParent = reinterpret_cast<ma_node*>(&m_Buses[busDesc.m_uiParent].m_Group);
     }
     ma_node_attach_output_bus(pCurrent, 0, pParent, 0);
 
-    // sends: splitter outputs 1..N -> aux bus groups
+    // sends: splitter outputs 1..N -> aux bus groups; only to aux buses, and never back into this bus
     if (bus.m_pSplitter != nullptr)
     {
       for (plUInt32 s = 0; s < busDesc.m_Sends.GetCount(); ++s)
       {
         const plUInt8 uiTarget = busDesc.m_Sends[s].m_uiTargetBus;
-        if (uiTarget >= m_Buses.GetCount() || uiTarget == i)
+        if (uiTarget >= m_Buses.GetCount() || uiTarget == i || !desc.m_Buses[uiTarget].m_bIsAux || desc.IsRoutedTo(uiTarget, i))
           continue;
 
         ma_node* pSplitterNode = reinterpret_cast<ma_node*>(bus.m_pSplitter);
@@ -221,6 +233,13 @@ plUInt32 plMiniAudioBusGraph::ResolveBus(plStringView sBusName) const
 
     if (uiBus != plInvalidIndex)
       return uiBus;
+
+    // a renamed or deleted bus: said once per name, so a misrouted event is noticed
+    if (!m_WarnedUnknownBuses.Contains(sBusName))
+    {
+      m_WarnedUnknownBuses.Insert(sBusName);
+      plLog::Warning("PlasmaAudio: the mixer has no bus '{0}'. Events that output to it play on master.", sBusName);
+    }
   }
 
   return 0; // master

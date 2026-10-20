@@ -16,7 +16,8 @@ class plPlasmaAudioEventInstance;
 /// instance start frame and start order, then voice slot. The first PlasmaAudio.MaxRealVoices voices that are at
 /// least PlasmaAudio.VoiceAudibilityFloor loud should be real, the rest virtual. A voice changes state at most once
 /// per PlasmaAudio.VoiceMinDwellMs, except when the real budget has to be enforced. Past
-/// PlasmaAudio.MaxVirtualVoices, the lowest-ranked virtual voices of non-looping instruments are stopped.
+/// PlasmaAudio.MaxVirtualVoices, the lowest-ranked virtual voices are stopped: those of non-looping instruments first,
+/// then, when that is not enough, those of looping ones.
 ///
 /// Real voices of stopping instances are never virtualized; they count against the real budget until their fade
 /// ends. Per-bus voice limits are not implemented; they would cap the real voices per output bus during the rank walk.

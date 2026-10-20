@@ -116,6 +116,21 @@ void plAudioClipResource::GatherLoadedClips(plDynamicArray<plAudioClipMemorySnap
   }
 }
 
+void plAudioClipResource::GatherLoadedLocalizedClips(plDynamicArray<plString>& out_clipIds)
+{
+  out_clipIds.Clear();
+
+  PL_LOCK(s_LoadedMutex);
+
+  for (const plAudioClipResource* pClip = s_pFirstLoaded; pClip != nullptr; pClip = pClip->m_pNextLoaded)
+  {
+    if (pClip->m_Header.m_Languages.GetCount() > 1)
+    {
+      out_clipIds.PushBack(pClip->GetResourceID());
+    }
+  }
+}
+
 plTime plAudioClipResource::GetDuration() const
 {
   if (m_Header.m_uiSampleRate == 0)

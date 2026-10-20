@@ -105,6 +105,9 @@ public:
   /// its content finished loading and leaves it before its data is cleared or it is destroyed.
   static void GatherLoadedClips(plDynamicArray<plAudioClipMemorySnapshotEntry>& out_clips, const plAudioStreamService* pStreams);
 
+  /// \brief Replaces out_clipIds with the resource ids of the loaded clips that have more than one language. Any thread.
+  static void GatherLoadedLocalizedClips(plDynamicArray<plString>& out_clipIds);
+
 private:
   /// Replaces this resource's share of s_iResidentBytes with the current size of its sample arrays and adds the clip to
   /// the registry of loaded clips once its content is loaded.

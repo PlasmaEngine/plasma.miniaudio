@@ -72,6 +72,10 @@ const char* plAudioLogEventType::GetName(Enum type)
       return "language";
     case LimitRejected:
       return "limit";
+    case EventLoadWait:
+      return "event wait";
+    case EventDropped:
+      return "event dropped";
     default:
       return "?";
   }
@@ -87,6 +91,7 @@ bool plAudioLogEventType::IsWarning(Enum type)
     case DeviceLost:
     case Killed:
     case LimitRejected:
+    case EventDropped:
       return true;
     default:
       return false;

@@ -22,6 +22,9 @@ static plMiniAudioSingleton g_MiniAudioSingleton;
 /// seconds between attempts to get a real device back while running without one
 static constexpr double s_fDeviceRetryIntervalSeconds = 3.0;
 
+/// gain ramp of every sound and bus, about 5 ms at 48 kHz
+static constexpr ma_uint32 s_uiVolumeSmoothFrames = 256;
+
 /// weight of the newest mix in the smoothed DSP load
 static constexpr float s_fDspLoadSmoothing = 0.2f;
 
@@ -193,6 +196,7 @@ void plMiniAudioSingleton::Shutdown()
       UninitEngine();
     }
 
+    m_bReinitFailed = false;
     m_pData->m_SoundGroups.Clear();
 
     if (m_bContextInitialized)
@@ -323,6 +327,10 @@ plResult plMiniAudioSingleton::InitEngine()
   cfg.notificationCallback = &plMiniAudioSingleton::DeviceNotificationCallback;
   cfg.listenerCount = MaxListeners;
   cfg.channels = 0; // native channel count
+
+  // volume changes (automation, snapshot fades, bus faders) are ramped over this many frames instead of stepping once
+  // per audio update
+  cfg.defaultVolumeSmoothTimeInPCMFrames = s_uiVolumeSmoothFrames;
   cfg.noAutoStart = MA_TRUE; // started below, once the data callback is wrapped
 
   m_bDeviceStopExpected = false;
@@ -415,7 +423,18 @@ void plMiniAudioSingleton::UninitEngine()
 bool plMiniAudioSingleton::IsDeviceReinitRequired()
 {
   if (!m_bInitialized)
-    return false;
+  {
+    // a failed re-init left no engine at all: try again now and then
+    if (!m_bReinitFailed)
+      return false;
+
+    const plTime now = plTime::Now();
+    if (now - m_LastReinitCheck < plTime::MakeFromSeconds(s_fDeviceRetryIntervalSeconds))
+      return false;
+
+    m_LastReinitCheck = now;
+    return true;
+  }
 
   if (m_bDeviceChangeRequested)
     return true;
@@ -442,20 +461,44 @@ bool plMiniAudioSingleton::IsDeviceReinitRequired()
 
 plResult plMiniAudioSingleton::ReinitDevice()
 {
-  if (!m_bInitialized)
+  if (m_pData == nullptr || !m_bContextInitialized || (!m_bInitialized && !m_bReinitFailed))
     return PL_FAILURE;
 
   PL_LOCK(m_pData->m_Mutex);
 
-  UninitEngine();
+  if (m_bInitialized)
+  {
+    UninitEngine();
+  }
 
   if (InitEngine().Failed())
   {
+    // retried by IsDeviceReinitRequired every s_fDeviceRetryIntervalSeconds
     m_bInitialized = false;
+    m_bReinitFailed = true;
+    m_LastReinitCheck = plTime::Now();
     return PL_FAILURE;
   }
 
+  m_bInitialized = true;
+  m_bReinitFailed = false;
   return PL_SUCCESS;
+}
+
+plUInt32 plMiniAudioSingleton::GetActiveListenerPositions(plArrayPtr<plVec3> out_positions) const
+{
+  plUInt32 uiCount = 0;
+
+  for (plUInt8 i = 0; i < m_uiNumListeners && uiCount < out_positions.GetCount(); ++i)
+  {
+    // slot 0 is always heard; the others once they received a transform
+    if (i == 0 || m_Listeners[i].m_bActive)
+    {
+      out_positions[uiCount++] = m_Listeners[i].m_vPosition;
+    }
+  }
+
+  return uiCount;
 }
 
 void plMiniAudioSingleton::GetPlaybackDeviceNames(plDynamicArray<plString>& out_names) const

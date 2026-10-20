@@ -2,6 +2,7 @@
 
 #include <AudioSystem/Core/AudioMiddleware.h>
 #include <Foundation/Configuration/CVar.h>
+#include <Foundation/Configuration/Singleton.h>
 #include <PlasmaAudioPlugin/Banks/AudioBankResource.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
@@ -117,6 +118,10 @@ public:
   /// Audio thread only.
   bool IsBankContentRequested(plAudioSystemDataID uiBankId) const;
 
+  /// \brief Whether every event and clip of the bank finished loading (or is missing), so playing them causes no load.
+  /// Audio thread only.
+  bool IsBankReady(plAudioSystemDataID uiBankId) const;
+
   /// \brief The language clips are loaded in ("" = default language). SetLanguage() takes effect on the next Update().
   plString GetLanguage() const;
 
@@ -163,6 +168,11 @@ private:
   /// the mixer loaded through LoadMixer (not built without one); rebuilt with its current values after a device re-init
   plMiniAudioBusGraph m_BusGraph;
 
+  /// the mixer to rebuild once a device re-init that failed is retried successfully
+  plAudioMixerDesc m_PendingMixerDesc;
+  plDynamicArray<plMiniAudioBusGraph::BusValues> m_PendingMixerValues;
+  bool m_bMixerPendingRecovery = false;
+
   /// declared before the event manager: voices of streamed clips release their streams into it
   plAudioStreamService m_StreamService;
   plPlasmaAudioEventManager m_EventManager;
@@ -193,8 +203,18 @@ private:
   bool RequestBankContent(LoadedBank& ref_bank);
   void UpdatePendingBanks();
 
+  /// Whether every event and clip the bank holds a handle to has finished loading or is missing.
+  static bool IsBankContentLoaded(const LoadedBank& bank);
+
   /// Applies a language set through SetLanguage (audio thread).
   void ApplyPendingLanguage();
+
+  /// Reloads the localized clips of m_LanguageReloads that are loaded in an older language (audio thread).
+  void RetryLanguageReloads();
+
+  /// localized clips a language switch still has to reload, until m_LanguageReloadDeadline
+  plDynamicArray<plAudioClipResourceHandle> m_LanguageReloads;
+  plTime m_LanguageReloadDeadline;
 
   void OnLanguageCVarEvent(const plCVarEvent& e);
 

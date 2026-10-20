@@ -115,6 +115,10 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
   PL_SCOPE_EXIT(m_fLastUpdateMs.store(static_cast<float>((plTime::Now() - tStart).GetMilliseconds()), std::memory_order_relaxed));
 
   ApplyPendingLanguage();
+  if (!m_LanguageReloads.IsEmpty())
+  {
+    RetryLanguageReloads();
+  }
   UpdatePendingBanks();
 
   if (m_pBackend != nullptr)
@@ -135,7 +139,10 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
       }
     }
 
-    m_EventManager.Update(delta, m_pBackend->GetListenerPosition());
+    // voices are spatialized against their closest listener, so audibility and distance use the closest one as well
+    plVec3 listenerPositions[plMiniAudioSingleton::MaxListeners];
+    const plUInt32 uiListeners = m_pBackend->GetActiveListenerPositions(plArrayPtr<plVec3>(listenerPositions));
+    m_EventManager.Update(delta, plArrayPtr<const plVec3>(listenerPositions, uiListeners));
 
     UpdateProfilingSnapshot();
   }
@@ -200,9 +207,26 @@ void plPlasmaAudioMiddleware::FillBusSnapshot()
   if (!m_BusGraph.IsBuilt())
     return;
 
-  // The mixer resource id and the snapshot intensities stay with the engine's plAudioMixerService, which a middleware
-  // cannot reach: the snapshot carries no mixer name and no active snapshots.
   const plAudioMixerDesc& desc = m_BusGraph.GetDesc();
+
+  // the mixer resource id and the snapshot intensities live in the engine's mixer service (this runs on the audio thread)
+  if (const plAudioSystem* pAudioSystem = plAudioSystem::GetSingleton())
+  {
+    const plAudioMixerService& mixerService = pAudioSystem->GetMixerService();
+    m_ProfilingSnapshot.m_sMixer = mixerService.GetMixerResourceId();
+
+    const plAudioMixerDesc& serviceDesc = mixerService.GetDesc();
+    for (plUInt32 uiSnapshot = 0; uiSnapshot < serviceDesc.m_Snapshots.GetCount(); ++uiSnapshot)
+    {
+      const float fIntensity = mixerService.GetSnapshotIntensity(uiSnapshot);
+      if (fIntensity <= 0.0f)
+        continue;
+
+      plAudioActiveSnapshotEntry& entry = m_ProfilingSnapshot.m_ActiveSnapshots.ExpandAndGetRef();
+      entry.m_sName = serviceDesc.m_Snapshots[uiSnapshot].m_sName;
+      entry.m_fIntensity = fIntensity;
+    }
+  }
 
   m_ProfilingSnapshot.m_Buses.SetCount(desc.m_Buses.GetCount());
   for (plUInt32 uiBus = 0; uiBus < desc.m_Buses.GetCount(); ++uiBus)
@@ -236,7 +260,15 @@ void plPlasmaAudioMiddleware::FillMemorySnapshot()
     if (loadedBank.m_bContentRequested)
     {
       plResourceLock<plAudioBankResource> pBank(loadedBank.m_hBank, plResourceAcquireMode::PointerOnly);
-      bank.m_uiState = pBank->GetLoadingState() == plResourceState::LoadedResourceMissing ? plAudioBankMemorySnapshotEntry::Missing : plAudioBankMemorySnapshotEntry::Loaded;
+
+      if (pBank->GetLoadingState() == plResourceState::LoadedResourceMissing)
+      {
+        bank.m_uiState = plAudioBankMemorySnapshotEntry::Missing;
+      }
+      else if (IsBankContentLoaded(loadedBank))
+      {
+        bank.m_uiState = plAudioBankMemorySnapshotEntry::Loaded;
+      }
     }
   }
 
@@ -303,6 +335,7 @@ plResult plPlasmaAudioMiddleware::Shutdown()
 
   m_Banks.Clear();
   m_PendingBanks.Clear();
+  m_LanguageReloads.Clear();
 
   m_EventManager.StopAll(true);
   DestroyAllPcmStreams();
@@ -336,9 +369,11 @@ void plPlasmaAudioMiddleware::RecoverDevice()
   // held throughout, so no PCM stream node is created, fed or destroyed against a half-rebuilt engine
   PL_LOCK(m_PcmStreamMutex);
 
-  const bool bHadMixer = m_BusGraph.IsBuilt();
-  const plAudioMixerDesc mixerDesc = m_BusGraph.GetDesc();
-  const plDynamicArray<plMiniAudioBusGraph::BusValues> mixerValues = m_BusGraph.GetBusValues();
+  // after a failed attempt the graph is gone and the mixer waits in m_PendingMixerDesc
+  const bool bHadMixer = m_BusGraph.IsBuilt() || m_bMixerPendingRecovery;
+  const plAudioMixerDesc mixerDesc = m_BusGraph.IsBuilt() ? m_BusGraph.GetDesc() : m_PendingMixerDesc;
+  const plDynamicArray<plMiniAudioBusGraph::BusValues> mixerValues = m_BusGraph.IsBuilt() ? m_BusGraph.GetBusValues() : m_PendingMixerValues;
+  m_bMixerPendingRecovery = false;
 
   // voices first (they feed the buses), then the bus graph, which also moves the stream nodes to the endpoint.
   // Stopping the voices releases their disk streams; the stream service itself does not depend on the device.
@@ -377,19 +412,26 @@ void plPlasmaAudioMiddleware::RecoverDevice()
 
   if (m_pBackend->ReinitDevice().Failed())
   {
-    plLog::Error("PlasmaAudio: re-initializing the audio engine failed, audio output is disabled.");
-    m_EventManager.GetEventLog().Add(plAudioLogEventType::DeviceLost, "output device", "re-init failed, output disabled");
+    plLog::Error("PlasmaAudio: re-initializing the audio engine failed; retrying every few seconds.");
+    m_EventManager.GetEventLog().Add(plAudioLogEventType::DeviceLost, "output device", "re-init failed, retrying");
+
+    // the mixer is rebuilt from this desc once a retry succeeds
+    if (bHadMixer)
+    {
+      m_PendingMixerDesc = mixerDesc;
+      m_PendingMixerValues = mixerValues;
+      m_bMixerPendingRecovery = true;
+    }
     return;
   }
 
   m_EventManager.GetEventLog().Add(plAudioLogEventType::DeviceRecovered, "output device");
 
+  // streams without a node (lost in a failed attempt) are recreated with the default settings
   for (plUInt32 i = 0; i < m_PcmStreams.GetCount(); ++i)
   {
     PcmStream& stream = m_PcmStreams[i];
     const PcmState& state = pcmStates[i];
-    if (!state.m_bValid)
-      continue;
 
     plUniquePtr<plMaPcmStreamNode> pNode = PL_DEFAULT_NEW(plMaPcmStreamNode);
     if (plMiniAudioDsp::InitPcmStreamNode(m_pBackend->GetEngine(), pNode.Borrow(), stream.m_uiChannels, stream.m_uiSampleRate, stream.m_uiRingFrames).Failed())
@@ -573,8 +615,14 @@ plResult plPlasmaAudioMiddleware::SetEventParameter(plAudioSystemEntityData* pEn
 
 plResult plPlasmaAudioMiddleware::ResetRtpc(plAudioSystemEntityData* pEntityData, const plAudioSystemRtpcData* pRtpcData)
 {
-  PL_IGNORE_UNUSED(pEntityData);
-  PL_IGNORE_UNUSED(pRtpcData);
+  const auto* pEntity = plDynamicCast<const plPlasmaAudioEntityData*>(pEntityData);
+  const auto* pRtpc = plDynamicCast<const plAudioSystemStringRtpcData*>(pRtpcData);
+
+  if (pEntity == nullptr || pRtpc == nullptr)
+    return PL_FAILURE;
+
+  // the event parameter of the same name goes back to the global value, or to its default without one
+  m_EventManager.ResetEventParameter(pEntity, pRtpc->m_sRtpcName);
   return PL_SUCCESS;
 }
 
@@ -834,6 +882,38 @@ bool plPlasmaAudioMiddleware::IsBankContentRequested(plAudioSystemDataID uiBankI
   return m_Banks.TryGetValue(uiBankId, pBank) && pBank->m_bContentRequested;
 }
 
+bool plPlasmaAudioMiddleware::IsBankReady(plAudioSystemDataID uiBankId) const
+{
+  const LoadedBank* pBank = nullptr;
+  return m_Banks.TryGetValue(uiBankId, pBank) && pBank->m_bContentRequested && IsBankContentLoaded(*pBank);
+}
+
+bool plPlasmaAudioMiddleware::IsBankContentLoaded(const LoadedBank& bank)
+{
+  // a missing resource counts as finished: it will not become playable by waiting
+  auto IsFinished = [](const plResource* pResource)
+  {
+    const plResourceState state = pResource->GetLoadingState();
+    return state == plResourceState::Loaded || state == plResourceState::LoadedResourceMissing;
+  };
+
+  for (const plAudioEventResourceHandle& hEvent : bank.m_Events)
+  {
+    plResourceLock<plAudioEventResource> pEvent(hEvent, plResourceAcquireMode::PointerOnly);
+    if (!IsFinished(pEvent.GetPointer()))
+      return false;
+  }
+
+  for (const plAudioClipResourceHandle& hClip : bank.m_Clips)
+  {
+    plResourceLock<plAudioClipResource> pClip(hClip, plResourceAcquireMode::PointerOnly);
+    if (!IsFinished(pClip.GetPointer()))
+      return false;
+  }
+
+  return true;
+}
+
 plAudioSystemEntityData* plPlasmaAudioMiddleware::CreateWorldEntity(plAudioSystemDataID uiEntityId)
 {
   return PL_AUDIOSYSTEM_NEW(plPlasmaAudioEntityData, uiEntityId, true);
@@ -846,6 +926,12 @@ plAudioSystemEntityData* plPlasmaAudioMiddleware::CreateEntityData(plAudioSystem
 
 plResult plPlasmaAudioMiddleware::DestroyEntityData(plAudioSystemEntityData* pEntityData)
 {
+  // instances still on the entity (the ATL does not always remove it first) must not reference it once it is deleted
+  if (const auto* pEntity = plDynamicCast<const plPlasmaAudioEntityData*>(pEntityData))
+  {
+    m_EventManager.StopAllOnEntity(pEntity, true);
+  }
+
   PL_AUDIOSYSTEM_DELETE(pEntityData);
   return PL_SUCCESS;
 }
@@ -964,23 +1050,72 @@ void plPlasmaAudioMiddleware::ApplyPendingLanguage()
     m_EventManager.GetEventLog().Add(plAudioLogEventType::LanguageChanged, sLanguage.IsEmpty() ? plStringView("<default>") : sLanguage.GetView(), sDetail);
   }
 
-  // every playing event instance stops right away; events started afterwards play the new language
-  m_EventManager.StopAll(true);
-
   plAudioClipResourceLoader::SetLanguage(sLanguage);
 
-  // loaded clips are unloaded and reloaded in the new language (clips used in the last 30 seconds are queued
-  // right away, others on their next use); unloaded clips pick the language up whenever they are loaded. A clip
-  // whose load is in flight is skipped here and finishes in the old language; a voice starting it reloads it first
-  // (plAudioClipResource::GetLanguageGeneration()).
-  plResourceManager::ReloadResourcesOfType(plGetStaticRTTI<plAudioClipResource>(), true);
+  // Only clips with more than one language are reloaded; everything else keeps playing. Reloading a clip stops the
+  // voices that read it, and looping instruments start again once it is loaded in the new language. Unloaded clips pick
+  // the language up whenever they are loaded. A clip whose load is in flight finishes in the old language; a voice
+  // starting it reloads it first (plAudioClipResource::GetLanguageGeneration()).
+  plDynamicArray<plString> localizedClips;
+  plAudioClipResource::GatherLoadedLocalizedClips(localizedClips);
 
-  // bank clips stay resident: queue them all, not only the recently used ones
+  m_LanguageReloads.Clear();
+  m_LanguageReloadDeadline = plTime::Now() + plTime::MakeFromSeconds(5);
+  for (const plString& sClip : localizedClips)
+  {
+    const plAudioClipResourceHandle hClip = plResourceManager::GetExistingResource<plAudioClipResource>(sClip);
+    if (hClip.IsValid())
+    {
+      m_LanguageReloads.PushBack(hClip);
+    }
+  }
+
+  RetryLanguageReloads();
+
+  // bank clips stay resident: queue every bank clip that is not loaded right now, including the ones just reloaded
   for (auto it = m_Banks.GetIterator(); it.IsValid(); ++it)
   {
     for (const plAudioClipResourceHandle& hClip : it.Value().m_Clips)
     {
       plResourceManager::PreloadResource(hClip);
+    }
+  }
+}
+
+void plPlasmaAudioMiddleware::RetryLanguageReloads()
+{
+  // The resource manager skips a reload while a load task still finishes the clip (e.g. right after a blocking load
+  // returned), so a clip that is still in the old language is tried again on the next updates, for a few seconds. A
+  // clip that is still stale then is reloaded by the next voice that plays it (plAudioClipResource::GetLanguageGeneration()).
+  if (plTime::Now() > m_LanguageReloadDeadline)
+  {
+    m_LanguageReloads.Clear();
+    return;
+  }
+
+  for (plUInt32 i = m_LanguageReloads.GetCount(); i > 0; --i)
+  {
+    const plAudioClipResourceHandle& hClip = m_LanguageReloads[i - 1];
+
+    plAudioClipResource* pClip = plResourceManager::BeginAcquireResource(hClip, plResourceAcquireMode::PointerOnly);
+    const bool bLoaded = pClip->GetLoadingState() == plResourceState::Loaded;
+    const bool bStale = bLoaded && pClip->GetLanguageGeneration() != plAudioClipResourceLoader::GetLanguageGeneration();
+    plResourceManager::EndAcquireResource(pClip);
+
+    // unloaded clips load in the current language whenever they are used; up-to-date ones are done
+    if (bLoaded && !bStale)
+    {
+      m_LanguageReloads.RemoveAtAndSwap(i - 1);
+      continue;
+    }
+
+    if (!bLoaded)
+      continue;
+
+    if (plResourceManager::ReloadResource(hClip, true))
+    {
+      plResourceManager::PreloadResource(hClip);
+      m_LanguageReloads.RemoveAtAndSwap(i - 1);
     }
   }
 }
@@ -1115,8 +1250,17 @@ plResult plPlasmaAudioMiddleware::LoadMixer(const plAudioMixerDesc& desc)
         continue;
 
       const plAudioSystemDataID uiEnvironmentId = plHashHelper<plStringView>::Hash(busDesc.m_sEnvironmentName.GetView());
-      pAudioSystem->RegisterEnvironment(uiEnvironmentId, PL_AUDIOSYSTEM_NEW(plAudioSystemStringEnvironmentData, uiEnvironmentId, busDesc.m_sEnvironmentName));
-      m_RegisteredEnvironmentIds.PushBack(uiEnvironmentId);
+      plAudioSystemEnvironmentData* pData = PL_AUDIOSYSTEM_NEW(plAudioSystemStringEnvironmentData, uiEnvironmentId, busDesc.m_sEnvironmentName);
+
+      // an environment someone else registered stays theirs: it is neither tracked nor unregistered by this mixer
+      if (pAudioSystem->TryRegisterEnvironment(uiEnvironmentId, pData))
+      {
+        m_RegisteredEnvironmentIds.PushBack(uiEnvironmentId);
+      }
+      else
+      {
+        PL_AUDIOSYSTEM_DELETE(pData);
+      }
     }
   }
 

@@ -287,6 +287,12 @@ plStatus plAudioMixerAssetProperties::BuildRuntimeDesc(const plAudioMixerAssetPr
     }
   }
 
+  // names resolve to indices above; the routing as a whole (cycles, sends to non-aux buses, duplicate names, snapshot
+  // indices) is checked by the runtime desc, the same check the runtime runs when it builds the mixer
+  plStringBuilder sErrors;
+  if (desc.Validate(sErrors).Failed())
+    return plStatus(sErrors.GetView());
+
   return plStatus(PL_SUCCESS);
 }
 

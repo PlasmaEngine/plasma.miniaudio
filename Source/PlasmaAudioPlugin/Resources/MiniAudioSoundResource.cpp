@@ -129,12 +129,21 @@ plResourceLoadDesc plMiniAudioSoundResource::UpdateContent(plStreamReader* pStre
     *pStream >> m_sSoundGroup;
   }
 
+  // the shared bank is registered by the first sound, the trigger by the first load of this one; registering either
+  // again would leak the new data, which the ATL skips
   if (auto* pAudioSystem = plAudioSystem::GetSingleton())
   {
-    const plAudioSystemDataID uiBankId = plHashHelper<plStringView>::Hash("MiniAudio.DefaultBank");
-    const plAudioSystemDataID uiTriggerId = plHashHelper<plStringView>::Hash(GetResourceID());
-    pAudioSystem->RegisterSoundBank(uiBankId, PL_AUDIOSYSTEM_NEW(plPlasmaAudioBankData, uiBankId, "MiniAudio.DefaultBank"));
-    pAudioSystem->RegisterTrigger(uiTriggerId, PL_AUDIOSYSTEM_NEW(plPlasmaAudioTriggerData, uiTriggerId, GetResourceID()));
+    if (pAudioSystem->GetBankId("MiniAudio.DefaultBank") == 0)
+    {
+      const plAudioSystemDataID uiBankId = plHashHelper<plStringView>::Hash("MiniAudio.DefaultBank");
+      pAudioSystem->RegisterSoundBank(uiBankId, PL_AUDIOSYSTEM_NEW(plPlasmaAudioBankData, uiBankId, "MiniAudio.DefaultBank"));
+    }
+
+    if (pAudioSystem->GetTriggerId(GetResourceID()) == 0)
+    {
+      const plAudioSystemDataID uiTriggerId = plHashHelper<plStringView>::Hash(GetResourceID());
+      pAudioSystem->RegisterTrigger(uiTriggerId, PL_AUDIOSYSTEM_NEW(plPlasmaAudioTriggerData, uiTriggerId, GetResourceID()));
+    }
   }
 
   res.m_State = plResourceState::Loaded;

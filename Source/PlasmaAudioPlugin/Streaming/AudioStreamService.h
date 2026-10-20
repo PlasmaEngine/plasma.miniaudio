@@ -8,8 +8,8 @@
 #include <Foundation/Strings/String.h>
 #include <Foundation/Threading/AtomicInteger.h>
 #include <Foundation/Threading/Mutex.h>
+#include <Foundation/Threading/Semaphore.h>
 #include <Foundation/Threading/Thread.h>
-#include <Foundation/Threading/ThreadSignal.h>
 #include <Foundation/Time/Time.h>
 #include <Foundation/Types/UniquePtr.h>
 #include <PlasmaAudioPlugin/Codecs/AudioByteSource.h>
@@ -147,8 +147,8 @@ private:
 /// decompression of the file up to the target.
 ///
 /// Owned by the middleware (Startup / Shutdown). AcquireStream() and ReleaseStream() are called when a voice of a
-/// streamed clip starts and stops (ATL thread); they take the service mutex, which the IO thread holds only while
-/// it works on one stream step (one seek or one chunk read). The audio thread never takes the mutex.
+/// streamed clip starts and stops (ATL thread); they take the service mutex, which guards the stream lists only: the
+/// IO thread does its seeks and chunk reads without it. The device thread never takes the mutex.
 ///
 /// Released stream objects are kept in a pool and reused by later acquires; a reused stream keeps its ring memory
 /// when the chunk size is unchanged, so starting a streamed voice does not allocate a stream or a ring once the pool
@@ -182,6 +182,11 @@ public:
   /// \brief Closes a stream. The decoder reading from it must not be used any more.
   void ReleaseStream(plAudioStream* pStream);
 
+  /// \brief Fills the pool with stream objects (rings sized for the current chunk size) until it holds uiCount, so the
+  /// next acquires allocate nothing. A stream released while the IO thread reads for it is pooled one IO pass later, so
+  /// a pool one stream larger than the streams in use keeps acquires allocation-free.
+  void ReserveStreams(plUInt32 uiCount);
+
   plUInt32 GetActiveStreamCount() const;
   plUInt32 GetMaxStreams() const;
 
@@ -205,21 +210,27 @@ public:
   /// consume faster than realtime; tests call this between render blocks. Returns false on timeout.
   bool WaitForIdle(plTime timeout = plTime::MakeFromSeconds(10));
 
-  /// \brief Wakes the IO thread. Any thread; does not block beyond a short lock inside plThreadSignal.
+  /// \brief Wakes the IO thread. Any thread, including the device thread: takes no lock (a semaphore token).
   void WakeIo();
 
 private:
   friend class plAudioStreamThread;
 
-  /// \brief One pass over all streams; returns whether any stream did work.
+  /// \brief One pass over all streams; returns whether any stream did work. Recycles retired streams first.
   bool RunIoPass();
 
+  /// The mutex guards the lists and m_pIoStream only. The IO thread picks a stream of m_Streams under it and works on the
+  /// stream (seek, chunk read) without it, so AcquireStream / ReleaseStream never wait for disk IO. A stream released
+  /// while it is m_pIoStream is retired; the IO thread resets retired streams and pools them at the start of its next
+  /// pass. Any other released stream is reset and pooled right away.
   mutable plMutex m_Mutex;
+  plAudioStream* m_pIoStream = nullptr; ///< the stream the IO thread works on outside the mutex right now
   plDynamicArray<plAudioStream*> m_Streams;
-  plDynamicArray<plAudioStream*> m_FreeStreams; ///< released streams, reused by AcquireStream(); the IO thread never sees them
+  plDynamicArray<plAudioStream*> m_RetiredStreams; ///< released, possibly still being read for by the IO thread
+  plDynamicArray<plAudioStream*> m_FreeStreams; ///< reset streams, reused by AcquireStream(); the IO thread never sees them
 
   plUniquePtr<plThread> m_pThread;
-  plThreadSignal m_Signal;
+  plSemaphore m_WakeSemaphore;
   plAtomicBool m_bStopThread;
   plAtomicBool m_bIoPaused;
   plAtomicBool m_bWakePending;

@@ -42,7 +42,8 @@ public:
   /// an engine without output). Callers must not touch the engine when this returns nullptr.
   ma_engine* GetEngine() { return m_bInitialized ? &m_pData->m_Engine : nullptr; }
 
-  /// \brief Whether the engine exists. False after a failed startup or a failed ReinitDevice(); it stays false then.
+  /// \brief Whether the engine exists. False after a failed startup. After a failed ReinitDevice() it is false until a
+  /// later retry (IsDeviceReinitRequired() asks for one every few seconds) succeeds.
   bool IsEngineValid() const { return m_bInitialized; }
 
   /// \brief Whether the engine has to be recreated: the device stopped without us stopping it, or the
@@ -121,6 +122,10 @@ public:
   /// \brief Position of listener slot 0.
   plVec3 GetListenerPosition() const { return m_Listeners[0].m_vPosition; }
 
+  /// \brief Writes the positions of the listeners that are heard (slot 0 and every other active slot below
+  /// GetNumListeners()) and returns how many were written.
+  plUInt32 GetActiveListenerPositions(plArrayPtr<plVec3> out_positions) const;
+
   /// \brief Share of real time spent mixing (0 = idle, 1 = mixing takes as long as the audio it produces), smoothed.
   ///
   /// With a device: time spent in the device data callback divided by the duration of the frames it produced. Without
@@ -169,6 +174,7 @@ private:
   bool m_bListenerOverrideMode = false;
   bool m_bEnginePaused = false;
   bool m_bHeadless = false; ///< engine runs without a playback device
+  bool m_bReinitFailed = false; ///< ReinitDevice() could not create any engine; retried periodically
   plUInt8 m_uiNumListeners = 1;
   ListenerSlot m_Listeners[MaxListeners];
 

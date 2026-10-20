@@ -7,7 +7,7 @@
 #include <PlasmaAudioPlugin/Events/MiniAudioAudioEvents.h>
 
 plCVarInt cvar_PlasmaAudioMaxRealVoices("PlasmaAudio.MaxRealVoices", 64, plCVarFlags::Default, "Number of event voices that are decoded and mixed at once; the others play virtually");
-plCVarInt cvar_PlasmaAudioMaxVirtualVoices("PlasmaAudio.MaxVirtualVoices", 512, plCVarFlags::Default, "Number of virtual event voices; past it the least important non-looping virtual voices are stopped");
+plCVarInt cvar_PlasmaAudioMaxVirtualVoices("PlasmaAudio.MaxVirtualVoices", 512, plCVarFlags::Default, "Number of virtual event voices; past it the least important virtual voices are stopped, one-shots before loops");
 plCVarFloat cvar_PlasmaAudioVoiceHysteresis("PlasmaAudio.VoiceHysteresis", 1.25f, plCVarFlags::Default, "Audibility factor a real voice gets in the voice ranking, so voices of similar loudness do not swap every update");
 plCVarInt cvar_PlasmaAudioVoiceMinDwellMs("PlasmaAudio.VoiceMinDwellMs", 100, plCVarFlags::Default, "Minimum time in ms a voice stays real or virtual before the voice ranking may change it again");
 plCVarFloat cvar_PlasmaAudioVoiceAudibilityFloor("PlasmaAudio.VoiceAudibilityFloor", 0.001f, plCVarFlags::Default, "Voices quieter than this linear audibility are always virtual");
@@ -199,7 +199,8 @@ void plAudioVoiceManager::Update(plArrayPtr<const plUniquePtr<plPlasmaAudioEvent
     ++m_uiFlipCount;
   }
 
-  // past the virtual budget the least important virtual one-shots are stopped; looping voices stay
+  // past the virtual budget the least important virtual one-shots are stopped first, as they end soon anyway; when that
+  // is not enough, the least important looping ones go as well, so the budget stays a hard limit
   plUInt32 uiVirtualCount = 0;
   for (const Candidate& candidate : m_Ranked)
   {
@@ -207,14 +208,17 @@ void plAudioVoiceManager::Update(plArrayPtr<const plUniquePtr<plPlasmaAudioEvent
       ++uiVirtualCount;
   }
 
-  for (plUInt32 i = m_Ranked.GetCount(); i > 0 && uiVirtualCount > uiMaxVirtual; --i)
+  for (bool bLoopingPass : {false, true})
   {
-    Candidate& candidate = m_Ranked[i - 1];
-    if (candidate.m_bReal || candidate.m_bLooping || !IsCandidateValid(candidate))
-      continue;
+    for (plUInt32 i = m_Ranked.GetCount(); i > 0 && uiVirtualCount > uiMaxVirtual; --i)
+    {
+      Candidate& candidate = m_Ranked[i - 1];
+      if (candidate.m_bReal || candidate.m_bLooping != bLoopingPass || !IsCandidateValid(candidate))
+        continue;
 
-    candidate.m_pInstance->KillVirtualVoice(candidate.m_uiVoice);
-    --uiVirtualCount;
+      candidate.m_pInstance->KillVirtualVoice(candidate.m_uiVoice);
+      --uiVirtualCount;
+    }
   }
 
   m_uiRealCount = uiRealCount;

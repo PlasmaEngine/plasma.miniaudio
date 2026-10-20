@@ -45,7 +45,7 @@ private:
 
       if (!m_pService->RunIoPass())
       {
-        m_pService->m_Signal.WaitForSignal(plTime::MakeFromMilliseconds(50));
+        m_pService->m_WakeSemaphore.TryAcquireToken(plTime::MakeFromMilliseconds(50)).IgnoreResult();
       }
     }
 
@@ -410,6 +410,21 @@ void plAudioStreamService::Startup()
   m_bIoPaused = false;
   m_bWakePending = false;
 
+  if (m_WakeSemaphore.Create(0).Failed())
+  {
+    plLog::Error("PlasmaAudio: the streaming wake semaphore could not be created; streamed clips are not available.");
+    return;
+  }
+
+  // the lists only hold pointers; reserved up front, so acquiring, releasing and retiring streams never grows them
+  {
+    PL_LOCK(m_Mutex);
+    const plUInt32 uiCapacity = GetMaxStreams() + 4;
+    m_Streams.Reserve(uiCapacity);
+    m_RetiredStreams.Reserve(uiCapacity);
+    m_FreeStreams.Reserve(uiCapacity);
+  }
+
   m_pThread = PL_DEFAULT_NEW(plAudioStreamThread, this);
   m_pThread->Start();
 }
@@ -419,7 +434,7 @@ void plAudioStreamService::Shutdown()
   if (m_pThread != nullptr)
   {
     m_bStopThread = true;
-    m_Signal.RaiseSignal();
+    m_WakeSemaphore.ReturnToken();
     m_pThread->Join();
     m_pThread = nullptr;
   }
@@ -432,8 +447,11 @@ void plAudioStreamService::Shutdown()
     m_Streams.Clear();
     m_Streams.Compact();
     freeStreams = m_FreeStreams;
+    freeStreams.PushBackRange(m_RetiredStreams);
     m_FreeStreams.Clear();
     m_FreeStreams.Compact();
+    m_RetiredStreams.Clear();
+    m_RetiredStreams.Compact();
   }
 
   if (!streams.IsEmpty())
@@ -530,19 +548,37 @@ void plAudioStreamService::ReleaseStream(plAudioStream* pStream)
   if (pStream == nullptr)
     return;
 
+  PL_LOCK(m_Mutex);
+
+  if (!m_Streams.RemoveAndSwap(pStream))
   {
-    PL_LOCK(m_Mutex);
-    if (!m_Streams.RemoveAndSwap(pStream))
-    {
-      PL_REPORT_FAILURE("Audio stream released twice or not owned by this service");
-      return;
-    }
+    PL_REPORT_FAILURE("Audio stream released twice or not owned by this service");
+    return;
   }
 
-  // the IO thread only works on streams in m_Streams while holding the mutex, so it is done with this one
-  pStream->ResetForReuse();
-
+  // The IO thread may be reading for exactly this stream right now: then it is retired, and the IO thread resets and
+  // pools it at the start of its next pass. Otherwise the IO thread no longer sees it and it is pooled right away.
+  if (pStream == m_pIoStream)
   {
+    m_RetiredStreams.PushBack(pStream);
+    WakeIo();
+    return;
+  }
+
+  pStream->ResetForReuse();
+  m_FreeStreams.PushBack(pStream);
+}
+
+void plAudioStreamService::ReserveStreams(plUInt32 uiCount)
+{
+  const plUInt32 uiChunkBytes = GetChunkBytes();
+
+  while (GetPooledStreamCount() < uiCount)
+  {
+    plAudioStream* pStream = PL_DEFAULT_NEW(plAudioStream);
+    pStream->m_uiChunkBytes = uiChunkBytes;
+    pStream->m_Ring.SetCountUninitialized(uiChunkBytes * s_uiRingChunks);
+
     PL_LOCK(m_Mutex);
     m_FreeStreams.PushBack(pStream);
   }
@@ -583,6 +619,10 @@ plUInt64 plAudioStreamService::GetRingBytesInUse() const
     uiBytes += pStream->m_Ring.GetHeapMemoryUsage();
   }
   for (const plAudioStream* pStream : m_FreeStreams)
+  {
+    uiBytes += pStream->m_Ring.GetHeapMemoryUsage();
+  }
+  for (const plAudioStream* pStream : m_RetiredStreams)
   {
     uiBytes += pStream->m_Ring.GetHeapMemoryUsage();
   }
@@ -636,14 +676,27 @@ bool plAudioStreamService::WaitForIdle(plTime timeout)
 
 void plAudioStreamService::WakeIo()
 {
-  if (!m_bWakePending.Set(true))
+  // a semaphore token: no lock is taken, so the device thread can call this
+  if (!m_bWakePending.Set(true) && m_pThread != nullptr)
   {
-    m_Signal.RaiseSignal();
+    m_WakeSemaphore.ReturnToken();
   }
 }
 
 bool plAudioStreamService::RunIoPass()
 {
+  // retired streams are not read for by this thread right now, so they can be reset and pooled
+  {
+    PL_LOCK(m_Mutex);
+
+    for (plAudioStream* pStream : m_RetiredStreams)
+    {
+      pStream->ResetForReuse();
+      m_FreeStreams.PushBack(pStream);
+    }
+    m_RetiredStreams.Clear();
+  }
+
   if (m_bIoPaused)
     return false;
 
@@ -651,15 +704,25 @@ bool plAudioStreamService::RunIoPass()
 
   bool bWork = false;
 
-  // one step per stream and lock, so AcquireStream / ReleaseStream wait at most for one chunk read
+  // the step of each stream (one seek or one chunk read) runs without the mutex; a stream released meanwhile is
+  // retired, not reset, until the next pass
   for (plUInt32 i = 0;; ++i)
   {
+    plAudioStream* pStream = nullptr;
+    {
+      PL_LOCK(m_Mutex);
+
+      if (i >= m_Streams.GetCount())
+        break;
+
+      pStream = m_Streams[i];
+      m_pIoStream = pStream;
+    }
+
+    bWork |= pStream->UpdateIo();
+
     PL_LOCK(m_Mutex);
-
-    if (i >= m_Streams.GetCount())
-      break;
-
-    bWork |= m_Streams[i]->UpdateIo();
+    m_pIoStream = nullptr;
   }
 
   return bWork;

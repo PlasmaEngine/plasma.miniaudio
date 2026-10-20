@@ -340,11 +340,19 @@ static void plMaReverbNodeProcess(ma_node* pNode, const float** ppFramesIn, ma_u
   const plUInt32 uiFrames = *pFrameCountOut;
   const plUInt32 uiChannels = pReverb->m_uiChannels;
 
-  const float fFeedback = 0.7f + 0.28f * plMath::Clamp(pReverb->m_fRoomSize, 0.0f, 1.0f);
-  const float fDamp1 = plMath::Clamp(pReverb->m_fDamping, 0.0f, 1.0f) * 0.4f;
+  const float fFeedback = 0.7f + 0.28f * plMath::Clamp(pReverb->m_fRoomSize.load(std::memory_order_relaxed), 0.0f, 1.0f);
+  const float fDamp1 = plMath::Clamp(pReverb->m_fDamping.load(std::memory_order_relaxed), 0.0f, 1.0f) * 0.4f;
   const float fDamp2 = 1.0f - fDamp1;
-  const float fWet = pReverb->m_fWet;
-  const float fDry = pReverb->m_fDry;
+  const float fWet = pReverb->m_fWet.load(std::memory_order_relaxed);
+  const float fDry = pReverb->m_fDry.load(std::memory_order_relaxed);
+  const float fWidth = plMath::Clamp(pReverb->m_fWidth.load(std::memory_order_relaxed), 0.0f, 1.0f);
+
+  // Freeverb stereo width: each channel of a pair gets its own reverb times wet1 plus its partner's times wet2
+  const float fWet1 = fWet * (0.5f + 0.5f * fWidth);
+  const float fWet2 = fWet * (0.5f - 0.5f * fWidth);
+
+  constexpr plUInt32 MaxPairedChannels = 16;
+  float fReverbFrame[MaxPairedChannels];
 
   for (plUInt32 f = 0; f < uiFrames; ++f)
   {
@@ -378,7 +386,30 @@ static void plMaReverbNodeProcess(ma_node* pNode, const float** ppFramesIn, ma_u
         fReverbOut = fOutput;
       }
 
-      pOut[f * uiChannels + c] = fInput * fDry + fReverbOut * fWet;
+      if (c < MaxPairedChannels)
+      {
+        fReverbFrame[c] = fReverbOut;
+      }
+      else
+      {
+        pOut[f * uiChannels + c] = fInput * fDry + fReverbOut * fWet;
+      }
+    }
+
+    // channels 0/1, 2/3, ... are pairs; a channel without a partner gets its own reverb only
+    for (plUInt32 c = 0; c < plMath::Min(uiChannels, MaxPairedChannels); ++c)
+    {
+      const plUInt32 uiPartner = c ^ 1u;
+      const float fInput = pIn[f * uiChannels + c];
+
+      if (uiPartner < uiChannels && uiPartner < MaxPairedChannels)
+      {
+        pOut[f * uiChannels + c] = fInput * fDry + fReverbFrame[c] * fWet1 + fReverbFrame[uiPartner] * fWet2;
+      }
+      else
+      {
+        pOut[f * uiChannels + c] = fInput * fDry + fReverbFrame[c] * fWet;
+      }
     }
   }
 }
@@ -479,11 +510,11 @@ static void plMaCompressorNodeProcess(ma_node* pNode, const float** ppFramesIn, 
   const plUInt32 uiChannels = pComp->m_uiChannels;
   const float fSampleRate = static_cast<float>(pComp->m_uiSampleRate);
 
-  const float fAttackCoef = plMath::Exp(-1.0f / (plMath::Max(pComp->m_fAttackMs, 0.02f) * 0.001f * fSampleRate));
-  const float fReleaseCoef = plMath::Exp(-1.0f / (plMath::Max(pComp->m_fReleaseMs, 1.0f) * 0.001f * fSampleRate));
-  const float fThresholdLin = plAudioMixerUtils::DbToLinear(pComp->m_fThresholdDb);
-  const float fMakeupLin = plAudioMixerUtils::DbToLinear(pComp->m_fMakeupDb);
-  const float fInvRatio = pComp->m_bLimiter ? 0.0f : (1.0f / plMath::Max(pComp->m_fRatio, 1.0f));
+  const float fAttackCoef = plMath::Exp(-1.0f / (plMath::Max(pComp->m_fAttackMs.load(std::memory_order_relaxed), 0.02f) * 0.001f * fSampleRate));
+  const float fReleaseCoef = plMath::Exp(-1.0f / (plMath::Max(pComp->m_fReleaseMs.load(std::memory_order_relaxed), 1.0f) * 0.001f * fSampleRate));
+  const float fThresholdLin = plAudioMixerUtils::DbToLinear(pComp->m_fThresholdDb.load(std::memory_order_relaxed));
+  const float fMakeupLin = plAudioMixerUtils::DbToLinear(pComp->m_fMakeupDb.load(std::memory_order_relaxed));
+  const float fInvRatio = pComp->m_bLimiter ? 0.0f : (1.0f / plMath::Max(pComp->m_fRatio.load(std::memory_order_relaxed), 1.0f));
 
   float fEnvelope = pComp->m_fEnvelope;
 
@@ -537,6 +568,360 @@ void plMiniAudioDsp::UninitCompressorNode(plMaCompressorNode* pNode)
 }
 
 // ---------------------------------------------------------------------------------------------
+// Filter node
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+  plInt32 FloatToBits(float fValue)
+  {
+    plInt32 iBits = 0;
+    plMemoryUtils::RawByteCopy(&iBits, &fValue, sizeof(float));
+    return iBits;
+  }
+
+  float BitsToFloat(plInt32 iBits)
+  {
+    float fValue = 0.0f;
+    plMemoryUtils::RawByteCopy(&fValue, &iBits, sizeof(float));
+    return fValue;
+  }
+
+  /// Heap bytes the filter needs at the given order (the order only matters for low and high pass).
+  size_t GetFilterHeapSize(plMaFilterNode::Type type, plUInt32 uiChannels, plUInt32 uiSampleRate, plUInt32 uiOrder)
+  {
+    size_t uiSize = 0;
+
+    switch (type)
+    {
+      case plMaFilterNode::Type::LowPass:
+      {
+        const ma_lpf_config cfg = ma_lpf_config_init(ma_format_f32, uiChannels, uiSampleRate, 1000.0, uiOrder);
+        ma_lpf_get_heap_size(&cfg, &uiSize);
+        break;
+      }
+      case plMaFilterNode::Type::HighPass:
+      {
+        const ma_hpf_config cfg = ma_hpf_config_init(ma_format_f32, uiChannels, uiSampleRate, 1000.0, uiOrder);
+        ma_hpf_get_heap_size(&cfg, &uiSize);
+        break;
+      }
+      case plMaFilterNode::Type::LowShelf:
+      {
+        const ma_loshelf2_config cfg = ma_loshelf2_config_init(ma_format_f32, uiChannels, uiSampleRate, 0.0, 0.707, 1000.0);
+        ma_loshelf2_get_heap_size(&cfg, &uiSize);
+        break;
+      }
+      case plMaFilterNode::Type::Peak:
+      {
+        const ma_peak2_config cfg = ma_peak2_config_init(ma_format_f32, uiChannels, uiSampleRate, 0.0, 1.0, 1000.0);
+        ma_peak2_get_heap_size(&cfg, &uiSize);
+        break;
+      }
+      case plMaFilterNode::Type::HighShelf:
+      {
+        const ma_hishelf2_config cfg = ma_hishelf2_config_init(ma_format_f32, uiChannels, uiSampleRate, 0.0, 0.707, 1000.0);
+        ma_hishelf2_get_heap_size(&cfg, &uiSize);
+        break;
+      }
+    }
+
+    return uiSize;
+  }
+
+  /// Brings the filter in line with the stored settings. With bInit the filter is initialized; otherwise the
+  /// coefficients are recomputed (state kept) or, for a changed low/high pass order, the filter is initialized again in
+  /// its heap. Called on the device thread, or before the node is attached.
+  ma_result ApplyFilterSettings(plMaFilterNode* pNode, bool bInit)
+  {
+    const double fNyquistGuard = 0.49 * static_cast<double>(pNode->m_uiSampleRate);
+    const double fFrequency = plMath::Clamp(static_cast<double>(BitsToFloat(pNode->m_iFrequencyBits)), 10.0, fNyquistGuard);
+    const double fGainDb = BitsToFloat(pNode->m_iGainDbBits);
+    const double fQ = plMath::Max(static_cast<double>(BitsToFloat(pNode->m_iQBits)), 0.1);
+    const plUInt32 uiOrder = plMath::Clamp<plUInt32>(static_cast<plUInt32>(static_cast<plInt32>(pNode->m_iOrder)), 1u, pNode->m_uiMaxOrder);
+
+    switch (pNode->m_eType)
+    {
+      case plMaFilterNode::Type::LowPass:
+      {
+        const ma_lpf_config cfg = ma_lpf_config_init(ma_format_f32, pNode->m_uiChannels, pNode->m_uiSampleRate, fFrequency, uiOrder);
+        if (!bInit && uiOrder == pNode->m_uiAppliedOrder)
+          return ma_lpf_reinit(&cfg, &pNode->m_Lpf);
+
+        if (!bInit)
+          ma_lpf_uninit(&pNode->m_Lpf, nullptr);
+
+        pNode->m_uiAppliedOrder = uiOrder;
+        return ma_lpf_init_preallocated(&cfg, pNode->m_pHeap, &pNode->m_Lpf);
+      }
+
+      case plMaFilterNode::Type::HighPass:
+      {
+        const ma_hpf_config cfg = ma_hpf_config_init(ma_format_f32, pNode->m_uiChannels, pNode->m_uiSampleRate, fFrequency, uiOrder);
+        if (!bInit && uiOrder == pNode->m_uiAppliedOrder)
+          return ma_hpf_reinit(&cfg, &pNode->m_Hpf);
+
+        if (!bInit)
+          ma_hpf_uninit(&pNode->m_Hpf, nullptr);
+
+        pNode->m_uiAppliedOrder = uiOrder;
+        return ma_hpf_init_preallocated(&cfg, pNode->m_pHeap, &pNode->m_Hpf);
+      }
+
+      case plMaFilterNode::Type::LowShelf:
+      {
+        const ma_loshelf2_config cfg = ma_loshelf2_config_init(ma_format_f32, pNode->m_uiChannels, pNode->m_uiSampleRate, fGainDb, 0.707, fFrequency);
+        return bInit ? ma_loshelf2_init_preallocated(&cfg, pNode->m_pHeap, &pNode->m_LoShelf) : ma_loshelf2_reinit(&cfg, &pNode->m_LoShelf);
+      }
+
+      case plMaFilterNode::Type::Peak:
+      {
+        const ma_peak2_config cfg = ma_peak2_config_init(ma_format_f32, pNode->m_uiChannels, pNode->m_uiSampleRate, fGainDb, fQ, fFrequency);
+        return bInit ? ma_peak2_init_preallocated(&cfg, pNode->m_pHeap, &pNode->m_Peak) : ma_peak2_reinit(&cfg, &pNode->m_Peak);
+      }
+
+      case plMaFilterNode::Type::HighShelf:
+      {
+        const ma_hishelf2_config cfg = ma_hishelf2_config_init(ma_format_f32, pNode->m_uiChannels, pNode->m_uiSampleRate, fGainDb, 0.707, fFrequency);
+        return bInit ? ma_hishelf2_init_preallocated(&cfg, pNode->m_pHeap, &pNode->m_HiShelf) : ma_hishelf2_reinit(&cfg, &pNode->m_HiShelf);
+      }
+    }
+
+    return MA_INVALID_ARGS;
+  }
+} // namespace
+
+static void plMaFilterNodeProcess(ma_node* pNodeBase, const float** ppFramesIn, ma_uint32* pFrameCountIn, float** ppFramesOut, ma_uint32* pFrameCountOut)
+{
+  PL_IGNORE_UNUSED(pFrameCountIn);
+
+  auto* pNode = reinterpret_cast<plMaFilterNode*>(pNodeBase);
+
+  const plInt32 iGeneration = pNode->m_iGeneration;
+  if (iGeneration != pNode->m_iAppliedGeneration)
+  {
+    // a rejected setting (e.g. an unsupported frequency) keeps the previous coefficients
+    ApplyFilterSettings(pNode, false);
+    pNode->m_iAppliedGeneration = iGeneration;
+  }
+
+  const ma_uint32 uiFrames = *pFrameCountOut;
+
+  switch (pNode->m_eType)
+  {
+    case plMaFilterNode::Type::LowPass:
+      ma_lpf_process_pcm_frames(&pNode->m_Lpf, ppFramesOut[0], ppFramesIn[0], uiFrames);
+      break;
+    case plMaFilterNode::Type::HighPass:
+      ma_hpf_process_pcm_frames(&pNode->m_Hpf, ppFramesOut[0], ppFramesIn[0], uiFrames);
+      break;
+    case plMaFilterNode::Type::LowShelf:
+      ma_loshelf2_process_pcm_frames(&pNode->m_LoShelf, ppFramesOut[0], ppFramesIn[0], uiFrames);
+      break;
+    case plMaFilterNode::Type::Peak:
+      ma_peak2_process_pcm_frames(&pNode->m_Peak, ppFramesOut[0], ppFramesIn[0], uiFrames);
+      break;
+    case plMaFilterNode::Type::HighShelf:
+      ma_hishelf2_process_pcm_frames(&pNode->m_HiShelf, ppFramesOut[0], ppFramesIn[0], uiFrames);
+      break;
+  }
+}
+
+static ma_node_vtable g_plMaFilterNodeVTable = {plMaFilterNodeProcess, nullptr, 1, 1, 0};
+
+plResult plMiniAudioDsp::InitFilterNode(ma_engine* pEngine, plMaFilterNode* pNode, plMaFilterNode::Type type, plUInt32 uiMaxOrder, float fFrequency, plUInt32 uiOrder, float fGainDb, float fQ, const ma_allocation_callbacks* pCallbacks)
+{
+  pNode->m_bValid = false;
+  pNode->m_eType = type;
+  pNode->m_uiChannels = ma_engine_get_channels(pEngine);
+  pNode->m_uiSampleRate = ma_engine_get_sample_rate(pEngine);
+  pNode->m_uiMaxOrder = plMath::Clamp<plUInt32>(uiMaxOrder, 1u, plMaFilterNode::MaxOrder);
+  pNode->m_AllocationCallbacks = (pCallbacks != nullptr) ? *pCallbacks : ma_allocation_callbacks{};
+  pNode->m_iAppliedGeneration = 0;
+  pNode->m_iGeneration = 0;
+  pNode->m_uiAppliedOrder = 0;
+
+  pNode->m_fLastFrequency = fFrequency;
+  pNode->m_fLastGainDb = fGainDb;
+  pNode->m_fLastQ = fQ;
+  pNode->m_uiLastOrder = plMath::Clamp<plUInt32>(uiOrder, 1u, pNode->m_uiMaxOrder);
+  pNode->m_iFrequencyBits = FloatToBits(fFrequency);
+  pNode->m_iGainDbBits = FloatToBits(fGainDb);
+  pNode->m_iQBits = FloatToBits(fQ);
+  pNode->m_iOrder = static_cast<plInt32>(pNode->m_uiLastOrder);
+
+  // the heap is sized for the maximum order, so a later order change re-initializes in place
+  const size_t uiHeapSize = GetFilterHeapSize(type, pNode->m_uiChannels, pNode->m_uiSampleRate, pNode->m_uiMaxOrder);
+  if (uiHeapSize <= plMaFilterNode::InlineHeapBytes)
+  {
+    pNode->m_pHeap = pNode->m_InlineHeap;
+  }
+  else
+  {
+    pNode->m_pHeap = (pCallbacks != nullptr && pCallbacks->onMalloc != nullptr) ? pCallbacks->onMalloc(uiHeapSize, pCallbacks->pUserData) : ma_malloc(uiHeapSize, nullptr);
+    if (pNode->m_pHeap == nullptr)
+      return PL_FAILURE;
+  }
+  plMemoryUtils::ZeroFill(static_cast<plUInt8*>(pNode->m_pHeap), uiHeapSize);
+
+  auto FreeHeap = [&]()
+  {
+    if (pNode->m_pHeap != nullptr && pNode->m_pHeap != pNode->m_InlineHeap)
+    {
+      if (pNode->m_AllocationCallbacks.onFree != nullptr)
+        pNode->m_AllocationCallbacks.onFree(pNode->m_pHeap, pNode->m_AllocationCallbacks.pUserData);
+      else
+        ma_free(pNode->m_pHeap, nullptr);
+    }
+    pNode->m_pHeap = nullptr;
+  };
+
+  if (ApplyFilterSettings(pNode, true) != MA_SUCCESS)
+  {
+    FreeHeap();
+    return PL_FAILURE;
+  }
+
+  ma_node_config cfg = ma_node_config_init();
+  cfg.vtable = &g_plMaFilterNodeVTable;
+  cfg.pInputChannels = &pNode->m_uiChannels;
+  cfg.pOutputChannels = &pNode->m_uiChannels;
+
+  if (ma_node_init(ma_engine_get_node_graph(pEngine), &cfg, pCallbacks, &pNode->m_Base) != MA_SUCCESS)
+  {
+    FreeHeap();
+    return PL_FAILURE;
+  }
+
+  pNode->m_bValid = true;
+  return PL_SUCCESS;
+}
+
+void plMiniAudioDsp::UninitFilterNode(plMaFilterNode* pNode)
+{
+  if (!pNode->m_bValid)
+    return;
+
+  const ma_allocation_callbacks* pCallbacks = (pNode->m_AllocationCallbacks.onFree != nullptr) ? &pNode->m_AllocationCallbacks : nullptr;
+  ma_node_uninit(&pNode->m_Base, pCallbacks);
+
+  if (pNode->m_pHeap != nullptr && pNode->m_pHeap != pNode->m_InlineHeap)
+  {
+    if (pCallbacks != nullptr)
+      pCallbacks->onFree(pNode->m_pHeap, pCallbacks->pUserData);
+    else
+      ma_free(pNode->m_pHeap, nullptr);
+  }
+
+  pNode->m_pHeap = nullptr;
+  pNode->m_bValid = false;
+}
+
+void plMiniAudioDsp::SetFilter(plMaFilterNode* pNode, float fFrequency, plUInt32 uiOrder, float fGainDb, float fQ)
+{
+  if (!pNode->m_bValid)
+    return;
+
+  uiOrder = plMath::Clamp<plUInt32>(uiOrder, 1u, pNode->m_uiMaxOrder);
+
+  // frequency changes below 0.1 % are inaudible; skipping them keeps the device thread from recomputing for nothing
+  const bool bFrequencyChanged = plMath::Abs(fFrequency - pNode->m_fLastFrequency) > 0.001f * plMath::Max(pNode->m_fLastFrequency, 1.0f);
+  if (!bFrequencyChanged && uiOrder == pNode->m_uiLastOrder && fGainDb == pNode->m_fLastGainDb && fQ == pNode->m_fLastQ)
+    return;
+
+  pNode->m_fLastFrequency = fFrequency;
+  pNode->m_fLastGainDb = fGainDb;
+  pNode->m_fLastQ = fQ;
+  pNode->m_uiLastOrder = uiOrder;
+
+  pNode->m_iFrequencyBits = FloatToBits(fFrequency);
+  pNode->m_iGainDbBits = FloatToBits(fGainDb);
+  pNode->m_iQBits = FloatToBits(fQ);
+  pNode->m_iOrder = static_cast<plInt32>(uiOrder);
+
+  // published last: the device thread reads the settings after it saw the new generation
+  pNode->m_iGeneration.Increment();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Delay node
+// ---------------------------------------------------------------------------------------------
+
+static void plMaDelayNodeProcess(ma_node* pNodeBase, const float** ppFramesIn, ma_uint32* pFrameCountIn, float** ppFramesOut, ma_uint32* pFrameCountOut)
+{
+  PL_IGNORE_UNUSED(pFrameCountIn);
+
+  auto* pNode = reinterpret_cast<plMaDelayNode*>(pNodeBase);
+
+  const float* pIn = ppFramesIn[0];
+  float* pOut = ppFramesOut[0];
+  const plUInt32 uiFrames = *pFrameCountOut;
+  const plUInt32 uiChannels = pNode->m_uiChannels;
+  const plUInt32 uiSize = pNode->m_uiMaxDelayFrames;
+
+  const plUInt32 uiDelay = plMath::Clamp<plUInt32>(pNode->m_uiDelayFrames.load(std::memory_order_relaxed), 1u, uiSize - 1);
+  const float fFeedback = plMath::Clamp(pNode->m_fFeedback.load(std::memory_order_relaxed), 0.0f, 0.99f);
+  const float fWet = plMath::Clamp(pNode->m_fWet.load(std::memory_order_relaxed), 0.0f, 1.0f);
+  const float fDry = plMath::Clamp(pNode->m_fDry.load(std::memory_order_relaxed), 0.0f, 1.0f);
+
+  for (plUInt32 f = 0; f < uiFrames; ++f)
+  {
+    const plUInt32 uiWrite = pNode->m_uiWriteFrame;
+    const plUInt32 uiRead = (uiWrite + uiSize - uiDelay) % uiSize;
+
+    for (plUInt32 c = 0; c < uiChannels; ++c)
+    {
+      const float fInput = pIn[f * uiChannels + c];
+      const float fDelayed = pNode->m_pBuffer[uiRead * uiChannels + c];
+
+      pNode->m_pBuffer[uiWrite * uiChannels + c] = fInput + fDelayed * fFeedback;
+      pOut[f * uiChannels + c] = fInput * fDry + fDelayed * fWet;
+    }
+
+    pNode->m_uiWriteFrame = (uiWrite + 1) % uiSize;
+  }
+}
+
+static ma_node_vtable g_plMaDelayNodeVTable = {plMaDelayNodeProcess, nullptr, 1, 1, 0};
+
+plResult plMiniAudioDsp::InitDelayNode(ma_engine* pEngine, plMaDelayNode* pNode, plUInt32 uiMaxDelayFrames)
+{
+  pNode->m_uiChannels = ma_engine_get_channels(pEngine);
+  pNode->m_uiSampleRate = ma_engine_get_sample_rate(pEngine);
+  pNode->m_uiMaxDelayFrames = plMath::Max<plUInt32>(uiMaxDelayFrames, 2) + 1;
+  pNode->m_uiWriteFrame = 0;
+
+  auto buffer = PL_DEFAULT_NEW_ARRAY(float, pNode->m_uiMaxDelayFrames * pNode->m_uiChannels);
+  plMemoryUtils::ZeroFill(buffer.GetPtr(), buffer.GetCount());
+  pNode->m_pBuffer = buffer.GetPtr();
+
+  ma_node_config cfg = ma_node_config_init();
+  cfg.vtable = &g_plMaDelayNodeVTable;
+  cfg.pInputChannels = &pNode->m_uiChannels;
+  cfg.pOutputChannels = &pNode->m_uiChannels;
+
+  if (ma_node_init(ma_engine_get_node_graph(pEngine), &cfg, nullptr, &pNode->m_Base) != MA_SUCCESS)
+  {
+    PL_DEFAULT_DELETE_ARRAY(buffer);
+    pNode->m_pBuffer = nullptr;
+    return PL_FAILURE;
+  }
+
+  return PL_SUCCESS;
+}
+
+void plMiniAudioDsp::UninitDelayNode(plMaDelayNode* pNode)
+{
+  if (pNode->m_pBuffer == nullptr)
+    return;
+
+  ma_node_uninit(&pNode->m_Base, nullptr);
+
+  PL_DEFAULT_DELETE_ARRAY(plArrayPtr<float>(pNode->m_pBuffer, pNode->m_uiMaxDelayFrames * pNode->m_uiChannels));
+  pNode->m_pBuffer = nullptr;
+}
+
+// ---------------------------------------------------------------------------------------------
 // plMiniAudioEffect
 // ---------------------------------------------------------------------------------------------
 
@@ -546,30 +931,16 @@ plResult plMiniAudioEffect::Create(ma_engine* pEngine, const plAudioEffectDesc& 
   m_eType = desc.m_eType;
   plMemoryUtils::Copy(m_fParams, desc.m_fParams, plAudioEffectMaxParams);
 
-  const plUInt32 uiChannels = ma_engine_get_channels(pEngine);
   const plUInt32 uiSampleRate = ma_engine_get_sample_rate(pEngine);
-  ma_node_graph* pGraph = ma_engine_get_node_graph(pEngine);
 
   switch (m_eType)
   {
     case plAudioEffectType::LowPass:
-    {
-      ma_lpf_node* pNode = PL_DEFAULT_NEW(ma_lpf_node);
-      const ma_lpf_node_config cfg = ma_lpf_node_config_init(uiChannels, uiSampleRate, plMath::Clamp(m_fParams[0], 10.0f, 24000.0f), plMath::Clamp<plUInt32>(static_cast<plUInt32>(m_fParams[1]), 1, 8));
-      if (ma_lpf_node_init(pGraph, &cfg, nullptr, pNode) != MA_SUCCESS)
-      {
-        PL_DEFAULT_DELETE(pNode);
-        return PL_FAILURE;
-      }
-      m_Nodes.PushBack(reinterpret_cast<ma_node*>(pNode));
-      break;
-    }
-
     case plAudioEffectType::HighPass:
     {
-      ma_hpf_node* pNode = PL_DEFAULT_NEW(ma_hpf_node);
-      const ma_hpf_node_config cfg = ma_hpf_node_config_init(uiChannels, uiSampleRate, plMath::Clamp(m_fParams[0], 10.0f, 24000.0f), plMath::Clamp<plUInt32>(static_cast<plUInt32>(m_fParams[1]), 1, 8));
-      if (ma_hpf_node_init(pGraph, &cfg, nullptr, pNode) != MA_SUCCESS)
+      const plMaFilterNode::Type type = (m_eType == plAudioEffectType::LowPass) ? plMaFilterNode::Type::LowPass : plMaFilterNode::Type::HighPass;
+      plMaFilterNode* pNode = PL_DEFAULT_NEW(plMaFilterNode);
+      if (plMiniAudioDsp::InitFilterNode(pEngine, pNode, type, plMaFilterNode::MaxOrder, m_fParams[0], static_cast<plUInt32>(m_fParams[1]), 0.0f, 1.0f, nullptr).Failed())
       {
         PL_DEFAULT_DELETE(pNode);
         return PL_FAILURE;
@@ -580,46 +951,50 @@ plResult plMiniAudioEffect::Create(ma_engine* pEngine, const plAudioEffectDesc& 
 
     case plAudioEffectType::Eq3:
     {
-      ma_loshelf_node* pLow = PL_DEFAULT_NEW(ma_loshelf_node);
-      ma_peak_node* pMid = PL_DEFAULT_NEW(ma_peak_node);
-      ma_hishelf_node* pHigh = PL_DEFAULT_NEW(ma_hishelf_node);
+      plMaFilterNode* pBands[3] = {PL_DEFAULT_NEW(plMaFilterNode), PL_DEFAULT_NEW(plMaFilterNode), PL_DEFAULT_NEW(plMaFilterNode)};
 
-      const ma_loshelf_node_config lowCfg = ma_loshelf_node_config_init(uiChannels, uiSampleRate, m_fParams[0], 0.707, plMath::Max(m_fParams[1], 10.0f));
-      const ma_peak_node_config midCfg = ma_peak_node_config_init(uiChannels, uiSampleRate, m_fParams[2], plMath::Max(m_fParams[4], 0.1f), plMath::Max(m_fParams[3], 10.0f));
-      const ma_hishelf_node_config highCfg = ma_hishelf_node_config_init(uiChannels, uiSampleRate, m_fParams[5], 0.707, plMath::Max(m_fParams[6], 10.0f));
+      bool bOk = plMiniAudioDsp::InitFilterNode(pEngine, pBands[0], plMaFilterNode::Type::LowShelf, 1, plMath::Max(m_fParams[1], 10.0f), 1, m_fParams[0], 1.0f, nullptr).Succeeded();
+      bOk = bOk && plMiniAudioDsp::InitFilterNode(pEngine, pBands[1], plMaFilterNode::Type::Peak, 1, plMath::Max(m_fParams[3], 10.0f), 1, m_fParams[2], plMath::Max(m_fParams[4], 0.1f), nullptr).Succeeded();
+      bOk = bOk && plMiniAudioDsp::InitFilterNode(pEngine, pBands[2], plMaFilterNode::Type::HighShelf, 1, plMath::Max(m_fParams[6], 10.0f), 1, m_fParams[5], 1.0f, nullptr).Succeeded();
 
-      if (ma_loshelf_node_init(pGraph, &lowCfg, nullptr, pLow) != MA_SUCCESS ||
-          ma_peak_node_init(pGraph, &midCfg, nullptr, pMid) != MA_SUCCESS ||
-          ma_hishelf_node_init(pGraph, &highCfg, nullptr, pHigh) != MA_SUCCESS)
+      if (!bOk)
       {
-        PL_DEFAULT_DELETE(pLow);
-        PL_DEFAULT_DELETE(pMid);
-        PL_DEFAULT_DELETE(pHigh);
+        for (plMaFilterNode* pBand : pBands)
+        {
+          plMiniAudioDsp::UninitFilterNode(pBand);
+          PL_DEFAULT_DELETE(pBand);
+        }
         return PL_FAILURE;
       }
 
       // chain: low -> mid -> high
-      ma_node_attach_output_bus(reinterpret_cast<ma_node*>(pLow), 0, reinterpret_cast<ma_node*>(pMid), 0);
-      ma_node_attach_output_bus(reinterpret_cast<ma_node*>(pMid), 0, reinterpret_cast<ma_node*>(pHigh), 0);
+      ma_node_attach_output_bus(reinterpret_cast<ma_node*>(pBands[0]), 0, reinterpret_cast<ma_node*>(pBands[1]), 0);
+      ma_node_attach_output_bus(reinterpret_cast<ma_node*>(pBands[1]), 0, reinterpret_cast<ma_node*>(pBands[2]), 0);
 
-      m_Nodes.PushBack(reinterpret_cast<ma_node*>(pLow));
-      m_Nodes.PushBack(reinterpret_cast<ma_node*>(pMid));
-      m_Nodes.PushBack(reinterpret_cast<ma_node*>(pHigh));
+      for (plMaFilterNode* pBand : pBands)
+      {
+        m_Nodes.PushBack(reinterpret_cast<ma_node*>(pBand));
+      }
       break;
     }
 
     case plAudioEffectType::Delay:
     {
-      ma_delay_node* pNode = PL_DEFAULT_NEW(ma_delay_node);
-      const plUInt32 uiDelayFrames = plMath::Max<plUInt32>(1, static_cast<plUInt32>(plMath::Max(m_fParams[0], 1.0f) * 0.001f * uiSampleRate));
-      ma_delay_node_config cfg = ma_delay_node_config_init(uiChannels, uiSampleRate, uiDelayFrames, plMath::Clamp(m_fParams[1], 0.0f, 0.99f));
-      cfg.delay.wet = plMath::Clamp(m_fParams[2], 0.0f, 1.0f);
-      cfg.delay.dry = plMath::Clamp(m_fParams[3], 0.0f, 1.0f);
-      if (ma_delay_node_init(pGraph, &cfg, nullptr, pNode) != MA_SUCCESS)
+      // the buffer covers the longest delay the effect may be set to while it plays
+      const float fMaxDelayMs = plMath::Max(MaxLiveDelayMs, m_fParams[0]);
+      const plUInt32 uiMaxDelayFrames = static_cast<plUInt32>(fMaxDelayMs * 0.001f * uiSampleRate) + 1;
+
+      plMaDelayNode* pNode = PL_DEFAULT_NEW(plMaDelayNode);
+      if (plMiniAudioDsp::InitDelayNode(pEngine, pNode, uiMaxDelayFrames).Failed())
       {
         PL_DEFAULT_DELETE(pNode);
         return PL_FAILURE;
       }
+
+      pNode->m_uiDelayFrames.store(plMath::Max<plUInt32>(1, static_cast<plUInt32>(plMath::Max(m_fParams[0], 1.0f) * 0.001f * uiSampleRate)), std::memory_order_relaxed);
+      pNode->m_fFeedback.store(m_fParams[1], std::memory_order_relaxed);
+      pNode->m_fWet.store(m_fParams[2], std::memory_order_relaxed);
+      pNode->m_fDry.store(m_fParams[3], std::memory_order_relaxed);
       m_Nodes.PushBack(reinterpret_cast<ma_node*>(pNode));
       break;
     }
@@ -678,43 +1053,21 @@ void plMiniAudioEffect::Destroy()
   switch (m_eType)
   {
     case plAudioEffectType::LowPass:
-      if (!m_Nodes.IsEmpty())
-      {
-        auto* pNode = reinterpret_cast<ma_lpf_node*>(m_Nodes[0]);
-        ma_lpf_node_uninit(pNode, nullptr);
-        PL_DEFAULT_DELETE(pNode);
-      }
-      break;
-
     case plAudioEffectType::HighPass:
-      if (!m_Nodes.IsEmpty())
-      {
-        auto* pNode = reinterpret_cast<ma_hpf_node*>(m_Nodes[0]);
-        ma_hpf_node_uninit(pNode, nullptr);
-        PL_DEFAULT_DELETE(pNode);
-      }
-      break;
-
     case plAudioEffectType::Eq3:
-      if (m_Nodes.GetCount() == 3)
+      for (ma_node* pNodeBase : m_Nodes)
       {
-        auto* pLow = reinterpret_cast<ma_loshelf_node*>(m_Nodes[0]);
-        auto* pMid = reinterpret_cast<ma_peak_node*>(m_Nodes[1]);
-        auto* pHigh = reinterpret_cast<ma_hishelf_node*>(m_Nodes[2]);
-        ma_loshelf_node_uninit(pLow, nullptr);
-        ma_peak_node_uninit(pMid, nullptr);
-        ma_hishelf_node_uninit(pHigh, nullptr);
-        PL_DEFAULT_DELETE(pLow);
-        PL_DEFAULT_DELETE(pMid);
-        PL_DEFAULT_DELETE(pHigh);
+        auto* pNode = reinterpret_cast<plMaFilterNode*>(pNodeBase);
+        plMiniAudioDsp::UninitFilterNode(pNode);
+        PL_DEFAULT_DELETE(pNode);
       }
       break;
 
     case plAudioEffectType::Delay:
       if (!m_Nodes.IsEmpty())
       {
-        auto* pNode = reinterpret_cast<ma_delay_node*>(m_Nodes[0]);
-        ma_delay_node_uninit(pNode, nullptr);
+        auto* pNode = reinterpret_cast<plMaDelayNode*>(m_Nodes[0]);
+        plMiniAudioDsp::UninitDelayNode(pNode);
         PL_DEFAULT_DELETE(pNode);
       }
       break;
@@ -758,16 +1111,17 @@ void plMiniAudioEffect::SetParameter(plUInt32 uiParamIndex, float fValue)
     case plAudioEffectType::LowPass:
     case plAudioEffectType::HighPass:
     case plAudioEffectType::Eq3:
-      ReinitFilters();
+      ApplyFilterParams();
       break;
 
     case plAudioEffectType::Delay:
     {
-      auto* pNode = reinterpret_cast<ma_delay_node*>(m_Nodes[0]);
-      // delay time (param 0) cannot be changed live â€” buffer is fixed at init
-      ma_delay_node_set_decay(pNode, plMath::Clamp(m_fParams[1], 0.0f, 0.99f));
-      ma_delay_node_set_wet(pNode, plMath::Clamp(m_fParams[2], 0.0f, 1.0f));
-      ma_delay_node_set_dry(pNode, plMath::Clamp(m_fParams[3], 0.0f, 1.0f));
+      auto* pNode = reinterpret_cast<plMaDelayNode*>(m_Nodes[0]);
+      const plUInt32 uiDelayFrames = static_cast<plUInt32>(plMath::Max(m_fParams[0], 1.0f) * 0.001f * pNode->m_uiSampleRate);
+      pNode->m_uiDelayFrames.store(plMath::Clamp<plUInt32>(uiDelayFrames, 1u, pNode->m_uiMaxDelayFrames - 1), std::memory_order_relaxed);
+      pNode->m_fFeedback.store(m_fParams[1], std::memory_order_relaxed);
+      pNode->m_fWet.store(m_fParams[2], std::memory_order_relaxed);
+      pNode->m_fDry.store(m_fParams[3], std::memory_order_relaxed);
       break;
     }
 
@@ -803,37 +1157,23 @@ void plMiniAudioEffect::SetParameter(plUInt32 uiParamIndex, float fValue)
   }
 }
 
-void plMiniAudioEffect::ReinitFilters()
+void plMiniAudioEffect::ApplyFilterParams()
 {
-  const plUInt32 uiChannels = ma_engine_get_channels(m_pEngine);
-  const plUInt32 uiSampleRate = ma_engine_get_sample_rate(m_pEngine);
-
   switch (m_eType)
   {
     case plAudioEffectType::LowPass:
-    {
-      const ma_lpf_config cfg = ma_lpf_config_init(ma_format_f32, uiChannels, uiSampleRate, plMath::Clamp(m_fParams[0], 10.0f, 24000.0f), plMath::Clamp<plUInt32>(static_cast<plUInt32>(m_fParams[1]), 1, 8));
-      ma_lpf_node_reinit(&cfg, reinterpret_cast<ma_lpf_node*>(m_Nodes[0]));
-      break;
-    }
-
     case plAudioEffectType::HighPass:
-    {
-      const ma_hpf_config cfg = ma_hpf_config_init(ma_format_f32, uiChannels, uiSampleRate, plMath::Clamp(m_fParams[0], 10.0f, 24000.0f), plMath::Clamp<plUInt32>(static_cast<plUInt32>(m_fParams[1]), 1, 8));
-      ma_hpf_node_reinit(&cfg, reinterpret_cast<ma_hpf_node*>(m_Nodes[0]));
+      plMiniAudioDsp::SetFilter(reinterpret_cast<plMaFilterNode*>(m_Nodes[0]), m_fParams[0], static_cast<plUInt32>(m_fParams[1]), 0.0f, 1.0f);
       break;
-    }
 
     case plAudioEffectType::Eq3:
-    {
-      const ma_loshelf2_config lowCfg = ma_loshelf2_config_init(ma_format_f32, uiChannels, uiSampleRate, m_fParams[0], 0.707, plMath::Max(m_fParams[1], 10.0f));
-      const ma_peak2_config midCfg = ma_peak2_config_init(ma_format_f32, uiChannels, uiSampleRate, m_fParams[2], plMath::Max(m_fParams[4], 0.1f), plMath::Max(m_fParams[3], 10.0f));
-      const ma_hishelf2_config highCfg = ma_hishelf2_config_init(ma_format_f32, uiChannels, uiSampleRate, m_fParams[5], 0.707, plMath::Max(m_fParams[6], 10.0f));
-      ma_loshelf_node_reinit(&lowCfg, reinterpret_cast<ma_loshelf_node*>(m_Nodes[0]));
-      ma_peak_node_reinit(&midCfg, reinterpret_cast<ma_peak_node*>(m_Nodes[1]));
-      ma_hishelf_node_reinit(&highCfg, reinterpret_cast<ma_hishelf_node*>(m_Nodes[2]));
+      if (m_Nodes.GetCount() == 3)
+      {
+        plMiniAudioDsp::SetFilter(reinterpret_cast<plMaFilterNode*>(m_Nodes[0]), plMath::Max(m_fParams[1], 10.0f), 1, m_fParams[0], 1.0f);
+        plMiniAudioDsp::SetFilter(reinterpret_cast<plMaFilterNode*>(m_Nodes[1]), plMath::Max(m_fParams[3], 10.0f), 1, m_fParams[2], plMath::Max(m_fParams[4], 0.1f));
+        plMiniAudioDsp::SetFilter(reinterpret_cast<plMaFilterNode*>(m_Nodes[2]), plMath::Max(m_fParams[6], 10.0f), 1, m_fParams[5], 1.0f);
+      }
       break;
-    }
 
     default:
       break;

@@ -7,7 +7,10 @@
 #include <Foundation/Types/UniquePtr.h>
 #include <MiniAudio/miniaudio.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipVoiceSource.h>
+#include <Foundation/Threading/AtomicInteger.h>
+#include <Foundation/Threading/Mutex.h>
 #include <PlasmaAudioPlugin/Events/AudioVoiceManager.h>
+#include <PlasmaAudioPlugin/Mixer/MiniAudioDspNodes.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
 #include <PlasmaAudioPlugin/Profiling/AudioEventLog.h>
 #include <PlasmaAudioPlugin/Resources/MiniAudioSoundResource.h>
@@ -55,6 +58,27 @@ struct plMaVoiceDataSource
   bool m_bLeadResolved = false;
   bool m_bStartFadeApplied = false;
   bool m_bPadded = false;
+
+  /// \name Published by the device thread after every read, for the audio thread
+  /// The audio thread never reads the inner source's cursor itself: the device thread advances it concurrently.
+  ///@{
+  plAtomicInteger64 m_iPublishedCursor; ///< inner source cursor (source frames) after the last read
+  plAtomicInteger64 m_iStarvedFrames;   ///< source frames of silence the inner source returned without advancing (stream underruns)
+  ///@}
+};
+
+/// \brief Clip loads an event instance asks for while the event manager's mutex is held.
+///
+/// Loading or reloading a resource takes the resource manager's mutex, which must never be acquired while the event
+/// manager's mutex is held (see plPlasmaAudioEventManager). The manager issues these requests once it released its mutex.
+struct plPlasmaAudioDeferredLoads
+{
+  plHybridArray<plAudioClipResourceHandle, 8> m_Preload;
+  plHybridArray<plAudioClipResourceHandle, 4> m_Reload; ///< reloaded (for a language switch), then preloaded
+
+  void Preload(const plAudioClipResourceHandle& hClip);
+  void Reload(const plAudioClipResourceHandle& hClip);
+  PL_NODISCARD bool IsEmpty() const { return m_Preload.IsEmpty() && m_Reload.IsEmpty(); }
 };
 
 /// \brief One playing occurrence of an audio event on an entity.
@@ -90,7 +114,11 @@ struct plMaVoiceDataSource
 /// including streams still held by fading-out voices, and is realized by a later voice manager Update once one is
 /// released. Resource unloading and instance stops still cut voices immediately.
 ///
-/// Used by plPlasmaAudioEventManager, under the resource manager mutex (see there). The manager pools finished
+/// A virtual voice keeps its timeline position as a source-frame cursor that every Update advances by the elapsed
+/// engine frames times the pitch of that moment, so a voice whose pitch changed resumes where it would have been. A
+/// real voice's position is the cursor its data source publishes from the device thread.
+///
+/// Used by plPlasmaAudioEventManager, under the manager's mutex (see there). The manager pools finished
 /// instances; Reset() returns an instance to its unstarted state and keeps the capacity of its arrays and its clip
 /// sources, so a reused instance starts without heap allocations of its own.
 class plPlasmaAudioEventInstance
@@ -112,10 +140,20 @@ public:
   void Stop(bool bImmediate);
 
   /// \brief Advances scheduling/automation. Returns false when the instance has fully finished.
-  bool Update(plTime delta, const plVec3& vListenerPos, plRandom& ref_rng);
+  ///
+  /// The listener closest to the entity is the one the voices are spatialized against; distance, the Distance
+  /// parameter and the audibility use it. An empty array keeps the last listener position.
+  bool Update(plTime delta, plArrayPtr<const plVec3> listeners, plRandom& ref_rng);
 
   /// \brief Sets an instance-local parameter value. Once set, it takes precedence over a global parameter of the same name.
   void SetParameter(plStringView sName, float fValue);
+
+  /// \brief Drops the instance-local value of a parameter: it follows the global parameter of the same name again, or
+  /// goes back to its default without one.
+  void ResetParameter(plStringView sName);
+
+  /// \brief Sets m_vListenerPos to the listener closest to the entity (or the first one for a global entity).
+  void SelectListener(plArrayPtr<const plVec3> listeners);
 
   PL_NODISCARD bool IsStopping() const { return m_bStopping; }
 
@@ -156,6 +194,9 @@ public:
 
   /// \brief Receives the voice changes and clip problems of the instance; null logs nothing.
   plAudioEventLog* m_pEventLog = nullptr;
+
+  /// \brief Collects the clip loads the instance needs; the manager issues them outside its mutex. Null issues none.
+  plPlasmaAudioDeferredLoads* m_pDeferredLoads = nullptr;
 
   /// \brief Listener position for the audibility; updated by every Update.
   plVec3 m_vListenerPos = plVec3::MakeZero();
@@ -212,8 +253,11 @@ private:
     ma_data_source* m_pInner = nullptr;      ///< the source the voice reads: m_Decoder or m_pClipSource->m_pSource
     plMaVoiceDataSource m_Source = {};       ///< feeds m_Sound from m_pInner
     ma_sound m_Sound = {};
-    ma_lpf_node m_OcclusionLpf = {};         ///< initialized with the engine's allocation callbacks while m_bOcclusionLpfValid
+    plMaFilterNode m_OcclusionFilter;        ///< low pass, initialized with the engine's allocation callbacks while m_bOcclusionLpfValid
     ma_splitter_node m_EnvSplitter = {};     ///< initialized with the engine's allocation callbacks while m_bEnvSplitterValid
+    ma_sound_group* m_pEnvAux = nullptr;     ///< aux bus the splitter's wet output is attached to; null while unattached
+    double m_fVirtualCursor = 0.0;         ///< virtual voices: timeline position in source frames at m_uiVirtualCursorFrame
+    ma_uint64 m_uiVirtualCursorFrame = 0;  ///< virtual voices: engine frame m_fVirtualCursor belongs to
     ma_uint64 m_uiStartFrame = 0;          ///< absolute engine frame at which the voice's timeline starts
     ma_uint64 m_uiLengthSourceFrames = 0;  ///< inner source length in source frames; 0 when unknown
     ma_uint64 m_uiLastFlipFrame = UnknownFrame; ///< engine frame of the last real/virtual change; UnknownFrame when there was none
@@ -321,9 +365,20 @@ private:
 
   /// \brief Engine frame at which the voice runs out of data, or UnknownFrame for native loops and unknown lengths.
   ///
-  /// Exact while the pitch is unchanged since scheduling; otherwise estimated from the inner source cursor and the
-  /// current pitch. Doppler pitch shifts applied inside miniaudio are not accounted for.
+  /// Exact while the pitch is unchanged since scheduling and the voice's stream never starved; otherwise estimated from
+  /// the published cursor (real voices) or the virtual cursor and the current pitch. Doppler pitch shifts applied inside
+  /// miniaudio are not accounted for.
   ma_uint64 EstimateVoiceEndFrame(const Voice& voice, ma_uint64 uiNow) const;
+
+  /// \brief Source frames the voice advances per engine frame at the current pitch.
+  double GetSourceFramesPerEngineFrame(const Voice& voice) const;
+
+  /// \brief Virtual voices: advances m_fVirtualCursor to uiNow at the current pitch.
+  void AdvanceVirtualCursor(Voice& voice, ma_uint64 uiNow) const;
+
+  /// \brief Volume factor that fades a spatialized event to silence over the last part of its range up to the max
+  /// distance, so it does not cut out when it is virtualized there. 1 for non-spatialized events.
+  float GetDistanceFade() const;
 
   plAudioEventResourceHandle m_hResource;            ///< keeps the event resource alive while m_pResource is set
   const plAudioEventResource* m_pResource = nullptr; ///< acquired until destruction or OnEventUnloading()
@@ -360,11 +415,19 @@ private:
 ///
 /// Called from the audio thread. Voices read the memory of event and clip resources, and the resource manager frees
 /// that memory synchronously when it unloads or reloads a resource, on whatever thread does so. The manager therefore
-/// works on its instances only while it holds the resource manager mutex (plResourceManager::GetMutex()), and it
-/// handles plResourceEvent::Type::ResourceContentUnloading of clip and event resources, which the resource manager
-/// sends under that mutex right before the data is freed: every voice reading the resource is stopped there
-/// (ma_sound_uninit returns once the device thread no longer reads the sound). While holding the mutex the manager
-/// never waits for a resource to load; resources are loaded (BlockTillLoaded) before the mutex is taken.
+/// works on its instances only while it holds its own mutex, and it handles plResourceEvent::Type::
+/// ResourceContentUnloading of clip and event resources, which the resource manager sends under its mutex right before
+/// the data is freed: the handler takes the manager's mutex and stops every voice reading the resource (ma_sound_uninit
+/// returns once the device thread no longer reads the sound).
+///
+/// Lock order: the resource manager's mutex may be held when the manager's mutex is taken (the unload handler), never
+/// the other way round. While holding its mutex the manager therefore never loads, reloads or creates a resource and
+/// never waits for one; such requests are collected (plPlasmaAudioDeferredLoads) and issued after the mutex is released.
+/// Other threads never wait for the audio thread's update to take a resource lock.
+///
+/// An event that is not loaded when it is triggered starts asynchronously: its load is requested and the activation
+/// waits until the event (and, for a legacy sound, the sound resource) is loaded, then starts with the next Update. A
+/// one-shot that waits longer than MaxPendingStartTime is dropped; a looping event waits until it is stopped.
 ///
 /// Finished instances are reset and kept in a pool (up to MaxPooledInstances) for later starts. A reset instance
 /// holds no miniaudio objects, so the pool outlives device re-inits.
@@ -376,13 +439,17 @@ public:
   plPlasmaAudioEventManager();
   ~plPlasmaAudioEventManager();
 
+  /// \brief How long a one-shot waits for its event to load before it is dropped.
+  static constexpr plTime MaxPendingStartTime = plTime::MakeFromSeconds(1.0);
+
+  /// \brief Starts the event, or queues the start until the event is loaded (see the class description).
   plResult ActivateEvent(plStringView sEventResourceId, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine);
 
   /// \brief Plays a legacy plMiniAudioSoundResource as an audio event.
   ///
   /// The first activation per sound resource builds an in-memory plAudioEventResource ("Legacy:<resource id>")
   /// with one instrument whose playlist holds every variant of the sound, and caches it. After that it runs
-  /// the regular ActivateEvent path.
+  /// the regular ActivateEvent path. A sound resource that is not loaded yet starts asynchronously like an event.
   plResult ActivateLegacySound(const plMiniAudioSoundResourceHandle& hSound, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine);
 
   /// \brief Stops the instance bound to the given event data. Returns PL_FAILURE if none is playing.
@@ -399,9 +466,21 @@ public:
 
   void SetEventParameter(const plPlasmaAudioEntityData* pEntity, plStringView sParamName, float fValue);
 
+  /// \brief Drops the instance-local value of the parameter on every instance of the entity (see plPlasmaAudioEventInstance::ResetParameter).
+  void ResetEventParameter(const plPlasmaAudioEntityData* pEntity, plStringView sParamName);
+
+  /// \brief Whether an instance is bound to the event data, or its start is still waiting for the event to load.
   PL_NODISCARD bool IsEventPlaying(const plPlasmaAudioEventData* pEventData) const;
 
-  void Update(plTime delta, const plVec3& vListenerPos);
+  /// \brief Starts the activations whose events finished loading, then updates every instance and the voice manager.
+  /// listeners holds the position of every listener that is heard.
+  void Update(plTime delta, plArrayPtr<const plVec3> listeners);
+
+  /// \brief Update() with a single listener.
+  void Update(plTime delta, const plVec3& vListenerPos) { Update(delta, plArrayPtr<const plVec3>(&vListenerPos, 1)); }
+
+  /// \brief Activations waiting for their event to load.
+  PL_NODISCARD plUInt32 GetPendingActivationCount() const;
 
   PL_NODISCARD plUInt32 GetInstanceCount() const { return m_Instances.GetCount(); }
 
@@ -457,7 +536,48 @@ private:
   /// with the resource manager mutex held.
   void OnResourceEvent(const plResourceEvent& e);
 
+  /// \brief Starts an instance of a loaded event. Takes the manager's mutex; the event must be loaded.
   plResult ActivateEventInternal(const plAudioEventResourceHandle& hEvent, plStringView sEventResourceId, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine);
+
+  /// \brief The generated event of a loaded legacy sound (creating it on first use). Takes no manager lock: it may
+  /// create a resource.
+  plAudioEventResourceHandle GetLegacyEvent(const plMiniAudioSoundResourceHandle& hSound);
+
+  /// \brief An activation whose event (or legacy sound) was not loaded yet.
+  struct PendingActivation
+  {
+    plAudioEventResourceHandle m_hEvent;            ///< invalid for a legacy sound until it is loaded
+    plMiniAudioSoundResourceHandle m_hLegacySound;  ///< set for legacy sounds
+    plString m_sEventId;
+    plPlasmaAudioEntityData* m_pEntity = nullptr;
+    plPlasmaAudioEventData* m_pEventData = nullptr;
+    plMiniAudioBusGraph* m_pBusGraph = nullptr;
+    ma_engine* m_pEngine = nullptr;
+    plTime m_RequestTime;
+    bool m_bLooping = false; ///< the event data asked for a looping start: it waits however long the load takes
+  };
+
+  /// \brief Queues an activation of a resource that is still loading. Takes the manager's mutex.
+  void QueuePendingActivation(PendingActivation&& activation);
+
+  /// \brief Starts the queued activations whose resources finished loading and drops the expired ones.
+  void ProcessPendingActivations();
+
+  /// \brief Issues the clip loads the instances asked for. Must be called without the manager's mutex held.
+  void FlushDeferredLoads();
+
+  /// \brief Updates every instance and the voice manager. Takes the manager's mutex.
+  void UpdateInstances(plTime delta);
+
+  /// \brief Closest of the last known listener positions to the entity.
+  plVec3 GetClosestListener(const plPlasmaAudioEntityData* pEntity) const;
+
+  /// \brief Guards the instances, pools, pending activations and deferred loads (see the class description).
+  mutable plMutex m_Mutex;
+
+  plDynamicArray<PendingActivation> m_PendingActivations;
+  plPlasmaAudioDeferredLoads m_DeferredLoads;
+  plHybridArray<plVec3, 4> m_Listeners;
 
   /// \brief Maximum number of finished instances kept for reuse.
   static constexpr plUInt32 MaxPooledInstances = 64;
@@ -476,7 +596,6 @@ private:
   plAudioStreamService* m_pStreamService = nullptr;
   plAudioVoiceManager m_VoiceManager;
   plAudioEventLog m_EventLog;
-  plVec3 m_vListenerPos = plVec3::MakeZero();
   plUInt64 m_uiNextInstanceSerial = 0;
   plRandom m_Rng;
   plTime m_Now;

@@ -148,6 +148,9 @@ PL_CREATE_SIMPLE_TEST(Perf, Allocation)
   streams.Startup();
   PL_SCOPE_EXIT(streams.Shutdown());
 
+  // one stream plays at a time; a second pooled one covers a release that the IO thread pools one pass later
+  streams.ReserveStreams(2);
+
   constexpr plUInt32 uiWarmUp = 3;
   constexpr plUInt32 uiCycles = 16;
 
@@ -184,9 +187,9 @@ PL_CREATE_SIMPLE_TEST(Perf, Allocation)
 
       if (bStreamed)
       {
-        // one voice at a time: the same pooled stream object is reused every time
-        PL_TEST_INT(uiPooledBefore, 1);
-        PL_TEST_INT(streams.GetPooledStreamCount(), 1);
+        // one voice at a time: the reserved stream objects are reused, none is added
+        PL_TEST_INT(uiPooledBefore, 2);
+        PL_TEST_INT(streams.GetPooledStreamCount(), 2);
 
         // the stream opens the clip file for every start; what plOSFile allocates for that is not the stream's
         const plString sPath = pClip->GetOsFilePath();
@@ -292,9 +295,9 @@ PL_CREATE_SIMPLE_TEST(Perf, Allocation)
 
       // Instances, their arrays and clip sources come from the manager's pool, codec state and streams are reused.
       // What remains are the heaps of the voice's miniaudio nodes, which cannot be preallocated: the ma_sound (1) and
-      // the occlusion low-pass node (2: filter state and node). The default mixer has no environment bus, so there is
-      // no splitter node.
-      constexpr plUInt64 uiNodeHeapsPerVoice = 3;
+      // the occlusion filter node (1; its filter state lives inline in the voice). The default mixer has no environment
+      // bus, so there is no splitter node.
+      constexpr plUInt64 uiNodeHeapsPerVoice = 2;
       PL_TEST_INT(uiOther, 0);
       PL_TEST_INT(uiMa, uiNodeHeapsPerVoice * uiCycles);
 

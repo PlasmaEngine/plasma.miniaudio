@@ -205,7 +205,9 @@ PL_CREATE_SIMPLE_TEST(Voices, Stress)
   PL_TEST_BOOL(run0.m_uiMaxRealCount <= 64);
   PL_TEST_BOOL(run1.m_uiMaxRealCount <= 64);
   PL_TEST_INT(run0.m_RealEmitters.GetCount(), 64);
-  PL_TEST_INT(run0.m_uiVirtualCount, uiEmitters - 64);
+
+  // the looping voices past the virtual budget are stopped too: the budget is a hard limit
+  PL_TEST_INT(run0.m_uiVirtualCount, 512);
   PL_TEST_BOOL(run0.m_bClosestAreReal);
 
   // the ranking is deterministic

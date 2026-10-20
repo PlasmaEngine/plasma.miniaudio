@@ -504,7 +504,9 @@ plResourceLoadDesc plAudioEventResource::UpdateContent(plStreamReader* pStream)
 
   // register an ATL trigger under this resource's id, so plAudioTriggerComponent /
   // plSoundInterface::PlaySound can fire the event by asset reference
-  if (auto* pAudioSystem = plAudioSystem::GetSingleton())
+  // plAudioTriggerComponent / plSoundInterface::PlaySound can fire the event by asset reference. A reload finds the
+  // trigger already registered; registering again would leak the new trigger data, which the ATL skips.
+  if (auto* pAudioSystem = plAudioSystem::GetSingleton(); pAudioSystem != nullptr && pAudioSystem->GetTriggerId(GetResourceID()) == 0)
   {
     const plAudioSystemDataID uiTriggerId = plHashHelper<plStringView>::Hash(GetResourceID());
     pAudioSystem->RegisterTrigger(uiTriggerId, PL_AUDIOSYSTEM_NEW(plAudioSystemStringTriggerData, uiTriggerId, GetResourceID()));
