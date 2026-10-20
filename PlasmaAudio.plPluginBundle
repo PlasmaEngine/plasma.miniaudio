@@ -10,7 +10,7 @@ PluginInfo
 	string %EditorPlugins{"plEditorPluginPlasmaAudio"}
 	string %EditorEnginePlugins{}
 	string %RuntimePlugins{"plPlasmaAudioPlugin"}
-	string %PackageDependencies{"MiniAudio.dll"}
+	string %PackageDependencies{}
 	string %RequiredPlugins{}
 	string %ExclusiveFeatures{"Sound"}
 	string %EnabledInTemplates{"General2D", "General3D"}

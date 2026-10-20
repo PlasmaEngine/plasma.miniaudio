@@ -26,7 +26,7 @@ PackageInfo
 	string %EditorPlugins{"plEditorPluginPlasmaAudio"}
 	string %EditorEnginePlugins{}
 	string %RuntimePlugins{"plPlasmaAudioPlugin"}
-	string %PackageDependencies{"MiniAudio.dll"}
+	string %PackageDependencies{}
 
 	// ---- assets ---------------------------------------------------------------
 	// Mounted as a data directory when the package is installed. The layout below Assets/

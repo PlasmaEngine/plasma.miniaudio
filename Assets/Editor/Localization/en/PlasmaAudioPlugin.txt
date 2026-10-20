@@ -1,7 +1,7 @@
 
 # Asset Types
 
-MiniAudioSound;Sound
+MiniAudioSound;Sound (legacy)
 
 # Import Modes
 
@@ -10,8 +10,8 @@ Audio_Clip_And_Event;Audio Clip + Audio Event
 
 # Component Types
 
-plMiniAudioSoundComponent;MiniAudio Sound
-plMiniAudioListenerComponent;MiniAudio Listener
+plMiniAudioSoundComponent;Sound (legacy)
+plMiniAudioListenerComponent;Listener (legacy)
 
 # UI
 

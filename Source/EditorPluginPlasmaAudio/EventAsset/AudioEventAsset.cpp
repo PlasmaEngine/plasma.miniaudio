@@ -95,7 +95,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventAssetProperties, 1, plRTTIDefaultAll
     PL_MEMBER_PROPERTY("Spatialize", m_bSpatialize)->AddAttributes(new plGroupAttribute("Spatializer"), new plDefaultValueAttribute(true)),
     PL_MEMBER_PROPERTY("MinDistance", m_fMinDistance)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.01f, 10000.0f)),
     PL_MEMBER_PROPERTY("MaxDistance", m_fMaxDistance)->AddAttributes(new plDefaultValueAttribute(100.0f), new plClampValueAttribute(0.01f, 10000.0f)),
-    PL_MEMBER_PROPERTY("Rolloff", m_fRolloff)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.001f, 1000.0f), new plAudioRolloffCurveWidgetAttribute()),
+    PL_MEMBER_PROPERTY("Rolloff", m_fRolloff)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.001f, 1000.0f)),
     PL_MEMBER_PROPERTY("DopplerFactor", m_fDopplerFactor)->AddAttributes(new plClampValueAttribute(0.0f, 10.0f)),
     // the arrays are edited through the Event Timeline window (timeline, tab strip, deck);
     // they are hidden in property grids via PropertyMetaStateEventHandler

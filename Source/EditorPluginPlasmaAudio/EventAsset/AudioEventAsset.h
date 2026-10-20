@@ -4,7 +4,6 @@
 #include <EditorFramework/Assets/AssetDocumentGenerator.h>
 #include <EditorFramework/Assets/SimpleAssetDocument.h>
 #include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
-#include <EditorPluginPlasmaAudio/EventAsset/AudioRolloffAttribute.h>
 
 /// \brief One entry of an instrument playlist.
 ///
