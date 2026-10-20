@@ -1,7 +1,7 @@
 #include <PlasmaAudioTest/PlasmaAudioTestPCH.h>
 
+#include <AudioSystem/Mixer/AudioMixerData.h>
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
-#include <PlasmaAudioPlugin/Mixer/AudioMixerData.h>
 
 PL_CREATE_SIMPLE_TEST_GROUP(Desc);
 

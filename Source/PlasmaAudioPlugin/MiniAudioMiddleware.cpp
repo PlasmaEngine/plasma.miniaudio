@@ -12,7 +12,6 @@
 #include <PlasmaAudioPlugin/MiniAudioAtlData.h>
 #include <PlasmaAudioPlugin/MiniAudioMiddleware.h>
 #include <PlasmaAudioPlugin/MiniAudioSingleton.h>
-#include <PlasmaAudioPlugin/Mixer/AudioMixerResource.h>
 #include <PlasmaAudioPlugin/Resources/MiniAudioSoundResource.h>
 
 PL_IMPLEMENT_SINGLETON(plPlasmaAudioMiddleware);
@@ -92,7 +91,6 @@ plResult plPlasmaAudioMiddleware::Startup()
 
   m_StreamService.Startup();
   m_EventManager.SetStreamService(&m_StreamService);
-  m_EventManager.SetMixerService(&m_MixerService);
 
   // the engine never calls SetLanguage itself: follow the App.Language cvar of the game application instead
   m_pLanguageCVar = plCVar::FindCVarByName("App.Language");
@@ -127,7 +125,6 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
     }
 
     m_pBackend->UpdateSound(delta);
-    m_MixerService.Update(delta, &m_BusGraph);
 
     {
       PL_LOCK(m_GlobalParameterMutex);
@@ -200,12 +197,12 @@ void plPlasmaAudioMiddleware::FillBusSnapshot()
   m_ProfilingSnapshot.m_ActiveSnapshots.Clear();
 
   // without a mixer there is no bus graph and no meter; the profiler reports that no mixer is loaded
-  if (!m_MixerService.IsLoaded() || !m_BusGraph.IsBuilt())
+  if (!m_BusGraph.IsBuilt())
     return;
 
-  m_ProfilingSnapshot.m_sMixer = m_sLoadedMixerId;
-
-  const plAudioMixerDesc& desc = m_MixerService.GetDesc();
+  // The mixer resource id and the snapshot intensities stay with the engine's plAudioMixerService, which a middleware
+  // cannot reach: the snapshot carries no mixer name and no active snapshots.
+  const plAudioMixerDesc& desc = m_BusGraph.GetDesc();
 
   m_ProfilingSnapshot.m_Buses.SetCount(desc.m_Buses.GetCount());
   for (plUInt32 uiBus = 0; uiBus < desc.m_Buses.GetCount(); ++uiBus)
@@ -215,19 +212,8 @@ void plPlasmaAudioMiddleware::FillBusSnapshot()
     bus.m_sName = busDesc.m_sName;
     bus.m_uiParent = busDesc.m_uiParent < desc.m_Buses.GetCount() ? busDesc.m_uiParent : plAudioBusSnapshotEntry::NoParent;
     bus.m_bIsAux = busDesc.m_bIsAux;
-    bus.m_fGainDb = plAudioMixerUtils::LinearToDb(m_MixerService.GetBusGain(uiBus));
+    bus.m_fGainDb = plAudioMixerUtils::LinearToDb(m_BusGraph.GetBusGain(uiBus));
     m_BusGraph.GetBusMeter(uiBus, bus.m_fPeak, bus.m_fRms);
-  }
-
-  for (plUInt32 uiSnapshot = 0; uiSnapshot < desc.m_Snapshots.GetCount(); ++uiSnapshot)
-  {
-    const float fIntensity = m_MixerService.GetSnapshotIntensity(uiSnapshot);
-    if (fIntensity <= 0.0f)
-      continue;
-
-    plAudioActiveSnapshotEntry& snapshot = m_ProfilingSnapshot.m_ActiveSnapshots.ExpandAndGetRef();
-    snapshot.m_sName = desc.m_Snapshots[uiSnapshot].m_sName;
-    snapshot.m_fIntensity = fIntensity;
   }
 }
 
@@ -342,15 +328,17 @@ void plPlasmaAudioMiddleware::RecoverDevice()
 {
   // Re-initializing the engine invalidates every ma_sound and ma_node created on the old one.
   // Event instances playing at this point are stopped, not resumed on the new device. PCM streams keep
-  // their ids and settings but lose buffered frames. The mixer is reloaded from its resource, so runtime
-  // VCA / snapshot values return to their authored state.
+  // their ids and settings but lose buffered frames. The mixer graph is rebuilt from its desc with the values the
+  // mixer service had pushed, so runtime VCA / snapshot values carry over.
   plLog::Warning("PlasmaAudio: recreating the audio engine for an output device change; playing sounds are stopped.");
   m_EventManager.GetEventLog().Add(plAudioLogEventType::DeviceLost, "output device", "recreating the audio engine");
 
   // held throughout, so no PCM stream node is created, fed or destroyed against a half-rebuilt engine
   PL_LOCK(m_PcmStreamMutex);
 
-  const plString sMixerId = m_sLoadedMixerId;
+  const bool bHadMixer = m_BusGraph.IsBuilt();
+  const plAudioMixerDesc mixerDesc = m_BusGraph.GetDesc();
+  const plDynamicArray<plMiniAudioBusGraph::BusValues> mixerValues = m_BusGraph.GetBusValues();
 
   // voices first (they feed the buses), then the bus graph, which also moves the stream nodes to the endpoint.
   // Stopping the voices releases their disk streams; the stream service itself does not depend on the device.
@@ -420,9 +408,9 @@ void plPlasmaAudioMiddleware::RecoverDevice()
   }
 
   // rebuilding the bus graph moves the streams from the endpoint onto their buses
-  if (!sMixerId.IsEmpty())
+  if (bHadMixer && LoadMixer(mixerDesc).Succeeded())
   {
-    LoadMixer(sMixerId).IgnoreResult();
+    m_BusGraph.ApplyBusValues(mixerValues);
   }
 }
 
@@ -1037,23 +1025,13 @@ bool plPlasmaAudioMiddleware::GetMasterPaused() const
 
 void plPlasmaAudioMiddleware::SetSoundGroupVolume(plStringView sGroupGuid, float fVolume)
 {
-  // the loaded mixer's buses and VCAs take precedence over legacy sound groups
-  if (m_MixerService.IsLoaded() && m_MixerService.SetGroupVolume(sGroupGuid, fVolume))
-    return;
-
+  // the ATL maps the name onto a bus or VCA of the loaded mixer first and only calls this for the other names
   if (m_pBackend != nullptr)
     m_pBackend->SetSoundGroupVolume(sGroupGuid, fVolume);
 }
 
 float plPlasmaAudioMiddleware::GetSoundGroupVolume(plStringView sGroupGuid) const
 {
-  if (m_MixerService.IsLoaded())
-  {
-    const plAudioMixerDesc& desc = m_MixerService.GetDesc();
-    if (desc.FindBusByName(sGroupGuid) != plInvalidIndex || desc.FindVcaByName(sGroupGuid) != plInvalidIndex)
-      return m_MixerService.GetGroupVolume(sGroupGuid);
-  }
-
   return m_pBackend != nullptr ? m_pBackend->GetSoundGroupVolume(sGroupGuid) : 1.0f;
 }
 
@@ -1106,32 +1084,12 @@ bool plPlasmaAudioMiddleware::IsEventDataPlaying(const plAudioSystemEventData* p
   return false;
 }
 
-plResult plPlasmaAudioMiddleware::LoadMixer(plStringView sMixerResourceId)
+plResult plPlasmaAudioMiddleware::LoadMixer(const plAudioMixerDesc& desc)
 {
-  if (m_pBackend == nullptr || sMixerResourceId.IsEmpty())
+  if (m_pBackend == nullptr)
     return PL_FAILURE;
 
   UnloadMixer().IgnoreResult();
-
-  plAudioMixerResourceHandle hResource = plResourceManager::LoadResource<plAudioMixerResource>(sMixerResourceId);
-  if (!hResource.IsValid())
-    return PL_FAILURE;
-
-  plAudioMixerDesc desc;
-  {
-    plResourceLock<plAudioMixerResource> pResource(hResource, plResourceAcquireMode::BlockTillLoaded_NeverFail);
-
-    if (pResource.GetAcquireResult() != plResourceAcquireResult::Final)
-    {
-      plLog::Error("Failed to load audio mixer resource '{0}'.", sMixerResourceId);
-      return PL_FAILURE;
-    }
-
-    desc = pResource->GetDescriptor();
-  }
-
-  if (desc.m_Buses.IsEmpty())
-    desc.MakeDefault();
 
   {
     // CreatePcmStream (video decoder thread) attaches to buses of the graph, so it must not see it half built
@@ -1162,27 +1120,19 @@ plResult plPlasmaAudioMiddleware::LoadMixer(plStringView sMixerResourceId)
     }
   }
 
-  // push the authored base state once
-  m_MixerService.InitFromDesc(hResource, desc);
-  m_MixerService.PushValues(&m_BusGraph, true);
-
-  m_sLoadedMixerId = sMixerResourceId;
-
+  // the mixer service pushes the authored base state right after this returns; it also logs the load with the
+  // resource id, which the middleware does not get
   {
     plStringBuilder sDetail;
     sDetail.SetFormat("{} buses, {} VCAs, {} snapshots", desc.m_Buses.GetCount(), desc.m_Vcas.GetCount(), desc.m_Snapshots.GetCount());
-    m_EventManager.GetEventLog().Add(plAudioLogEventType::MixerLoaded, sMixerResourceId, sDetail);
+    m_EventManager.GetEventLog().Add(plAudioLogEventType::MixerLoaded, "mixer", sDetail);
   }
 
-  plLog::Success("Audio mixer '{0}' loaded: {1} buses, {2} VCAs, {3} snapshots.", sMixerResourceId, desc.m_Buses.GetCount(), desc.m_Vcas.GetCount(), desc.m_Snapshots.GetCount());
   return PL_SUCCESS;
 }
 
 plResult plPlasmaAudioMiddleware::UnloadMixer()
 {
-  m_sLoadedMixerId.Clear();
-  m_MixerService.UnloadMixer(&m_BusGraph);
-
   if (!m_BusGraph.IsBuilt())
     return PL_SUCCESS;
 
@@ -1412,36 +1362,45 @@ void plPlasmaAudioMiddleware::FlushPcmStream(plUInt32 uiStreamId)
   }
 }
 
-plResult plPlasmaAudioMiddleware::SetBusVolume(plStringView sBusName, float fVolumeDb)
+plResult plPlasmaAudioMiddleware::SetBusVolume(plUInt32 uiBusIndex, float fLinearGain)
 {
-  if (!m_MixerService.IsLoaded())
+  if (!m_BusGraph.IsBuilt())
     return PL_FAILURE;
 
-  m_MixerService.SetBusVolume(sBusName, fVolumeDb);
+  m_BusGraph.SetBusVolume(uiBusIndex, fLinearGain);
   return PL_SUCCESS;
 }
 
-plResult plPlasmaAudioMiddleware::SetVcaVolume(plStringView sVcaName, float fVolumeDb)
+plResult plPlasmaAudioMiddleware::SetBusPitch(plUInt32 uiBusIndex, float fPitch)
 {
-  if (!m_MixerService.IsLoaded())
+  if (!m_BusGraph.IsBuilt())
     return PL_FAILURE;
 
-  m_MixerService.SetVcaVolume(sVcaName, fVolumeDb);
+  m_BusGraph.SetBusPitch(uiBusIndex, fPitch);
   return PL_SUCCESS;
 }
 
-plResult plPlasmaAudioMiddleware::SetSnapshotIntensity(plStringView sSnapshotName, float fIntensity)
+plResult plPlasmaAudioMiddleware::SetBusSendLevel(plUInt32 uiBusIndex, plUInt32 uiSendIndex, float fLinearLevel)
 {
-  if (!m_MixerService.IsLoaded())
+  if (!m_BusGraph.IsBuilt())
     return PL_FAILURE;
 
-  m_MixerService.SetSnapshotIntensity(sSnapshotName, fIntensity);
+  m_BusGraph.SetBusSendLevel(uiBusIndex, uiSendIndex, fLinearLevel);
   return PL_SUCCESS;
 }
 
-void plPlasmaAudioMiddleware::StopAllSnapshots()
+plResult plPlasmaAudioMiddleware::SetBusEffectParameter(plUInt32 uiBusIndex, plUInt32 uiEffectIndex, plUInt32 uiParamIndex, float fValue)
 {
-  m_MixerService.StopAllSnapshots();
+  if (!m_BusGraph.IsBuilt())
+    return PL_FAILURE;
+
+  m_BusGraph.SetBusEffectParameter(uiBusIndex, uiEffectIndex, uiParamIndex, fValue);
+  return PL_SUCCESS;
+}
+
+void plPlasmaAudioMiddleware::GetBusMeterInfo(plUInt32 uiBusIndex, plAudioBusMeterInfo& out_info) const
+{
+  GetBusMeter(uiBusIndex, out_info.m_fPeak, out_info.m_fRms);
 }
 
 void plPlasmaAudioMiddleware::GetProfilingInfo(plAudioSystemProfilingInfo& out_info) const

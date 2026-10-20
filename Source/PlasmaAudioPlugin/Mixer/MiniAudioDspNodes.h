@@ -1,6 +1,6 @@
 #pragma once
 
-#include <PlasmaAudioPlugin/Mixer/AudioMixerData.h>
+#include <AudioSystem/Mixer/AudioMixerData.h>
 #include <Foundation/Containers/HybridArray.h>
 #include <MiniAudio/miniaudio.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>

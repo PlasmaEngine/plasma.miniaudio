@@ -8,7 +8,6 @@
 #include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResourceLoader.h>
 #include <PlasmaAudioPlugin/Events/MiniAudioAudioEvents.h>
-#include <PlasmaAudioPlugin/Mixer/AudioMixerService.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioBusGraph.h>
 #include <PlasmaAudioPlugin/MiniAudioAtlData.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
@@ -183,7 +182,6 @@ void plPlasmaAudioEventInstance::Reset()
   m_uiEventGroupHash = 0;
   m_pStreams = nullptr;
   m_pVoiceManager = nullptr;
-  m_pMixer = nullptr;
   m_pEventLog = nullptr;
   m_vListenerPos = plVec3::MakeZero();
   m_uiSerial = 0;
@@ -956,7 +954,7 @@ float plPlasmaAudioEventInstance::ComputeAudibility(float fBaseVolume) const
   }
 
   const float fOcclusion = (m_pEntity != nullptr) ? plMath::Clamp(m_pEntity->m_fCurrentOcclusion, 0.0f, 1.0f) : 0.0f;
-  const float fBusGain = (m_pMixer != nullptr) ? m_pMixer->GetEffectiveBusGain(m_uiBus) : 1.0f;
+  const float fBusGain = (m_pBusGraph != nullptr) ? m_pBusGraph->GetEffectiveBusGain(m_uiBus) : 1.0f;
 
   return fAttenuation * m_fCurrentVolumeMultiplier * fBaseVolume * fBusGain * (1.0f - 0.5f * fOcclusion);
 }
@@ -2070,7 +2068,6 @@ plResult plPlasmaAudioEventManager::ActivateEventInternal(const plAudioEventReso
 
   pInstance->m_pStreams = m_pStreamService;
   pInstance->m_pVoiceManager = &m_VoiceManager;
-  pInstance->m_pMixer = m_pMixerService;
   pInstance->m_pEventLog = &m_EventLog;
   pInstance->m_vListenerPos = m_vListenerPos;
   pInstance->m_uiSerial = m_uiNextInstanceSerial++;

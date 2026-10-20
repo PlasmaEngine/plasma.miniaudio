@@ -1,12 +1,12 @@
 #include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
+#include <AudioSystem/Mixer/AudioMixerData.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerViews.h>
 #include <EditorPluginPlasmaAudio/Preview/AudioPreviewService.h>
 #include <EditorUi/Drawings.h>
 #include <EditorUi/Surface.h>
 #include <EditorUi/Widgets.h>
-#include <PlasmaAudioPlugin/Mixer/AudioMixerData.h>
 #include <ToolsFoundation/Object/ObjectCommandAccessor.h>
 
 namespace

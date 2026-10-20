@@ -6,7 +6,6 @@
 #include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
 #include <PlasmaAudioPlugin/Events/MiniAudioAudioEvents.h>
-#include <PlasmaAudioPlugin/Mixer/AudioMixerService.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioBusGraph.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
@@ -86,14 +85,15 @@ public:
 
   bool IsEventDataPlaying(const plAudioSystemEventData* pEventData) const override;
 
-  // name-based mixer SPI: the resource is loaded here, the bus graph is built from it and
-  // plAudioMixerService blends VCAs and snapshots into per-bus values
-  plResult LoadMixer(plStringView sMixerResourceId) override;
+  // mixer graph SPI: the engine's plAudioMixerService loads the mixer resource, blends VCAs and snapshots and
+  // pushes the final per-bus values; they land on the plMiniAudioBusGraph built from the desc
+  plResult LoadMixer(const plAudioMixerDesc& desc) override;
   plResult UnloadMixer() override;
-  plResult SetBusVolume(plStringView sBusName, float fVolumeDb) override;
-  plResult SetVcaVolume(plStringView sVcaName, float fVolumeDb) override;
-  plResult SetSnapshotIntensity(plStringView sSnapshotName, float fIntensity) override;
-  void StopAllSnapshots() override;
+  plResult SetBusVolume(plUInt32 uiBusIndex, float fLinearGain) override;
+  plResult SetBusPitch(plUInt32 uiBusIndex, float fPitch) override;
+  plResult SetBusSendLevel(plUInt32 uiBusIndex, plUInt32 uiSendIndex, float fLinearLevel) override;
+  plResult SetBusEffectParameter(plUInt32 uiBusIndex, plUInt32 uiEffectIndex, plUInt32 uiParamIndex, float fValue) override;
+  void GetBusMeterInfo(plUInt32 uiBusIndex, plAudioBusMeterInfo& out_info) const override;
   plResult SetEventParameter(plAudioSystemEntityData* pEntityData, plStringView sParamName, float fValue) override;
   void GetProfilingInfo(plAudioSystemProfilingInfo& out_info) const override;
 
@@ -157,14 +157,11 @@ private:
   /// duration of the last Update(), written by the audio thread
   std::atomic<float> m_fLastUpdateMs = 0.0f;
 
-  /// resource id of the mixer loaded through LoadMixer (empty without one), reloaded after a device re-init
-  plString m_sLoadedMixerId;
-
   /// which listener slots 1..MaxListeners-1 are taken by a listener; slot 0 is shared by default listeners
   bool m_bListenerSlotTaken[4] = {};
 
+  /// the mixer loaded through LoadMixer (not built without one); rebuilt with its current values after a device re-init
   plMiniAudioBusGraph m_BusGraph;
-  plAudioMixerService m_MixerService;
 
   /// declared before the event manager: voices of streamed clips release their streams into it
   plAudioStreamService m_StreamService;
@@ -217,7 +214,7 @@ private:
   /// Serializes a profiling snapshot when PlasmaAudio.ProfilerSnapshotHz asks for one (audio thread).
   void UpdateProfilingSnapshot();
 
-  /// Fills the bus section of m_ProfilingSnapshot from the mixer service and the bus graph meters (audio thread).
+  /// Fills the bus section of m_ProfilingSnapshot from the bus graph's gains and meters (audio thread).
   void FillBusSnapshot();
 
   /// Fills the memory section of m_ProfilingSnapshot from the clip, event and bank registries (audio thread).

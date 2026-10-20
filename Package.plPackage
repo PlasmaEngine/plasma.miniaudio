@@ -15,7 +15,7 @@ PackageInfo
 
 	string %MinEngineVersion{"0.10.0"}
 	string %MaxEngineVersion{"0.10.0"}
-	string %AbiTag{"win64-msvc19-0.10.0-abi4-dev"}
+	string %AbiTag{"win64-msvc19-0.10.0-abi5-dev"}
 
 	string %DisplayName{"PlasmaAudio"}
 	string %Category{"Audio"}

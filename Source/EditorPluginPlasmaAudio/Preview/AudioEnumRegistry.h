@@ -1,6 +1,6 @@
 #pragma once
 
-#include <PlasmaAudioPlugin/Mixer/AudioMixerData.h>
+#include <AudioSystem/Mixer/AudioMixerData.h>
 #include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioDLL.h>
 #include <Foundation/Strings/String.h>
 

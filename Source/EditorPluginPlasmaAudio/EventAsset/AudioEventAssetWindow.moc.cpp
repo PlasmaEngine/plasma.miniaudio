@@ -1,6 +1,6 @@
 ﻿#include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
-#include <EditorFramework/Assets/AssetBrowserDlg.moc.h>
+#include <EditorFramework/Assets/EngineAssetPicker.h>
 #include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
@@ -9,7 +9,7 @@
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventDeckView.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventTimelineView.h>
 #include <GuiFoundation/EngineUi/EngineUiControlStrip.h>
-#include <PlasmaAudioPlugin/Mixer/AudioMixerData.h>
+#include <AudioSystem/Mixer/AudioMixerData.h>
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/IO/OSFile.h>
 #include <Foundation/Math/ColorScheme.h>
@@ -2916,12 +2916,12 @@ bool plAudioEventAssetDocumentWindow::PickClip(plStringView sCurrentClip, plStri
   if (!sCurrentClip.IsEmpty() && plConversionUtils::IsStringUuid(sCurrentClip))
     current = plConversionUtils::ConvertStringToUuid(sCurrentClip);
 
-  plQtAssetBrowserDlg dlg(this, current, "CompatibleAsset_Audio_Clip", "Select Audio Clip");
-  if (dlg.exec() == 0 || !dlg.GetSelectedAssetGuid().IsValid())
+  plEngineAssetPicker::Result picked;
+  if (!plEngineAssetPicker::PickAsset(this, current, "CompatibleAsset_Audio_Clip", picked, "Select Audio Clip") || !picked.m_Guid.IsValid())
     return false;
 
   plStringBuilder sGuid;
-  out_sClipGuid = plConversionUtils::ToString(dlg.GetSelectedAssetGuid(), sGuid);
+  out_sClipGuid = plConversionUtils::ToString(picked.m_Guid, sGuid);
   return true;
 }
 

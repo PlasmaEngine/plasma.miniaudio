@@ -1,6 +1,6 @@
 #pragma once
 
-#include <PlasmaAudioPlugin/Mixer/AudioMixerData.h>
+#include <AudioSystem/Mixer/AudioMixerData.h>
 #include <Foundation/Containers/Deque.h>
 #include <MiniAudio/miniaudio.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioDspNodes.h>
@@ -13,12 +13,24 @@
 /// Aux sends are extra splitter output buses feeding the target aux bus's group.
 /// Voices attach to GetBusInput() of their routed bus.
 ///
+/// The graph remembers the values its buses currently have (the authored ones after Build, then whatever the
+/// Set functions changed), so voices can ask for the gain of their bus and the graph can be rebuilt as it was.
+///
 /// Must only be used from the audio thread.
 class PL_PLASMAAUDIOPLUGIN_DLL plMiniAudioBusGraph
 {
   PL_DISALLOW_COPY_AND_ASSIGN(plMiniAudioBusGraph);
 
 public:
+  /// \brief The values one bus currently has.
+  struct BusValues
+  {
+    float m_fGain = 1.0f;                   ///< linear
+    float m_fPitch = 1.0f;
+    plHybridArray<float, 2> m_SendLevels;   ///< linear, one per send of the desc
+    plHybridArray<float, 8> m_EffectParams; ///< effect index * plAudioEffectMaxParams + param index, per effect of the desc
+  };
+
   plMiniAudioBusGraph() = default;
   ~plMiniAudioBusGraph();
 
@@ -45,6 +57,20 @@ public:
 
   void GetBusMeter(plUInt32 uiBusIndex, float& out_fPeak, float& out_fRms) const;
 
+  /// \brief The values every bus currently has, indexed like the buses of the desc. Empty when not built.
+  PL_NODISCARD const plDynamicArray<BusValues>& GetBusValues() const { return m_BusValues; }
+
+  /// \brief Sets the given values on the buses, e.g. ones taken with GetBusValues before the graph was rebuilt from
+  /// the same desc.
+  void ApplyBusValues(const plDynamicArray<BusValues>& values);
+
+  /// \brief The linear gain of the bus alone, without its parents. 1 for an unknown bus.
+  PL_NODISCARD float GetBusGain(plUInt32 uiBusIndex) const;
+
+  /// \brief The linear gain a voice on the bus gets from the mixer: the product of the gains of the bus and all its
+  /// parents up to master. 1 when the graph is not built.
+  PL_NODISCARD float GetEffectiveBusGain(plUInt32 uiBusIndex) const;
+
 private:
   struct Bus
   {
@@ -60,7 +86,11 @@ private:
     bool m_bMeterValid = false;
   };
 
+  /// \brief Fills m_BusValues with the values Build gives the buses.
+  void InitBusValues();
+
   plAudioMixerDesc m_Desc;
   plDeque<Bus> m_Buses; // deque: stable addresses for miniaudio node structs
+  plDynamicArray<BusValues> m_BusValues;
   ma_engine* m_pEngine = nullptr;
 };

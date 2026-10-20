@@ -1,6 +1,7 @@
 #include <PlasmaAudioTest/PlasmaAudioTestPCH.h>
 
-#include <PlasmaAudioPlugin/Mixer/AudioMixerService.h>
+#include <AudioSystem/Core/AudioMiddleware.h>
+#include <AudioSystem/Mixer/AudioMixerService.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioBusGraph.h>
 #include <PlasmaAudioTest/Harness/OfflineAudio.h>
 
@@ -8,6 +9,105 @@ PL_CREATE_SIMPLE_TEST_GROUP(Mixer);
 
 namespace
 {
+  /// \brief A middleware that only implements the mixer graph SPI, the same way plPlasmaAudioMiddleware does: the
+  /// engine's plAudioMixerService drives a plMiniAudioBusGraph built on the offline engine.
+  class plMixerTestMiddleware final : public plAudioMiddleware
+  {
+  public:
+    explicit plMixerTestMiddleware(ma_engine* pEngine)
+      : m_pEngine(pEngine)
+    {
+    }
+
+    PL_NODISCARD plMiniAudioBusGraph& GetBusGraph() { return m_BusGraph; }
+
+    plResult LoadMixer(const plAudioMixerDesc& desc) override { return m_BusGraph.Build(desc, m_pEngine); }
+
+    plResult UnloadMixer() override
+    {
+      m_BusGraph.Teardown();
+      return PL_SUCCESS;
+    }
+
+    plResult SetBusVolume(plUInt32 uiBusIndex, float fLinearGain) override
+    {
+      m_BusGraph.SetBusVolume(uiBusIndex, fLinearGain);
+      return PL_SUCCESS;
+    }
+
+    plResult SetBusPitch(plUInt32 uiBusIndex, float fPitch) override
+    {
+      m_BusGraph.SetBusPitch(uiBusIndex, fPitch);
+      return PL_SUCCESS;
+    }
+
+    plResult SetBusSendLevel(plUInt32 uiBusIndex, plUInt32 uiSendIndex, float fLinearLevel) override
+    {
+      m_BusGraph.SetBusSendLevel(uiBusIndex, uiSendIndex, fLinearLevel);
+      return PL_SUCCESS;
+    }
+
+    plResult SetBusEffectParameter(plUInt32 uiBusIndex, plUInt32 uiEffectIndex, plUInt32 uiParamIndex, float fValue) override
+    {
+      m_BusGraph.SetBusEffectParameter(uiBusIndex, uiEffectIndex, uiParamIndex, fValue);
+      return PL_SUCCESS;
+    }
+
+    // the rest of the middleware interface is not used by the mixer service
+    plResult LoadConfiguration(const plOpenDdlReaderElement&) override { return PL_SUCCESS; }
+    plResult Startup() override { return PL_SUCCESS; }
+    void Update(plTime) override {}
+    plResult Shutdown() override { return PL_SUCCESS; }
+    plResult Release() override { return PL_SUCCESS; }
+    plResult StopAllSounds() override { return PL_SUCCESS; }
+    plResult AddEntity(plAudioSystemEntityData*, const char*) override { return PL_SUCCESS; }
+    plResult ResetEntity(plAudioSystemEntityData*) override { return PL_SUCCESS; }
+    plResult UpdateEntity(plAudioSystemEntityData*) override { return PL_SUCCESS; }
+    plResult RemoveEntity(plAudioSystemEntityData*) override { return PL_SUCCESS; }
+    plResult SetEntityTransform(plAudioSystemEntityData*, const plAudioSystemTransform&) override { return PL_SUCCESS; }
+    plResult LoadTrigger(plAudioSystemEntityData*, const plAudioSystemTriggerData*, plAudioSystemEventData*) override { return PL_SUCCESS; }
+    plResult ActivateTrigger(plAudioSystemEntityData*, const plAudioSystemTriggerData*, plAudioSystemEventData*) override { return PL_SUCCESS; }
+    plResult UnloadTrigger(plAudioSystemEntityData*, const plAudioSystemTriggerData*) override { return PL_SUCCESS; }
+    plResult StopEvent(plAudioSystemEntityData*, const plAudioSystemEventData*) override { return PL_SUCCESS; }
+    plResult StopAllEvents(plAudioSystemEntityData*) override { return PL_SUCCESS; }
+    plResult SetRtpc(plAudioSystemEntityData*, const plAudioSystemRtpcData*, float) override { return PL_SUCCESS; }
+    plResult ResetRtpc(plAudioSystemEntityData*, const plAudioSystemRtpcData*) override { return PL_SUCCESS; }
+    plResult SetSwitchState(plAudioSystemEntityData*, const plAudioSystemSwitchStateData*) override { return PL_SUCCESS; }
+    plResult SetObstructionAndOcclusion(plAudioSystemEntityData*, float, float) override { return PL_SUCCESS; }
+    plResult SetEnvironmentAmount(plAudioSystemEntityData*, const plAudioSystemEnvironmentData*, float) override { return PL_SUCCESS; }
+    plResult AddListener(plAudioSystemListenerData*, const char*, bool) override { return PL_SUCCESS; }
+    plResult ResetListener(plAudioSystemListenerData*) override { return PL_SUCCESS; }
+    plResult RemoveListener(plAudioSystemListenerData*) override { return PL_SUCCESS; }
+    plResult SetListenerTransform(plAudioSystemListenerData*, const plAudioSystemTransform&) override { return PL_SUCCESS; }
+    plResult LoadBank(plAudioSystemBankData*) override { return PL_SUCCESS; }
+    plResult UnloadBank(plAudioSystemBankData*) override { return PL_SUCCESS; }
+    plAudioSystemEntityData* CreateWorldEntity(plAudioSystemDataID) override { return nullptr; }
+    plAudioSystemEntityData* CreateEntityData(plAudioSystemDataID) override { return nullptr; }
+    plResult DestroyEntityData(plAudioSystemEntityData*) override { return PL_SUCCESS; }
+    plAudioSystemListenerData* CreateListenerData(plAudioSystemDataID) override { return nullptr; }
+    plResult DestroyListenerData(plAudioSystemListenerData*) override { return PL_SUCCESS; }
+    plAudioSystemEventData* CreateEventData(plAudioSystemDataID) override { return nullptr; }
+    plResult ResetEventData(plAudioSystemEventData*) override { return PL_SUCCESS; }
+    plResult DestroyEventData(plAudioSystemEventData*) override { return PL_SUCCESS; }
+    plResult DestroyBank(plAudioSystemBankData*) override { return PL_SUCCESS; }
+    plResult DestroyTriggerData(plAudioSystemTriggerData*) override { return PL_SUCCESS; }
+    plResult DestroyRtpcData(plAudioSystemRtpcData*) override { return PL_SUCCESS; }
+    plResult DestroySwitchStateData(plAudioSystemSwitchStateData*) override { return PL_SUCCESS; }
+    plResult DestroyEnvironmentData(plAudioSystemEnvironmentData*) override { return PL_SUCCESS; }
+    plResult SetLanguage(const char*) override { return PL_SUCCESS; }
+    const char* GetMiddlewareName() const override { return "MixerTest"; }
+    float GetMasterGain() const override { return 1.0f; }
+    bool GetMute() const override { return false; }
+    void OnMasterGainChange(float) override {}
+    void OnMuteChange(bool) override {}
+    void OnLoseFocus() override {}
+    void OnGainFocus() override {}
+
+  private:
+    ma_engine* m_pEngine = nullptr;
+    plMiniAudioBusGraph m_BusGraph;
+  };
+
   enum Bus : plUInt32
   {
     Master = 0,
@@ -113,15 +213,20 @@ PL_CREATE_SIMPLE_TEST(Mixer, BlendMath)
   if (!PL_TEST_BOOL(engine.IsValid()))
     return;
 
-  const plAudioMixerDesc desc = MakeBlendMixer();
+  // the mixer service loads the mixer from its resource and pushes the authored values into the middleware
+  plAudioMixerResourceHandle hMixer;
+  {
+    plAudioMixerResourceDescriptor descriptor;
+    descriptor.m_Desc = MakeBlendMixer();
+    hMixer = plResourceManager::GetOrCreateResource<plAudioMixerResource>("PlasmaAudioTest:BlendMixer", std::move(descriptor));
+  }
 
-  plMiniAudioBusGraph graph;
-  if (!PL_TEST_RESULT(graph.Build(desc, engine.GetEngine())))
-    return;
+  plMixerTestMiddleware middleware(engine.GetEngine());
+  plMiniAudioBusGraph& graph = middleware.GetBusGraph();
 
   plAudioMixerService service;
-  service.InitFromDesc(plAudioMixerResourceHandle(), desc);
-  service.PushValues(&graph, true);
+  if (!PL_TEST_RESULT(service.LoadMixer("PlasmaAudioTest:BlendMixer", &middleware)))
+    return;
 
   PL_TEST_BLOCK(plTestBlock::Enabled, "VCA dB sum")
   {
@@ -132,14 +237,18 @@ PL_CREATE_SIMPLE_TEST(Mixer, BlendMath)
     // Master: no VCA
     PL_TEST_FLOAT(GetBusVolume(graph, Master), 1.0f, 1e-6f);
 
+    // the graph keeps the pushed gains for the voice audibility: the bus times its parents
+    PL_TEST_FLOAT(graph.GetBusGain(Music), plAudioMixerUtils::DbToLinear(-15.0f), 1e-5f);
+    PL_TEST_FLOAT(graph.GetEffectiveBusGain(Music), plAudioMixerUtils::DbToLinear(-15.0f), 1e-5f);
+
     service.SetVcaVolume("Game", -12.0f);
-    service.Update(plTime::MakeZero(), &graph);
+    service.Update(plTime::MakeZero(), &middleware);
     PL_TEST_FLOAT(GetBusVolume(graph, Music), plAudioMixerUtils::DbToLinear(-21.0f), 1e-5f);
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), plAudioMixerUtils::DbToLinear(-12.0f), 1e-5f);
 
     // the legacy group volume maps onto the VCA
     PL_TEST_BOOL(service.SetGroupVolume("Game", 1.0f));
-    service.Update(plTime::MakeZero(), &graph);
+    service.Update(plTime::MakeZero(), &middleware);
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), 1.0f, 1e-5f);
     PL_TEST_FLOAT(GetBusVolume(graph, Music), plAudioMixerUtils::DbToLinear(-9.0f), 1e-5f);
   }
@@ -148,17 +257,17 @@ PL_CREATE_SIMPLE_TEST(Mixer, BlendMath)
   {
     service.SetSnapshotIntensity("Low", 1.0f);
     service.SetSnapshotIntensity("High", 1.0f);
-    service.Update(plTime::MakeFromMilliseconds(10), &graph);
+    service.Update(plTime::MakeFromMilliseconds(10), &middleware);
 
     // Low (priority 1) applies first, High (priority 5) last and wins
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), plAudioMixerUtils::DbToLinear(-40.0f), 1e-6f);
 
     service.SetSnapshotIntensity("High", 0.0f);
-    service.Update(plTime::MakeFromMilliseconds(10), &graph);
+    service.Update(plTime::MakeFromMilliseconds(10), &middleware);
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), plAudioMixerUtils::DbToLinear(-20.0f), 1e-6f);
 
     service.StopAllSnapshots();
-    service.Update(plTime::MakeZero(), &graph);
+    service.Update(plTime::MakeZero(), &middleware);
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), 1.0f, 1e-5f);
   }
 
@@ -167,29 +276,30 @@ PL_CREATE_SIMPLE_TEST(Mixer, BlendMath)
     service.SetSnapshotIntensity("Fade", 1.0f);
 
     // fade position 0: nothing applied yet
-    service.Update(plTime::MakeZero(), &graph);
+    service.Update(plTime::MakeZero(), &middleware);
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), 1.0f, 1e-5f);
     PL_TEST_FLOAT(GetBusPitch(graph, Sfx), 1.0f, 1e-6f);
 
     // half of the 1 s fade-in: dB and pitch are interpolated linearly
-    service.Update(plTime::MakeFromSeconds(0.5), &graph);
+    service.Update(plTime::MakeFromSeconds(0.5), &middleware);
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), plAudioMixerUtils::DbToLinear(-15.0f), 1e-5f);
     PL_TEST_FLOAT(GetBusPitch(graph, Sfx), 0.75f, 1e-5f);
 
     // full
-    service.Update(plTime::MakeFromSeconds(0.5), &graph);
+    service.Update(plTime::MakeFromSeconds(0.5), &middleware);
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), plAudioMixerUtils::DbToLinear(-30.0f), 1e-6f);
     PL_TEST_FLOAT(GetBusPitch(graph, Sfx), 0.5f, 1e-5f);
 
     // an overshooting delta clamps at the target
-    service.Update(plTime::MakeFromSeconds(5.0), &graph);
+    service.Update(plTime::MakeFromSeconds(5.0), &middleware);
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), plAudioMixerUtils::DbToLinear(-30.0f), 1e-6f);
 
     // fade-out back to half
     service.SetSnapshotIntensity("Fade", 0.0f);
-    service.Update(plTime::MakeFromSeconds(0.5), &graph);
+    service.Update(plTime::MakeFromSeconds(0.5), &middleware);
     PL_TEST_FLOAT(GetBusVolume(graph, Sfx), plAudioMixerUtils::DbToLinear(-15.0f), 1e-5f);
   }
 
-  graph.Teardown();
+  service.UnloadMixer(&middleware);
+  PL_TEST_BOOL(!graph.IsBuilt());
 }

@@ -119,8 +119,40 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
     }
   }
 
+  InitBusValues();
+
   plLog::Info("MiniAudio: mixer graph built ({0} buses).", desc.m_Buses.GetCount());
   return PL_SUCCESS;
+}
+
+void plMiniAudioBusGraph::InitBusValues()
+{
+  m_BusValues.SetCount(m_Desc.m_Buses.GetCount());
+
+  for (plUInt32 i = 0; i < m_Desc.m_Buses.GetCount(); ++i)
+  {
+    const plAudioBusDesc& busDesc = m_Desc.m_Buses[i];
+    BusValues& values = m_BusValues[i];
+
+    // Build sets the authored volume and send levels; the pitch stays at miniaudio's default
+    values.m_fGain = plAudioMixerUtils::DbToLinear(busDesc.m_fVolumeDb);
+    values.m_fPitch = 1.0f;
+
+    values.m_SendLevels.SetCount(busDesc.m_Sends.GetCount());
+    for (plUInt32 s = 0; s < busDesc.m_Sends.GetCount(); ++s)
+    {
+      values.m_SendLevels[s] = plAudioMixerUtils::DbToLinear(busDesc.m_Sends[s].m_fLevelDb);
+    }
+
+    values.m_EffectParams.SetCount(busDesc.m_Effects.GetCount() * plAudioEffectMaxParams);
+    for (plUInt32 e = 0; e < busDesc.m_Effects.GetCount(); ++e)
+    {
+      for (plUInt32 p = 0; p < plAudioEffectMaxParams; ++p)
+      {
+        values.m_EffectParams[e * plAudioEffectMaxParams + p] = busDesc.m_Effects[e].m_fParams[p];
+      }
+    }
+  }
 }
 
 void plMiniAudioBusGraph::Teardown()
@@ -159,6 +191,7 @@ void plMiniAudioBusGraph::Teardown()
   }
 
   m_Buses.Clear();
+  m_BusValues.Clear();
   m_Desc = plAudioMixerDesc();
   m_pEngine = nullptr;
 }
@@ -207,6 +240,7 @@ void plMiniAudioBusGraph::SetBusVolume(plUInt32 uiBusIndex, float fLinearGain)
   if (uiBusIndex >= m_Buses.GetCount())
     return;
 
+  m_BusValues[uiBusIndex].m_fGain = fLinearGain;
   ma_sound_group_set_volume(&m_Buses[uiBusIndex].m_Group, fLinearGain);
 }
 
@@ -215,6 +249,7 @@ void plMiniAudioBusGraph::SetBusPitch(plUInt32 uiBusIndex, float fPitch)
   if (uiBusIndex >= m_Buses.GetCount())
     return;
 
+  m_BusValues[uiBusIndex].m_fPitch = fPitch;
   ma_sound_group_set_pitch(&m_Buses[uiBusIndex].m_Group, plMath::Max(fPitch, 0.01f));
 }
 
@@ -222,6 +257,12 @@ void plMiniAudioBusGraph::SetBusSendLevel(plUInt32 uiBusIndex, plUInt32 uiSendIn
 {
   if (uiBusIndex >= m_Buses.GetCount())
     return;
+
+  plHybridArray<float, 2>& sendLevels = m_BusValues[uiBusIndex].m_SendLevels;
+  if (uiSendIndex < sendLevels.GetCount())
+  {
+    sendLevels[uiSendIndex] = fLinearLevel;
+  }
 
   auto& bus = m_Buses[uiBusIndex];
   if (bus.m_pSplitter == nullptr)
@@ -234,6 +275,13 @@ void plMiniAudioBusGraph::SetBusEffectParameter(plUInt32 uiBusIndex, plUInt32 ui
 {
   if (uiBusIndex >= m_Buses.GetCount())
     return;
+
+  plHybridArray<float, 8>& effectParams = m_BusValues[uiBusIndex].m_EffectParams;
+  const plUInt32 uiSlot = uiEffectIndex * plAudioEffectMaxParams + uiParamIndex;
+  if (uiParamIndex < plAudioEffectMaxParams && uiSlot < effectParams.GetCount())
+  {
+    effectParams[uiSlot] = fValue;
+  }
 
   auto& bus = m_Buses[uiBusIndex];
   if (uiEffectIndex >= bus.m_Effects.GetCount())
@@ -252,4 +300,49 @@ void plMiniAudioBusGraph::GetBusMeter(plUInt32 uiBusIndex, float& out_fPeak, flo
 
   out_fPeak = m_Buses[uiBusIndex].m_Meter.m_fPeak.load(std::memory_order_relaxed);
   out_fRms = m_Buses[uiBusIndex].m_Meter.m_fRms.load(std::memory_order_relaxed);
+}
+
+void plMiniAudioBusGraph::ApplyBusValues(const plDynamicArray<BusValues>& values)
+{
+  const plUInt32 uiBusCount = plMath::Min(values.GetCount(), m_BusValues.GetCount());
+
+  for (plUInt32 uiBus = 0; uiBus < uiBusCount; ++uiBus)
+  {
+    const BusValues& busValues = values[uiBus];
+
+    SetBusVolume(uiBus, busValues.m_fGain);
+    SetBusPitch(uiBus, busValues.m_fPitch);
+
+    for (plUInt32 s = 0; s < busValues.m_SendLevels.GetCount(); ++s)
+    {
+      SetBusSendLevel(uiBus, s, busValues.m_SendLevels[s]);
+    }
+
+    for (plUInt32 uiSlot = 0; uiSlot < busValues.m_EffectParams.GetCount(); ++uiSlot)
+    {
+      SetBusEffectParameter(uiBus, uiSlot / plAudioEffectMaxParams, uiSlot % plAudioEffectMaxParams, busValues.m_EffectParams[uiSlot]);
+    }
+  }
+}
+
+float plMiniAudioBusGraph::GetBusGain(plUInt32 uiBusIndex) const
+{
+  if (uiBusIndex >= m_BusValues.GetCount())
+    return 1.0f;
+
+  return m_BusValues[uiBusIndex].m_fGain;
+}
+
+float plMiniAudioBusGraph::GetEffectiveBusGain(plUInt32 uiBusIndex) const
+{
+  float fGain = 1.0f;
+
+  // the depth bound guards against a cyclic parent chain in malformed data
+  for (plUInt32 uiDepth = 0; uiBusIndex < m_BusValues.GetCount() && uiDepth < m_BusValues.GetCount(); ++uiDepth)
+  {
+    fGain *= m_BusValues[uiBusIndex].m_fGain;
+    uiBusIndex = m_Desc.m_Buses[uiBusIndex].m_uiParent;
+  }
+
+  return fGain;
 }

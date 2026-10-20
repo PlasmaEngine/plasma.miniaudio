@@ -1,6 +1,6 @@
 #pragma once
 
-#include <PlasmaAudioPlugin/Mixer/AudioMixerData.h>
+#include <AudioSystem/Mixer/AudioMixerData.h>
 #include <EditorFramework/Assets/SimpleAssetDocument.h>
 #include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
 

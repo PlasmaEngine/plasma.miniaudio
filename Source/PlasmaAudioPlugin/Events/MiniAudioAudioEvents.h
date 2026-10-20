@@ -12,7 +12,6 @@
 #include <PlasmaAudioPlugin/Profiling/AudioEventLog.h>
 #include <PlasmaAudioPlugin/Resources/MiniAudioSoundResource.h>
 
-class plAudioMixerService;
 class plAudioStreamService;
 class plAudioVoiceManager;
 class plMiniAudioBusGraph;
@@ -154,9 +153,6 @@ public:
 
   /// \brief Admits new voices as real or virtual; null makes every voice real.
   plAudioVoiceManager* m_pVoiceManager = nullptr;
-
-  /// \brief Provides the bus gain for the audibility; null counts the bus gain as 1.
-  const plAudioMixerService* m_pMixer = nullptr;
 
   /// \brief Receives the voice changes and clip problems of the instance; null logs nothing.
   plAudioEventLog* m_pEventLog = nullptr;
@@ -331,7 +327,7 @@ private:
 
   plAudioEventResourceHandle m_hResource;            ///< keeps the event resource alive while m_pResource is set
   const plAudioEventResource* m_pResource = nullptr; ///< acquired until destruction or OnEventUnloading()
-  plMiniAudioBusGraph* m_pBusGraph = nullptr;
+  plMiniAudioBusGraph* m_pBusGraph = nullptr;        ///< voices attach to its buses; its bus gains feed the audibility
   ma_engine* m_pEngine = nullptr;
   const plHashTable<plUInt64, float>* m_pGlobalParameters = nullptr;
 
@@ -433,9 +429,6 @@ public:
   PL_NODISCARD plAudioEventLog& GetEventLog() { return m_EventLog; }
   PL_NODISCARD const plAudioEventLog& GetEventLog() const { return m_EventLog; }
 
-  /// \brief The mixer whose bus gains feed the voice audibility; null counts every bus gain as 1.
-  void SetMixerService(const plAudioMixerService* pMixer) { m_pMixerService = pMixer; }
-
   /// \brief Replaces the global parameter snapshot (name hash -> value) that instances read in Update.
   void SetGlobalParameters(const plHashTable<plUInt64, float>& globals) { m_GlobalParameters = globals; }
 
@@ -481,7 +474,6 @@ private:
   plHashTable<plString, plAudioEventResourceHandle> m_LegacyEvents; ///< legacy sound resource id -> generated event
   plHashTable<plUInt64, float> m_GlobalParameters;                  ///< snapshot of the middleware's global parameters
   plAudioStreamService* m_pStreamService = nullptr;
-  const plAudioMixerService* m_pMixerService = nullptr;
   plAudioVoiceManager m_VoiceManager;
   plAudioEventLog m_EventLog;
   plVec3 m_vListenerPos = plVec3::MakeZero();
