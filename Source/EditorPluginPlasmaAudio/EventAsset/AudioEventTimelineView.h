@@ -1,11 +1,11 @@
 #pragma once
 
+#include <EditorUi/Content.h>
 #include <EditorUi/Tabs.h>
 #include <Foundation/Containers/Map.h>
 #include <Foundation/Types/UniquePtr.h>
 #include <Foundation/Types/Uuid.h>
 #include <GameUiPlugin/Elements/UiDrawList.h>
-#include <GuiFoundation/EngineUi/EngineUiWidget.h>
 
 class plDocument;
 class plDocumentObject;
@@ -19,11 +19,11 @@ struct plEditorUiPointerEvent;
 /// and stop fade and the Automation lane one chip per automation. Clicking selects, dragging a clip moves its
 /// start delay (10 ms snap), dragging the loop and fade handles edits them, double-clicking a header renames the
 /// instrument. Every drag is one undo step, written on release.
-class plQtAudioEventTimelineView : public plQtEngineUiWidget
+class plEditorUiAudioEventTimeline : public plEditorUiContent
 {
 public:
-  plQtAudioEventTimelineView(QWidget* pParent, plDocument* pDocument);
-  ~plQtAudioEventTimelineView() override;
+  explicit plEditorUiAudioEventTimeline(plDocument* pDocument);
+  ~plEditorUiAudioEventTimeline() override;
 
   /// Re-reads the document: instruments, parameters, markers and the selection.
   void Refresh();
@@ -38,8 +38,8 @@ public:
   /// The "+ Parameter" tab was clicked.
   plDelegate<void()> m_OnAddParameter;
 
-  QSize sizeHint() const override { return QSize(800, 320); }
-  QSize minimumSizeHint() const override { return QSize(300, 140); }
+  /// The height that shows the tabs, the ruler, every track and the lanes without scrolling.
+  float GetPreferredHeight() const { return GetCanvasTop() + GetContentSize().y; }
 
 protected:
   void OnUiUpdate() override;

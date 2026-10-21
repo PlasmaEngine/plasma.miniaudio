@@ -726,8 +726,10 @@ plAudioClipAssetDocumentWindow::plAudioClipAssetDocumentWindow(plDocument* pDocu
 
     if (m_bEngineViews)
     {
-      m_pUsedByView = new plQtAudioClipUsedByView(pWidget);
-      pLayout->addWidget(m_pUsedByView);
+      plQtEngineUiContentWidget* pUsedByWidget = nullptr;
+      m_pUsedByView = plQtEngineUiContentWidget::Create<plEditorUiAudioClipUsedBy>(pWidget, "AudioClipUsedBy", &pUsedByWidget);
+      pUsedByWidget->SetFixedLogicalHeight(plEditorUiAudioClipUsedBy::Height);
+      pLayout->addWidget(pUsedByWidget);
     }
     else
     {
@@ -802,7 +804,8 @@ void plAudioClipAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentral
 
   // platform tabs, ruler, waveform and the stat row
   {
-    m_pWaveView = new plQtAudioClipWaveformView(pCentralWidget);
+    plQtEngineUiContentWidget* pWaveWidget = nullptr;
+    m_pWaveView = plQtEngineUiContentWidget::Create<plEditorUiAudioClipWaveform>(pCentralWidget, "AudioClipWaveform", &pWaveWidget);
 
     m_pWaveView->m_OnTabPicked = [this](plUInt32 uiTab)
     { OnTabChanged(static_cast<int>(uiTab)); };
@@ -816,7 +819,7 @@ void plAudioClipAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentral
     m_pWaveView->m_OnLoopChanged = [this](plUInt64 uiStart, plUInt64 uiEnd)
     { SetLoopPoints(uiStart, uiEnd); };
 
-    pCentralLayout->addWidget(m_pWaveView, 1);
+    pCentralLayout->addWidget(pWaveWidget, 1);
   }
 }
 
@@ -1453,7 +1456,7 @@ void plAudioClipAssetDocumentWindow::ShowPreview(const plSharedPtr<plAudioClipPr
   {
     if (m_bEngineViews)
     {
-      plQtAudioClipWaveformView::Stat stats[4];
+      plEditorUiAudioClipWaveform::Stat stats[4];
       stats[0] = {"Resident", sResident.toUtf8().data(), "Memory the clip holds while loaded"};
       stats[1] = {"Disk", sDisk.toUtf8().data(), "Size of the built clip on disk (default language)"};
       stats[2] = {"Decode cost", sDecode.toUtf8().data(), "CPU work per playing voice"};
@@ -1562,14 +1565,14 @@ void plAudioClipAssetDocumentWindow::RefreshUsedBy()
   plSet<plUuid> uses;
   plAssetCurator::GetSingleton()->FindAllUses(GetDocument()->GetGuid(), uses, false);
 
-  plHybridArray<plQtAudioClipUsedByView::Entry, 8> entries;
+  plHybridArray<plEditorUiAudioClipUsedBy::Entry, 8> entries;
   for (const plUuid& guid : uses)
   {
     plAssetCurator::plLockedSubAsset pSubAsset = plAssetCurator::GetSingleton()->GetSubAsset(guid);
     if (pSubAsset == nullptr || pSubAsset->m_pAssetInfo == nullptr)
       continue;
 
-    plQtAudioClipUsedByView::Entry& entry = entries.ExpandAndGetRef();
+    plEditorUiAudioClipUsedBy::Entry& entry = entries.ExpandAndGetRef();
     entry.m_sPath = pSubAsset->m_pAssetInfo->m_Path.GetDataDirParentRelativePath();
     entry.m_sAbsPath = pSubAsset->m_pAssetInfo->m_Path.GetAbsolutePath();
   }
@@ -1582,7 +1585,7 @@ void plAudioClipAssetDocumentWindow::RefreshUsedBy()
 
   m_pUsedByList->clear();
 
-  for (const plQtAudioClipUsedByView::Entry& entry : entries)
+  for (const plEditorUiAudioClipUsedBy::Entry& entry : entries)
   {
     QListWidgetItem* pItem = new QListWidgetItem(QString::fromUtf8(entry.m_sPath.GetData()));
     pItem->setData(Qt::UserRole, QString::fromUtf8(entry.m_sAbsPath.GetData()));

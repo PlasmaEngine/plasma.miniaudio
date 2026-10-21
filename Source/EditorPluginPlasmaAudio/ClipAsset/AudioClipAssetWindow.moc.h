@@ -16,8 +16,8 @@ class QTabBar;
 class QTimer;
 class QToolButton;
 class QVBoxLayout;
-class plQtAudioClipUsedByView;
-class plQtAudioClipWaveformView;
+class plEditorUiAudioClipUsedBy;
+class plEditorUiAudioClipWaveform;
 class plQtEngineControlStrip;
 class plQtPropertyGridWidget;
 struct plAssetCuratorEvent;
@@ -185,8 +185,8 @@ private:
   plUInt32 m_uiLoopLabel = 0;
   plQtEngineControlStrip* m_pPlatformStrip = nullptr;
   plUInt32 m_uiPlatform = 0;
-  plQtAudioClipWaveformView* m_pWaveView = nullptr;
-  plQtAudioClipUsedByView* m_pUsedByView = nullptr;
+  plEditorUiAudioClipWaveform* m_pWaveView = nullptr;
+  plEditorUiAudioClipUsedBy* m_pUsedByView = nullptr;
 
   plQtAudioWaveformWidget* m_pWaveform = nullptr;
   QTabBar* m_pTabBar = nullptr;

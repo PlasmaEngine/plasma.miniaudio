@@ -6,6 +6,7 @@
 #include <GuiFoundation/UIServices/DynamicStringEnum.h>
 #include <EditorPluginPlasmaAudio/Actions/MiniAudioActions.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
+#include <EditorPluginPlasmaAudio/EngineUi/AudioShellPanels.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAsset.h>
 #include <EditorPluginPlasmaAudio/Preferences/MiniAudioPreferences.h>
@@ -232,6 +233,9 @@ void OnLoadPlugin()
 
   plPlasmaAudioActions::MapEventAssetActions("AudioEventAssetMenuBar", "AudioEventAssetToolBar");
 
+  // the audio windows' panels in the engine shell
+  plAudioShellPanels::Register();
+
   // the panel adds itself to the container window's bottom dock area and to the Panels menu; the user layout restored
   // after plugin loading decides whether it is open
   if (!plQtEditorApp::GetSingleton()->IsInHeadlessMode() && plQtContainerWindow::GetContainerWindow() != nullptr)
@@ -250,6 +254,7 @@ void OnUnloadPlugin()
     delete pPanel;
   }
 
+  plAudioShellPanels::Unregister();
   plPlasmaAudioActions::UnregisterActions();
   plAssetCurator::GetSingleton()->m_Events.RemoveEventHandler(AssetCuratorEventHandler);
   plToolsProject::GetSingleton()->s_Events.RemoveEventHandler(ToolsProjectEventHandler);

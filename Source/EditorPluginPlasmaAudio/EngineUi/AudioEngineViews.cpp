@@ -6,8 +6,6 @@
 #include <EditorUi/Surface.h>
 #include <EditorUi/Widgets.h>
 
-#include <QtMath>
-
 namespace
 {
   const plHashedString s_sDrawing = plMakeHashedString("Audio.Drawing");
@@ -18,7 +16,7 @@ namespace
   constexpr float s_fReadoutWidth = 64.0f;
 
   /// A document that only shows the view's drawing.
-  void BuildDrawingDocument(plQtEngineUiWidget& ref_view, plColorGammaUB background)
+  void BuildDrawingDocument(plEditorUiContent& ref_view, plColorGammaUB background)
   {
     plUiPanel* pRoot = plEditorUi::Panel();
     pRoot->m_Color = background;
@@ -28,46 +26,41 @@ namespace
 } // namespace
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioSectionHeaderView
+// plEditorUiAudioSectionHeader
 
-plQtAudioSectionHeaderView::plQtAudioSectionHeaderView(QWidget* pParent, plStringView sTitle, plColorGammaUB color)
-  : plQtEngineUiWidget(pParent, "AudioSectionHeader")
+plEditorUiAudioSectionHeader::plEditorUiAudioSectionHeader(plStringView sTitle, plColorGammaUB color)
+  : plEditorUiContent("AudioSectionHeader")
   , m_sTitle(sTitle)
   , m_Color(color)
 {
-  setMinimumSize(0, 0);
-  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 }
 
-void plQtAudioSectionHeaderView::SetTitle(plStringView sTitle)
+void plEditorUiAudioSectionHeader::SetTitle(plStringView sTitle)
 {
   if (m_sTitle == sTitle)
     return;
 
   m_sTitle = sTitle;
   m_bDrawDirty = true;
+  RequestRedraw();
 }
 
-void plQtAudioSectionHeaderView::SetCount(plStringView sCount)
+void plEditorUiAudioSectionHeader::SetCount(plStringView sCount)
 {
   if (m_sCount == sCount)
     return;
 
   m_sCount = sCount;
   m_bDrawDirty = true;
+  RequestRedraw();
 }
 
-QSize plQtAudioSectionHeaderView::sizeHint() const
+float plEditorUiAudioSectionHeader::GetHeight()
 {
-  return QSize(200, qCeil(plAudioEngineUi::SectionHeight * GetUiScale()));
+  return plAudioEngineUi::SectionHeight;
 }
 
-QSize plQtAudioSectionHeaderView::minimumSizeHint() const
-{
-  return QSize(40, qCeil(plAudioEngineUi::SectionHeight * GetUiScale()));
-}
-
-void plQtAudioSectionHeaderView::OnUiUpdate()
+void plEditorUiAudioSectionHeader::OnUiUpdate()
 {
   if (!IsReady())
     return;
@@ -92,41 +85,36 @@ void plQtAudioSectionHeaderView::OnUiUpdate()
 }
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioStatusRowView
+// plEditorUiAudioStatusRow
 
-plQtAudioStatusRowView::plQtAudioStatusRowView(QWidget* pParent)
-  : plQtEngineUiWidget(pParent, "AudioStatusRow")
+plEditorUiAudioStatusRow::plEditorUiAudioStatusRow()
+  : plEditorUiContent("AudioStatusRow")
 {
-  setMinimumSize(0, 0);
-  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 }
 
-void plQtAudioStatusRowView::SetParts(plArrayPtr<const Part> parts)
+void plEditorUiAudioStatusRow::SetParts(plArrayPtr<const Part> parts)
 {
   m_Parts = parts;
   m_bDrawDirty = true;
+  RequestRedraw();
 }
 
-void plQtAudioStatusRowView::SetRight(plStringView sText)
+void plEditorUiAudioStatusRow::SetRight(plStringView sText)
 {
   if (m_sRight == sText)
     return;
 
   m_sRight = sText;
   m_bDrawDirty = true;
+  RequestRedraw();
 }
 
-QSize plQtAudioStatusRowView::sizeHint() const
+float plEditorUiAudioStatusRow::GetHeight()
 {
-  return QSize(200, qCeil((plEditorUi::StatusRowHeight + 1.0f) * GetUiScale()));
+  return plEditorUi::StatusRowHeight + 1.0f;
 }
 
-QSize plQtAudioStatusRowView::minimumSizeHint() const
-{
-  return QSize(40, qCeil((plEditorUi::StatusRowHeight + 1.0f) * GetUiScale()));
-}
-
-void plQtAudioStatusRowView::OnUiUpdate()
+void plEditorUiAudioStatusRow::OnUiUpdate()
 {
   using namespace plEditorUi;
 
@@ -173,17 +161,14 @@ void plQtAudioStatusRowView::OnUiUpdate()
 }
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioMeterView
+// plEditorUiAudioMeter
 
-plQtAudioMeterView::plQtAudioMeterView(QWidget* pParent)
-  : plQtEngineUiWidget(pParent, "AudioMeter")
+plEditorUiAudioMeter::plEditorUiAudioMeter()
+  : plEditorUiContent("AudioMeter")
 {
-  setMinimumSize(0, 0);
-  setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-  setToolTip("Audition output level");
 }
 
-void plQtAudioMeterView::SetPeak(float fLinearPeak)
+void plEditorUiAudioMeter::SetPeak(float fLinearPeak)
 {
   const float fPeak = plMath::Clamp(fLinearPeak, 0.0f, 1.5f);
   const float fHold = plMath::Max(fPeak, m_fPeakHold * 0.94f);
@@ -194,19 +179,21 @@ void plQtAudioMeterView::SetPeak(float fLinearPeak)
   m_fPeak = fPeak;
   m_fPeakHold = fHold < 1e-4f ? 0.0f : fHold;
   m_bDrawDirty = true;
+  RequestRedraw();
 }
 
-QSize plQtAudioMeterView::sizeHint() const
+plVec2 plEditorUiAudioMeter::GetSize()
 {
-  return QSize(qCeil((s_fMeterWidth + s_fReadoutWidth + 8.0f) * GetUiScale()), qCeil(s_fStripHeight * GetUiScale()));
+  return plVec2(s_fMeterWidth + s_fReadoutWidth + 8.0f, s_fStripHeight);
 }
 
-QSize plQtAudioMeterView::minimumSizeHint() const
+plString plEditorUiAudioMeter::GetToolTipAt(const plVec2& vLogical) const
 {
-  return sizeHint();
+  PL_IGNORE_UNUSED(vLogical);
+  return "Audition output level";
 }
 
-void plQtAudioMeterView::OnUiUpdate()
+void plEditorUiAudioMeter::OnUiUpdate()
 {
   using namespace plEditorUi;
 

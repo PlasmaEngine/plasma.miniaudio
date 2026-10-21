@@ -115,46 +115,30 @@ namespace
 } // namespace
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioEventDeckView
+// plEditorUiAudioEventDeck
 
-plQtAudioEventDeckView::plQtAudioEventDeckView(QWidget* pParent, plDocument* pDocument)
-  : plQtEngineUiWidget(pParent, "AudioEventDeck")
+plEditorUiAudioEventDeck::plEditorUiAudioEventDeck(plDocument* pDocument)
+  : plEditorUiContent("AudioEventDeck")
   , m_pDocument(pDocument)
 {
-  setMinimumSize(0, 0);
-  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
   if (IsReady())
-    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plQtAudioEventDeckView::OnPointer, this));
+    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plEditorUiAudioEventDeck::OnPointer, this));
 }
 
-plQtAudioEventDeckView::~plQtAudioEventDeckView()
+plEditorUiAudioEventDeck::~plEditorUiAudioEventDeck()
 {
   if (IsReady())
     GetSurface()->m_PointerEvents.RemoveEventHandler(m_PointerSubscription);
 }
 
-void plQtAudioEventDeckView::SetInstrument(const plUuid& instrumentGuid)
+void plEditorUiAudioEventDeck::SetInstrument(const plUuid& instrumentGuid)
 {
   m_InstrumentGuid = instrumentGuid;
   m_bRebuild = true;
-
-  const int iHeight = qCeil(GetContentHeight() * GetUiScale());
-  if (height() != iHeight)
-    setFixedHeight(iHeight);
+  RequestRedraw();
 }
 
-QSize plQtAudioEventDeckView::sizeHint() const
-{
-  return QSize(600, qCeil(GetContentHeight() * GetUiScale()));
-}
-
-QSize plQtAudioEventDeckView::minimumSizeHint() const
-{
-  return QSize(300, qCeil(GetContentHeight() * GetUiScale()));
-}
-
-const plDocumentObject* plQtAudioEventDeckView::GetInstrument() const
+const plDocumentObject* plEditorUiAudioEventDeck::GetInstrument() const
 {
   if (!m_InstrumentGuid.IsValid())
     return nullptr;
@@ -163,12 +147,12 @@ const plDocumentObject* plQtAudioEventDeckView::GetInstrument() const
   return (pObject != nullptr && pObject->GetParentProperty().IsEqual("Instruments")) ? pObject : nullptr;
 }
 
-void plQtAudioEventDeckView::GatherPlaylist(plHybridArray<const plDocumentObject*, 8>& out_entries) const
+void plEditorUiAudioEventDeck::GatherPlaylist(plHybridArray<const plDocumentObject*, 8>& out_entries) const
 {
   GatherChildrenOfProperty(GetInstrument(), "Playlist", out_entries);
 }
 
-float plQtAudioEventDeckView::GetContentHeight() const
+float plEditorUiAudioEventDeck::GetContentHeight() const
 {
   plHybridArray<const plDocumentObject*, 8> entries;
   GatherPlaylist(entries);
@@ -178,12 +162,12 @@ float plQtAudioEventDeckView::GetContentHeight() const
   return plMath::Max(fInstrument, fPlayback);
 }
 
-float plQtAudioEventDeckView::GetColumnSplit() const
+float plEditorUiAudioEventDeck::GetColumnSplit() const
 {
   return plMath::Round((IsReady() ? GetSurface()->GetLogicalSize().x : 600.0f) * 0.5f);
 }
 
-plRectFloat plQtAudioEventDeckView::GetSliderRect(Slider slider) const
+plRectFloat plEditorUiAudioEventDeck::GetSliderRect(Slider slider) const
 {
   const float x0 = GetColumnSplit();
   const float fWidth = (IsReady() ? GetSurface()->GetLogicalSize().x : 600.0f) - x0;
@@ -192,7 +176,7 @@ plRectFloat plQtAudioEventDeckView::GetSliderRect(Slider slider) const
   return plRectFloat(x0 + s_fPad + s_fLabelWidth + 8.0f, y, plMath::Max(fControl - 60.0f, 20.0f), plEditorUi::ControlHeight);
 }
 
-void plQtAudioEventDeckView::OnUiUpdate()
+void plEditorUiAudioEventDeck::OnUiUpdate()
 {
   if (!IsReady())
     return;
@@ -220,7 +204,7 @@ void plQtAudioEventDeckView::OnUiUpdate()
     Draw();
 }
 
-void plQtAudioEventDeckView::BuildDocument()
+void plEditorUiAudioEventDeck::BuildDocument()
 {
   using namespace plEditorUi;
 
@@ -316,7 +300,7 @@ void plQtAudioEventDeckView::BuildDocument()
   m_bDrawDirty = true;
 }
 
-void plQtAudioEventDeckView::UpdateFieldTexts()
+void plEditorUiAudioEventDeck::UpdateFieldTexts()
 {
   const plDocumentObject* pInstrument = GetInstrument();
   if (pInstrument == nullptr)
@@ -344,7 +328,7 @@ void plQtAudioEventDeckView::UpdateFieldTexts()
     set(IndexedName("Deck.Field.Weight", i), entries[i]->GetTypeAccessor().GetValue("Weight").ConvertTo<double>(), 1);
 }
 
-void plQtAudioEventDeckView::Draw()
+void plEditorUiAudioEventDeck::Draw()
 {
   m_bDrawDirty = false;
   m_Writer.Clear();
@@ -362,7 +346,7 @@ void plQtAudioEventDeckView::Draw()
   m_Writer.Publish(GetSurface()->GetBlackboard(), s_sDeckEntry);
 }
 
-void plQtAudioEventDeckView::DrawInstrumentColumn(float fWidth)
+void plEditorUiAudioEventDeck::DrawInstrumentColumn(float fWidth)
 {
   using namespace plEditorUi;
 
@@ -447,7 +431,7 @@ void plQtAudioEventDeckView::DrawInstrumentColumn(float fWidth)
   }
 }
 
-void plQtAudioEventDeckView::DrawPlaybackColumn(float x, float fWidth)
+void plEditorUiAudioEventDeck::DrawPlaybackColumn(float x, float fWidth)
 {
   using namespace plEditorUi;
 
@@ -520,17 +504,17 @@ void plQtAudioEventDeckView::DrawPlaybackColumn(float x, float fWidth)
   }
 }
 
-plString plQtAudioEventDeckView::GetToolTipAt(const plVec2& vLogical) const
+plString plEditorUiAudioEventDeck::GetToolTipAt(const plVec2& vLogical) const
 {
   const float fSplit = GetColumnSplit();
   const plRectFloat retrigger(fSplit + s_fPad, s_fRowTop + 5.0f * s_fRowPitch, s_fLabelWidth, plEditorUi::ControlHeight);
   if (retrigger.Contains(vLogical))
     return "Random loop re-trigger delay (scatterer). Zero = gapless.";
 
-  return plQtEngineUiWidget::GetToolTipAt(vLogical);
+  return plEditorUiContent::GetToolTipAt(vLogical);
 }
 
-void plQtAudioEventDeckView::OnUiEvent(const plMsgUiEvent& event)
+void plEditorUiAudioEventDeck::OnUiEvent(const plMsgUiEvent& event)
 {
   const plStringView sId = event.m_sIdentifier.GetView();
 
@@ -583,7 +567,7 @@ void plQtAudioEventDeckView::OnUiEvent(const plMsgUiEvent& event)
   }
 }
 
-void plQtAudioEventDeckView::CommitField(plStringView sField)
+void plEditorUiAudioEventDeck::CommitField(plStringView sField)
 {
   const plDocumentObject* pInstrument = GetInstrument();
   if (pInstrument == nullptr)
@@ -642,7 +626,7 @@ void plQtAudioEventDeckView::CommitField(plStringView sField)
   accessor.FinishTransaction();
 }
 
-void plQtAudioEventDeckView::SetInstrumentValue(const char* szProperty, const plVariant& value, const char* szTransaction)
+void plEditorUiAudioEventDeck::SetInstrumentValue(const char* szProperty, const plVariant& value, const char* szTransaction)
 {
   const plDocumentObject* pInstrument = GetInstrument();
   if (pInstrument == nullptr)
@@ -654,7 +638,7 @@ void plQtAudioEventDeckView::SetInstrumentValue(const char* szProperty, const pl
   accessor.FinishTransaction();
 }
 
-void plQtAudioEventDeckView::ShowInstrumentMenu()
+void plEditorUiAudioEventDeck::ShowInstrumentMenu()
 {
   const plDocumentObject* pInstrument = GetInstrument();
   if (pInstrument == nullptr)
@@ -684,7 +668,7 @@ void plQtAudioEventDeckView::ShowInstrumentMenu()
     });
 }
 
-void plQtAudioEventDeckView::ShowModeMenu()
+void plEditorUiAudioEventDeck::ShowModeMenu()
 {
   const plDocumentObject* pInstrument = GetInstrument();
   if (pInstrument == nullptr)
@@ -705,7 +689,7 @@ void plQtAudioEventDeckView::ShowModeMenu()
     { SetInstrumentValue("PlaylistMode", static_cast<plInt64>(uiId), "Set Playlist Mode"); });
 }
 
-void plQtAudioEventDeckView::OnPointer(const plEditorUiPointerEvent& e)
+void plEditorUiAudioEventDeck::OnPointer(const plEditorUiPointerEvent& e)
 {
   using Type = plEditorUiPointerEvent::Type;
 
@@ -773,7 +757,7 @@ void plQtAudioEventDeckView::OnPointer(const plEditorUiPointerEvent& e)
 }
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioEventAutomationView
+// plEditorUiAudioEventAutomation
 
 namespace
 {
@@ -783,40 +767,33 @@ namespace
   constexpr float s_fPointGrab = 7.0f;
 } // namespace
 
-plQtAudioEventAutomationView::plQtAudioEventAutomationView(QWidget* pParent, plDocument* pDocument)
-  : plQtEngineUiWidget(pParent, "AudioEventAutomation")
+plEditorUiAudioEventAutomation::plEditorUiAudioEventAutomation(plDocument* pDocument)
+  : plEditorUiContent("AudioEventAutomation")
   , m_pDocument(pDocument)
 {
-  setMinimumSize(0, 0);
-  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-
   if (IsReady())
-    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plQtAudioEventAutomationView::OnPointer, this));
+    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plEditorUiAudioEventAutomation::OnPointer, this));
 }
 
-plQtAudioEventAutomationView::~plQtAudioEventAutomationView()
+plEditorUiAudioEventAutomation::~plEditorUiAudioEventAutomation()
 {
   if (IsReady())
     GetSurface()->m_PointerEvents.RemoveEventHandler(m_PointerSubscription);
 }
 
-void plQtAudioEventAutomationView::SetAutomation(const plUuid& automationGuid)
+void plEditorUiAudioEventAutomation::SetAutomation(const plUuid& automationGuid)
 {
   m_AutomationGuid = automationGuid;
   m_bDrawDirty = true;
+  RequestRedraw();
 }
 
-QSize plQtAudioEventAutomationView::sizeHint() const
+float plEditorUiAudioEventAutomation::GetMinimumHeight()
 {
-  return QSize(300, qCeil(s_fAutomationHeight * GetUiScale()));
+  return s_fAutomationHeight;
 }
 
-QSize plQtAudioEventAutomationView::minimumSizeHint() const
-{
-  return QSize(150, qCeil(s_fAutomationHeight * GetUiScale()));
-}
-
-void plQtAudioEventAutomationView::GatherPoints(plHybridArray<CurvePoint, 8>& out_points) const
+void plEditorUiAudioEventAutomation::GatherPoints(plHybridArray<CurvePoint, 8>& out_points) const
 {
   out_points.Clear();
 
@@ -846,7 +823,7 @@ void plQtAudioEventAutomationView::GatherPoints(plHybridArray<CurvePoint, 8>& ou
     { return a.m_fX < b.m_fX; });
 }
 
-void plQtAudioEventAutomationView::GetRanges(double& out_fMinX, double& out_fMaxX, double& out_fMaxY) const
+void plEditorUiAudioEventAutomation::GetRanges(double& out_fMinX, double& out_fMaxX, double& out_fMaxY) const
 {
   out_fMinX = 0.0;
   out_fMaxX = 1.0;
@@ -892,19 +869,19 @@ void plQtAudioEventAutomationView::GetRanges(double& out_fMinX, double& out_fMax
   out_fMaxY = plMath::Max(out_fMaxY, 1.0);
 }
 
-plRectFloat plQtAudioEventAutomationView::GetCurveRect() const
+plRectFloat plEditorUiAudioEventAutomation::GetCurveRect() const
 {
   const float fWidth = IsReady() ? GetSurface()->GetLogicalSize().x : 300.0f;
   return plRectFloat(s_fPad, s_fCurveTop, plMath::Max(fWidth - 2.0f * s_fPad, 20.0f), s_fCurveHeight);
 }
 
-plRectFloat plQtAudioEventAutomationView::GetPlotRect() const
+plRectFloat plEditorUiAudioEventAutomation::GetPlotRect() const
 {
   const plRectFloat curve = GetCurveRect();
   return plRectFloat(curve.x + 8.0f, curve.y + 8.0f, curve.width - 16.0f, curve.height - 22.0f);
 }
 
-plVec2 plQtAudioEventAutomationView::ToView(double fX, double fY) const
+plVec2 plEditorUiAudioEventAutomation::ToView(double fX, double fY) const
 {
   double fMinX, fMaxX, fMaxY;
   GetRanges(fMinX, fMaxX, fMaxY);
@@ -915,7 +892,7 @@ plVec2 plQtAudioEventAutomationView::ToView(double fX, double fY) const
   return plVec2(plot.x + static_cast<float>(fTx * plot.width), plot.y + plot.height - static_cast<float>(fTy * plot.height));
 }
 
-void plQtAudioEventAutomationView::FromView(const plVec2& vPos, double& out_fX, double& out_fY) const
+void plEditorUiAudioEventAutomation::FromView(const plVec2& vPos, double& out_fX, double& out_fY) const
 {
   double fMinX, fMaxX, fMaxY;
   GetRanges(fMinX, fMaxX, fMaxY);
@@ -928,7 +905,7 @@ void plQtAudioEventAutomationView::FromView(const plVec2& vPos, double& out_fX, 
   out_fY = fTy * fMaxY;
 }
 
-plInt32 plQtAudioEventAutomationView::FindPointAt(const plVec2& vPos) const
+plInt32 plEditorUiAudioEventAutomation::FindPointAt(const plVec2& vPos) const
 {
   plHybridArray<CurvePoint, 8> points;
   GatherPoints(points);
@@ -942,7 +919,7 @@ plInt32 plQtAudioEventAutomationView::FindPointAt(const plVec2& vPos) const
   return -1;
 }
 
-void plQtAudioEventAutomationView::OnUiUpdate()
+void plEditorUiAudioEventAutomation::OnUiUpdate()
 {
   if (!IsReady())
     return;
@@ -957,7 +934,7 @@ void plQtAudioEventAutomationView::OnUiUpdate()
     Draw();
 }
 
-void plQtAudioEventAutomationView::BuildDocument()
+void plEditorUiAudioEventAutomation::BuildDocument()
 {
   using namespace plEditorUi;
 
@@ -975,7 +952,7 @@ void plQtAudioEventAutomationView::BuildDocument()
   m_bDrawDirty = true;
 }
 
-void plQtAudioEventAutomationView::Draw()
+void plEditorUiAudioEventAutomation::Draw()
 {
   using namespace plEditorUi;
 
@@ -1051,21 +1028,21 @@ void plQtAudioEventAutomationView::Draw()
   m_Writer.Publish(GetSurface()->GetBlackboard(), s_sAutomationEntry);
 }
 
-plString plQtAudioEventAutomationView::GetToolTipAt(const plVec2& vLogical) const
+plString plEditorUiAudioEventAutomation::GetToolTipAt(const plVec2& vLogical) const
 {
   if (GetCurveRect().Contains(vLogical) && m_AutomationGuid.IsValid())
     return "Drag points to shape the curve \xC2\xB7 double-click to add a point \xC2\xB7 right-click a point to remove it";
 
-  return plQtEngineUiWidget::GetToolTipAt(vLogical);
+  return plEditorUiContent::GetToolTipAt(vLogical);
 }
 
-void plQtAudioEventAutomationView::OnUiEvent(const plMsgUiEvent& event)
+void plEditorUiAudioEventAutomation::OnUiEvent(const plMsgUiEvent& event)
 {
   if (event.m_sIdentifier.GetView() == "Automation.Add")
     ShowAddMenu();
 }
 
-void plQtAudioEventAutomationView::ShowAddMenu()
+void plEditorUiAudioEventAutomation::ShowAddMenu()
 {
   const auto& rootChildren = m_pDocument->GetObjectManager()->GetRootObject()->GetChildren();
 
@@ -1103,7 +1080,7 @@ void plQtAudioEventAutomationView::ShowAddMenu()
     });
 }
 
-void plQtAudioEventAutomationView::OnPointer(const plEditorUiPointerEvent& e)
+void plEditorUiAudioEventAutomation::OnPointer(const plEditorUiPointerEvent& e)
 {
   using Type = plEditorUiPointerEvent::Type;
   using Button = plEditorUiPointerEvent::Button;

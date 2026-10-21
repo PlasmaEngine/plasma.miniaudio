@@ -78,25 +78,21 @@ namespace
   }
 } // namespace
 
-plQtAudioEventTimelineView::plQtAudioEventTimelineView(QWidget* pParent, plDocument* pDocument)
-  : plQtEngineUiWidget(pParent, "AudioEventTimeline")
+plEditorUiAudioEventTimeline::plEditorUiAudioEventTimeline(plDocument* pDocument)
+  : plEditorUiContent("AudioEventTimeline")
   , m_pDocument(pDocument)
 {
-  setMinimumSize(0, 0);
-  setMouseTracking(true);
-  setFocusPolicy(Qt::ClickFocus);
-
   if (IsReady())
   {
-    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plQtAudioEventTimelineView::OnPointer, this));
-    m_KeySubscription = GetSurface()->m_KeyEvents.AddEventHandler(plMakeDelegate(&plQtAudioEventTimelineView::OnKey, this));
+    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plEditorUiAudioEventTimeline::OnPointer, this));
+    m_KeySubscription = GetSurface()->m_KeyEvents.AddEventHandler(plMakeDelegate(&plEditorUiAudioEventTimeline::OnKey, this));
 
     m_pTabs = PL_DEFAULT_NEW(plEditorUiTabs, *GetSurface(), s_szTabs);
-    m_TabSubscription = m_pTabs->m_CurrentChanged.AddEventHandler(plMakeDelegate(&plQtAudioEventTimelineView::OnTabChanged, this));
+    m_TabSubscription = m_pTabs->m_CurrentChanged.AddEventHandler(plMakeDelegate(&plEditorUiAudioEventTimeline::OnTabChanged, this));
   }
 }
 
-plQtAudioEventTimelineView::~plQtAudioEventTimelineView()
+plEditorUiAudioEventTimeline::~plEditorUiAudioEventTimeline()
 {
   if (IsReady())
   {
@@ -106,13 +102,13 @@ plQtAudioEventTimelineView::~plQtAudioEventTimelineView()
   }
 }
 
-void plQtAudioEventTimelineView::Refresh()
+void plEditorUiAudioEventTimeline::Refresh()
 {
   UpdateTabs();
   m_bDrawDirty = true;
 }
 
-void plQtAudioEventTimelineView::ClearDurationCache()
+void plEditorUiAudioEventTimeline::ClearDurationCache()
 {
   m_DurationCache.Clear();
   m_bDrawDirty = true;
@@ -121,18 +117,18 @@ void plQtAudioEventTimelineView::ClearDurationCache()
 //////////////////////////////////////////////////////////////////////////
 // Document data
 
-const plDocumentObject* plQtAudioEventTimelineView::GetPropertiesObject() const
+const plDocumentObject* plEditorUiAudioEventTimeline::GetPropertiesObject() const
 {
   const auto& children = m_pDocument->GetObjectManager()->GetRootObject()->GetChildren();
   return children.IsEmpty() ? nullptr : children[0];
 }
 
-void plQtAudioEventTimelineView::GatherInstruments(plHybridArray<const plDocumentObject*, 8>& out_instruments) const
+void plEditorUiAudioEventTimeline::GatherInstruments(plHybridArray<const plDocumentObject*, 8>& out_instruments) const
 {
   GatherChildrenOfProperty(GetPropertiesObject(), "Instruments", out_instruments);
 }
 
-double plQtAudioEventTimelineView::GetSampleDuration(plStringView sFile) const
+double plEditorUiAudioEventTimeline::GetSampleDuration(plStringView sFile) const
 {
   if (sFile.IsEmpty())
     return 0.0;
@@ -162,7 +158,7 @@ double plQtAudioEventTimelineView::GetSampleDuration(plStringView sFile) const
   return fDuration;
 }
 
-double plQtAudioEventTimelineView::GetEntryDuration(const plDocumentObject* pEntry) const
+double plEditorUiAudioEventTimeline::GetEntryDuration(const plDocumentObject* pEntry) const
 {
   const plString sClip = pEntry->GetTypeAccessor().GetValue("Clip").ConvertTo<plString>();
   if (!sClip.IsEmpty())
@@ -174,7 +170,7 @@ double plQtAudioEventTimelineView::GetEntryDuration(const plDocumentObject* pEnt
   return GetSampleDuration(pEntry->GetTypeAccessor().GetValue("File").ConvertTo<plString>());
 }
 
-double plQtAudioEventTimelineView::GetLongestEntry(const plDocumentObject* pInstrument) const
+double plEditorUiAudioEventTimeline::GetLongestEntry(const plDocumentObject* pInstrument) const
 {
   plHybridArray<const plDocumentObject*, 8> playlist;
   GatherChildrenOfProperty(pInstrument, "Playlist", playlist);
@@ -186,7 +182,7 @@ double plQtAudioEventTimelineView::GetLongestEntry(const plDocumentObject* pInst
   return fLongest;
 }
 
-double plQtAudioEventTimelineView::GetInstrumentDelay(const plDocumentObject* pInstrument) const
+double plEditorUiAudioEventTimeline::GetInstrumentDelay(const plDocumentObject* pInstrument) const
 {
   if (pInstrument == nullptr)
     return 0.0;
@@ -198,7 +194,7 @@ double plQtAudioEventTimelineView::GetInstrumentDelay(const plDocumentObject* pI
   return pInstrument->GetTypeAccessor().GetValue("StartDelay").ConvertTo<double>();
 }
 
-double plQtAudioEventTimelineView::GetMarkerValue(const char* szProperty, DragHandle handle) const
+double plEditorUiAudioEventTimeline::GetMarkerValue(const char* szProperty, DragHandle handle) const
 {
   if (m_ActiveHandle == handle && m_bHandlePreviewValid)
     return m_fHandlePreview;
@@ -207,7 +203,7 @@ double plQtAudioEventTimelineView::GetMarkerValue(const char* szProperty, DragHa
   return pProps != nullptr ? pProps->GetTypeAccessor().GetValue(szProperty).ConvertTo<double>() : 0.0;
 }
 
-double plQtAudioEventTimelineView::GetTimeExtent() const
+double plEditorUiAudioEventTimeline::GetTimeExtent() const
 {
   // the event's end: the latest point at which any instrument stops sounding; the stop fade anchors to it
   plHybridArray<const plDocumentObject*, 8> instruments;
@@ -227,27 +223,27 @@ double plQtAudioEventTimelineView::GetTimeExtent() const
 //////////////////////////////////////////////////////////////////////////
 // Geometry
 
-float plQtAudioEventTimelineView::GetCanvasTop() const
+float plEditorUiAudioEventTimeline::GetCanvasTop() const
 {
   return s_fTabRow;
 }
 
-float plQtAudioEventTimelineView::TimeToX(double fSeconds) const
+float plEditorUiAudioEventTimeline::TimeToX(double fSeconds) const
 {
   return s_fHead + s_fTimeInset + static_cast<float>(fSeconds * s_fPixelsPerSecond) - m_fScrollX;
 }
 
-double plQtAudioEventTimelineView::XToTime(float x) const
+double plEditorUiAudioEventTimeline::XToTime(float x) const
 {
   return plMath::Max(0.0, static_cast<double>(x + m_fScrollX - s_fHead - s_fTimeInset) / s_fPixelsPerSecond);
 }
 
-float plQtAudioEventTimelineView::GetRowTop(plUInt32 uiRow) const
+float plEditorUiAudioEventTimeline::GetRowTop(plUInt32 uiRow) const
 {
   return GetCanvasTop() + s_fRuler + uiRow * s_fRow - m_fScrollY;
 }
 
-plVec2 plQtAudioEventTimelineView::GetContentSize() const
+plVec2 plEditorUiAudioEventTimeline::GetContentSize() const
 {
   plHybridArray<const plDocumentObject*, 8> instruments;
   GatherInstruments(instruments);
@@ -258,7 +254,7 @@ plVec2 plQtAudioEventTimelineView::GetContentSize() const
   return plVec2(fWidth, fHeight);
 }
 
-void plQtAudioEventTimelineView::ClampScroll()
+void plEditorUiAudioEventTimeline::ClampScroll()
 {
   if (!IsReady())
     return;
@@ -273,7 +269,7 @@ void plQtAudioEventTimelineView::ClampScroll()
 //////////////////////////////////////////////////////////////////////////
 // Document and tabs
 
-void plQtAudioEventTimelineView::UpdateTabs()
+void plEditorUiAudioEventTimeline::UpdateTabs()
 {
   plHybridArray<const plDocumentObject*, 8> parameters;
   GatherChildrenOfProperty(GetPropertiesObject(), "Parameters", parameters);
@@ -320,7 +316,7 @@ void plQtAudioEventTimelineView::UpdateTabs()
   }
 }
 
-void plQtAudioEventTimelineView::OnUiUpdate()
+void plEditorUiAudioEventTimeline::OnUiUpdate()
 {
   if (!IsReady())
     return;
@@ -345,7 +341,7 @@ void plQtAudioEventTimelineView::OnUiUpdate()
     Draw();
 }
 
-void plQtAudioEventTimelineView::BuildDocument()
+void plEditorUiAudioEventTimeline::BuildDocument()
 {
   using namespace plEditorUi;
 
@@ -409,7 +405,7 @@ void plQtAudioEventTimelineView::BuildDocument()
     GetSurface()->GetCanvas().FocusElement(s_szRename, m_vBuiltSize);
 }
 
-void plQtAudioEventTimelineView::OnTabChanged(plUInt32 uiTab)
+void plEditorUiAudioEventTimeline::OnTabChanged(plUInt32 uiTab)
 {
   m_uiCurrentTab = uiTab;
 
@@ -421,7 +417,7 @@ void plQtAudioEventTimelineView::OnTabChanged(plUInt32 uiTab)
     m_pDocument->GetSelectionManager()->SetSelection(pObject);
 }
 
-void plQtAudioEventTimelineView::OnUiEvent(const plMsgUiEvent& event)
+void plEditorUiAudioEventTimeline::OnUiEvent(const plMsgUiEvent& event)
 {
   const plStringView sId = event.m_sIdentifier.GetView();
 
@@ -434,7 +430,7 @@ void plQtAudioEventTimelineView::OnUiEvent(const plMsgUiEvent& event)
 //////////////////////////////////////////////////////////////////////////
 // Drawing
 
-void plQtAudioEventTimelineView::Draw()
+void plEditorUiAudioEventTimeline::Draw()
 {
   using namespace plEditorUi;
 
@@ -520,7 +516,7 @@ void plQtAudioEventTimelineView::Draw()
   m_Writer.Publish(GetSurface()->GetBlackboard(), s_sCanvasEntry);
 }
 
-void plQtAudioEventTimelineView::DrawRuler(const plRectFloat& canvas, double fExtent, bool bLoopRegion)
+void plEditorUiAudioEventTimeline::DrawRuler(const plRectFloat& canvas, double fExtent, bool bLoopRegion)
 {
   using namespace plEditorUi;
 
@@ -570,7 +566,7 @@ void plQtAudioEventTimelineView::DrawRuler(const plRectFloat& canvas, double fEx
   m_Writer.PopClip();
 }
 
-void plQtAudioEventTimelineView::DrawTrack(const plDocumentObject* pInstrument, plUInt32 uiIndex, bool bAnySolo, const plString& sOutputBus, const plUuid& selected)
+void plEditorUiAudioEventTimeline::DrawTrack(const plDocumentObject* pInstrument, plUInt32 uiIndex, bool bAnySolo, const plString& sOutputBus, const plUuid& selected)
 {
   using namespace plEditorUi;
 
@@ -678,12 +674,12 @@ void plQtAudioEventTimelineView::DrawTrack(const plDocumentObject* pInstrument, 
 
     m_Writer.PushClip(clip);
     {
-      // a drawn waveform band, not decoded audio
+      // a drawn waveform band, not decoded audio, between the name row and the info row
       plDynamicArray<plVec2> bars;
       for (float x = 0.0f; x < clip.width - 4.0f; x += 3.0f)
       {
-        const float a = plMath::Abs(plMath::Sin(plAngle::MakeFromRadian(x * 0.21f + uiIndex)) * plMath::Sin(plAngle::MakeFromRadian(x * 0.05f))) * 12.0f * (1.0f - x / clip.width * 0.7f);
-        AddQuad(bars, clip.x + 2.0f + x, y + 38.0f - a, 2.0f, a * 2.0f + 1.0f);
+        const float a = plMath::Abs(plMath::Sin(plAngle::MakeFromRadian(x * 0.21f + uiIndex)) * plMath::Sin(plAngle::MakeFromRadian(x * 0.05f))) * 9.0f * (1.0f - x / clip.width * 0.7f);
+        AddQuad(bars, clip.x + 2.0f + x, y + 31.0f - a, 2.0f, a * 2.0f + 1.0f);
       }
       if (!bars.IsEmpty())
         m_Writer.Triangles(bars, plAudioEngineUi::Mix(background, trackColor, fStrength));
@@ -731,7 +727,7 @@ void plQtAudioEventTimelineView::DrawTrack(const plDocumentObject* pInstrument, 
   m_Writer.PopClip();
 }
 
-void plQtAudioEventTimelineView::DrawLanes(plUInt32 uiInstruments, const plUuid& selected)
+void plEditorUiAudioEventTimeline::DrawLanes(plUInt32 uiInstruments, const plUuid& selected)
 {
   using namespace plEditorUi;
 
@@ -795,12 +791,16 @@ void plQtAudioEventTimelineView::DrawLanes(plUInt32 uiInstruments, const plUuid&
     const float fInWidth = MeasureCodeText(sIn, MinFontSize) + 4.0f;
     const float fOutWidth = MeasureCodeText(sOut, MinFontSize) + 4.0f;
 
-    m_Writer.Text(plRectFloat(fInLeft, y, fInWidth, s_fLane), sIn, Muted(), MinFontSize, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
+    // each label is a chip tinted like its fade
+    auto chip = [&](float fLeft, float fWidth, plStringView sText, plColorGammaUB color)
+    {
+      const plRectFloat rect(fLeft - 4.0f, y + 6.0f, fWidth + 6.0f, s_fLane - 12.0f);
+      m_Writer.Rect(rect, plAudioEngineUi::Mix(background, color, 0.35f), 3.0f);
+      m_Writer.Text(plRectFloat(fLeft, y, fWidth, s_fLane), sText, Foreground(), MinFontSize, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
+    };
 
-    if (bOutAfterEnd)
-      m_Writer.Text(plRectFloat(fEndX + 6.0f, y, fOutWidth, s_fLane), sOut, Muted(), MinFontSize, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
-    else
-      m_Writer.Text(plRectFloat(fOutRight - fOutWidth, y, fOutWidth, s_fLane), sOut, Muted(), MinFontSize, plUiTextHAlign::Right, plUiTextVAlign::Center, true);
+    chip(fInLeft, fInWidth, sIn, fadeInColor);
+    chip(bOutAfterEnd ? fEndX + 6.0f : fOutRight - fOutWidth, fOutWidth, sOut, fadeOutColor);
   }
 
   // one chip per automation
@@ -849,7 +849,7 @@ void plQtAudioEventTimelineView::DrawLanes(plUInt32 uiInstruments, const plUuid&
 //////////////////////////////////////////////////////////////////////////
 // Input
 
-const plQtAudioEventTimelineView::Hit* plQtAudioEventTimelineView::FindHit(const plVec2& vPos) const
+const plEditorUiAudioEventTimeline::Hit* plEditorUiAudioEventTimeline::FindHit(const plVec2& vPos) const
 {
   // the ruler and the tab row cover the scrolled rows
   if (vPos.y < GetCanvasTop() + s_fRuler)
@@ -868,7 +868,7 @@ const plQtAudioEventTimelineView::Hit* plQtAudioEventTimelineView::FindHit(const
   return nullptr;
 }
 
-plQtAudioEventTimelineView::DragHandle plQtAudioEventTimelineView::PickHandle(const plVec2& vPos) const
+plEditorUiAudioEventTimeline::DragHandle plEditorUiAudioEventTimeline::PickHandle(const plVec2& vPos) const
 {
   const plDocumentObject* pProps = GetPropertiesObject();
   if (pProps == nullptr || vPos.x < s_fHead - 6.0f || vPos.y < GetCanvasTop())
@@ -905,7 +905,7 @@ plQtAudioEventTimelineView::DragHandle plQtAudioEventTimelineView::PickHandle(co
   return DragHandle::None;
 }
 
-void plQtAudioEventTimelineView::ApplyHandleDrag(DragHandle handle, float x, bool bFinal)
+void plEditorUiAudioEventTimeline::ApplyHandleDrag(DragHandle handle, float x, bool bFinal)
 {
   const plDocumentObject* pProps = GetPropertiesObject();
   if (pProps == nullptr || handle == DragHandle::None)
@@ -965,7 +965,7 @@ void plQtAudioEventTimelineView::ApplyHandleDrag(DragHandle handle, float x, boo
   commandAccessor.FinishTransaction();
 }
 
-void plQtAudioEventTimelineView::ToggleMute(const plUuid& instrumentGuid)
+void plEditorUiAudioEventTimeline::ToggleMute(const plUuid& instrumentGuid)
 {
   const plDocumentObject* pObject = m_pDocument->GetObjectManager()->GetObject(instrumentGuid);
   if (pObject == nullptr)
@@ -979,7 +979,7 @@ void plQtAudioEventTimelineView::ToggleMute(const plUuid& instrumentGuid)
   accessor.FinishTransaction();
 }
 
-void plQtAudioEventTimelineView::ToggleSolo(const plUuid& instrumentGuid)
+void plEditorUiAudioEventTimeline::ToggleSolo(const plUuid& instrumentGuid)
 {
   if (m_SoloTracks.Contains(instrumentGuid))
     m_SoloTracks.RemoveAndCopy(instrumentGuid);
@@ -989,7 +989,7 @@ void plQtAudioEventTimelineView::ToggleSolo(const plUuid& instrumentGuid)
   m_bDrawDirty = true;
 }
 
-void plQtAudioEventTimelineView::OnPointer(const plEditorUiPointerEvent& e)
+void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
 {
   using Type = plEditorUiPointerEvent::Type;
   using Button = plEditorUiPointerEvent::Button;
@@ -1024,21 +1024,21 @@ void plQtAudioEventTimelineView::OnPointer(const plEditorUiPointerEvent& e)
     {
       if (!bOnCanvas)
       {
-        unsetCursor();
+        SetCursor(plEditorPlatformCursor::Arrow);
         return;
       }
 
       if (PickHandle(e.m_vPosition) != DragHandle::None)
       {
-        setCursor(Qt::SizeHorCursor);
+        SetCursor(plEditorPlatformCursor::SizeWE);
         return;
       }
 
       const Hit* pHit = FindHit(e.m_vPosition);
       if (pHit != nullptr && pHit->m_Kind == HitKind::Clip)
-        setCursor(Qt::SizeAllCursor);
+        SetCursor(plEditorPlatformCursor::SizeAll);
       else
-        unsetCursor();
+        SetCursor(plEditorPlatformCursor::Arrow);
       return;
     }
 
@@ -1173,7 +1173,7 @@ void plQtAudioEventTimelineView::OnPointer(const plEditorUiPointerEvent& e)
   }
 }
 
-void plQtAudioEventTimelineView::OnKey(const plEditorUiKeyEvent& e)
+void plEditorUiAudioEventTimeline::OnKey(const plEditorUiKeyEvent& e)
 {
   if (e.m_bHandled || !m_RenameGuid.IsValid())
     return;
@@ -1185,7 +1185,7 @@ void plQtAudioEventTimelineView::OnKey(const plEditorUiKeyEvent& e)
   }
 }
 
-void plQtAudioEventTimelineView::BeginRename(const plUuid& instrumentGuid)
+void plEditorUiAudioEventTimeline::BeginRename(const plUuid& instrumentGuid)
 {
   const plDocumentObject* pInstrument = m_pDocument->GetObjectManager()->GetObject(instrumentGuid);
   if (pInstrument == nullptr)
@@ -1197,7 +1197,7 @@ void plQtAudioEventTimelineView::BeginRename(const plUuid& instrumentGuid)
   m_bRebuild = true;
 }
 
-void plQtAudioEventTimelineView::CommitRename()
+void plEditorUiAudioEventTimeline::CommitRename()
 {
   if (!m_RenameGuid.IsValid())
     return;
@@ -1222,7 +1222,7 @@ void plQtAudioEventTimelineView::CommitRename()
   accessor.FinishTransaction();
 }
 
-void plQtAudioEventTimelineView::CancelRename()
+void plEditorUiAudioEventTimeline::CancelRename()
 {
   m_RenameGuid = plUuid();
   m_bRebuild = true;

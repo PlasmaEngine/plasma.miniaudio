@@ -87,52 +87,50 @@ namespace
 } // namespace
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioMixerStripsView
+// plEditorUiAudioMixerStrips
 
-plQtAudioMixerStripsView::plQtAudioMixerStripsView(QWidget* pParent, plDocument* pDocument)
-  : plQtEngineUiWidget(pParent, "AudioMixerStrips")
+plEditorUiAudioMixerStrips::plEditorUiAudioMixerStrips(plDocument* pDocument)
+  : plEditorUiContent("AudioMixerStrips")
   , m_pDocument(pDocument)
 {
-  setMinimumSize(0, 0);
-
   if (IsReady())
-    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plQtAudioMixerStripsView::OnPointer, this));
+    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plEditorUiAudioMixerStrips::OnPointer, this));
 }
 
-plQtAudioMixerStripsView::~plQtAudioMixerStripsView()
+plEditorUiAudioMixerStrips::~plEditorUiAudioMixerStrips()
 {
   if (IsReady())
     GetSurface()->m_PointerEvents.RemoveEventHandler(m_PointerSubscription);
 }
 
-void plQtAudioMixerStripsView::Refresh()
+void plEditorUiAudioMixerStrips::Refresh()
 {
   m_bDrawDirty = true;
 }
 
-void plQtAudioMixerStripsView::SetLiveMeters(bool bLive)
+void plEditorUiAudioMixerStrips::SetLiveMeters(bool bLive)
 {
   m_bLiveMeters = bLive;
   m_bDrawDirty = true;
 }
 
-void plQtAudioMixerStripsView::UpdateMeters()
+void plEditorUiAudioMixerStrips::UpdateMeters()
 {
   m_bDrawDirty = true;
 }
 
-const plDocumentObject* plQtAudioMixerStripsView::GetPropertiesObject() const
+const plDocumentObject* plEditorUiAudioMixerStrips::GetPropertiesObject() const
 {
   return GetMixerProperties(m_pDocument);
 }
 
-void plQtAudioMixerStripsView::GatherStrips(plHybridArray<const plDocumentObject*, 12>& out_buses, plHybridArray<const plDocumentObject*, 4>& out_vcas) const
+void plEditorUiAudioMixerStrips::GatherStrips(plHybridArray<const plDocumentObject*, 12>& out_buses, plHybridArray<const plDocumentObject*, 4>& out_vcas) const
 {
   GatherChildrenOfProperty(GetPropertiesObject(), "Buses", out_buses);
   GatherChildrenOfProperty(GetPropertiesObject(), "VCAs", out_vcas);
 }
 
-float plQtAudioMixerStripsView::GetContentWidth() const
+float plEditorUiAudioMixerStrips::GetContentWidth() const
 {
   plHybridArray<const plDocumentObject*, 12> buses;
   plHybridArray<const plDocumentObject*, 4> vcas;
@@ -141,7 +139,7 @@ float plQtAudioMixerStripsView::GetContentWidth() const
   return 2.0f * s_fMargin + (buses.GetCount() + vcas.GetCount()) * (s_fStripWidth + s_fStripGap) + (vcas.IsEmpty() ? 0.0f : 9.0f);
 }
 
-void plQtAudioMixerStripsView::OnUiUpdate()
+void plEditorUiAudioMixerStrips::OnUiUpdate()
 {
   if (!IsReady())
     return;
@@ -156,7 +154,7 @@ void plQtAudioMixerStripsView::OnUiUpdate()
     Draw();
 }
 
-void plQtAudioMixerStripsView::BuildDocument()
+void plEditorUiAudioMixerStrips::BuildDocument()
 {
   m_bRebuild = false;
   m_vBuiltSize = GetSurface()->GetLogicalSize();
@@ -169,7 +167,7 @@ void plQtAudioMixerStripsView::BuildDocument()
   m_bDrawDirty = true;
 }
 
-void plQtAudioMixerStripsView::Draw()
+void plEditorUiAudioMixerStrips::Draw()
 {
   using namespace plEditorUi;
 
@@ -220,7 +218,7 @@ void plQtAudioMixerStripsView::Draw()
   m_Writer.Publish(GetSurface()->GetBlackboard(), s_sStripsEntry);
 }
 
-void plQtAudioMixerStripsView::DrawStrip(const plRectFloat& rect, const plDocumentObject* pObject, plUInt32 uiBusIndex, bool bVca, bool bMaster, bool bSelected)
+void plEditorUiAudioMixerStrips::DrawStrip(const plRectFloat& rect, const plDocumentObject* pObject, plUInt32 uiBusIndex, bool bVca, bool bMaster, bool bSelected)
 {
   using namespace plEditorUi;
 
@@ -409,7 +407,7 @@ void plQtAudioMixerStripsView::DrawStrip(const plRectFloat& rect, const plDocume
   strip.m_bVca = bVca;
 }
 
-void plQtAudioMixerStripsView::OnPointer(const plEditorUiPointerEvent& e)
+void plEditorUiAudioMixerStrips::OnPointer(const plEditorUiPointerEvent& e)
 {
   using Type = plEditorUiPointerEvent::Type;
 
@@ -495,7 +493,7 @@ void plQtAudioMixerStripsView::OnPointer(const plEditorUiPointerEvent& e)
 }
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioMixerRoutingView
+// plEditorUiAudioMixerRouting
 
 namespace
 {
@@ -511,7 +509,7 @@ namespace
 } // namespace
 
 /// Groups, then the buses under their parents, the VCAs and the snapshots. Item ids follow the document order.
-class plQtAudioMixerRoutingView::Adapter : public plEditorUiTreeAdapter
+class plEditorUiAudioMixerRouting::Adapter : public plEditorUiTreeAdapter
 {
 public:
   explicit Adapter(plDocument* pDocument)
@@ -625,15 +623,15 @@ public:
     {
       case GroupBuses:
         out_row.m_sText = "BUSES";
-        out_row.m_TextStyle = plEditorUiTreeTextStyle::Muted;
+        out_row.m_TextStyle = plEditorUiTreeTextStyle::Section;
         return;
       case GroupVcas:
         out_row.m_sText = "VCAS";
-        out_row.m_TextStyle = plEditorUiTreeTextStyle::Muted;
+        out_row.m_TextStyle = plEditorUiTreeTextStyle::Section;
         return;
       case GroupSnapshots:
         out_row.m_sText = "SNAPSHOTS";
-        out_row.m_TextStyle = plEditorUiTreeTextStyle::Muted;
+        out_row.m_TextStyle = plEditorUiTreeTextStyle::Section;
         return;
       default:
         break;
@@ -679,23 +677,21 @@ private:
   plHybridArray<plUInt64, 12> m_BusParents;
 };
 
-plQtAudioMixerRoutingView::plQtAudioMixerRoutingView(QWidget* pParent, plDocument* pDocument)
-  : plQtEngineUiWidget(pParent, "AudioMixerRouting")
+plEditorUiAudioMixerRouting::plEditorUiAudioMixerRouting(plDocument* pDocument)
+  : plEditorUiContent("AudioMixerRouting")
   , m_pDocument(pDocument)
 {
-  setMinimumSize(0, 0);
-
   m_pAdapter = PL_DEFAULT_NEW(Adapter, pDocument);
   m_pAdapter->Update();
 
   if (IsReady())
   {
     m_pTree = PL_DEFAULT_NEW(plEditorUiTree, *GetSurface(), "Mixer.Routing", *m_pAdapter);
-    m_TreeSubscription = m_pTree->m_Events.AddEventHandler(plMakeDelegate(&plQtAudioMixerRoutingView::OnTreeEvent, this));
+    m_TreeSubscription = m_pTree->m_Events.AddEventHandler(plMakeDelegate(&plEditorUiAudioMixerRouting::OnTreeEvent, this));
   }
 }
 
-plQtAudioMixerRoutingView::~plQtAudioMixerRoutingView()
+plEditorUiAudioMixerRouting::~plEditorUiAudioMixerRouting()
 {
   if (m_pTree != nullptr)
     m_pTree->m_Events.RemoveEventHandler(m_TreeSubscription);
@@ -703,7 +699,7 @@ plQtAudioMixerRoutingView::~plQtAudioMixerRoutingView()
   m_pTree.Clear();
 }
 
-void plQtAudioMixerRoutingView::Refresh()
+void plEditorUiAudioMixerRouting::Refresh()
 {
   m_pAdapter->Update();
 
@@ -723,13 +719,13 @@ void plQtAudioMixerRoutingView::Refresh()
   m_bSyncingSelection = false;
 }
 
-void plQtAudioMixerRoutingView::OnUiUpdate()
+void plEditorUiAudioMixerRouting::OnUiUpdate()
 {
   if (IsReady() && m_bRebuild)
     BuildDocument();
 }
 
-void plQtAudioMixerRoutingView::BuildDocument()
+void plEditorUiAudioMixerRouting::BuildDocument()
 {
   m_bRebuild = false;
 
@@ -745,7 +741,7 @@ void plQtAudioMixerRoutingView::BuildDocument()
   Refresh();
 }
 
-void plQtAudioMixerRoutingView::OnTreeEvent(const plEditorUiTreeEvent& e)
+void plEditorUiAudioMixerRouting::OnTreeEvent(const plEditorUiTreeEvent& e)
 {
   if (e.m_Type != plEditorUiTreeEvent::Type::SelectionChanged || m_bSyncingSelection)
     return;
@@ -760,30 +756,28 @@ void plQtAudioMixerRoutingView::OnTreeEvent(const plEditorUiTreeEvent& e)
 }
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioMixerSnapshotsView
+// plEditorUiAudioMixerSnapshots
 
-plQtAudioMixerSnapshotsView::plQtAudioMixerSnapshotsView(QWidget* pParent, plDocument* pDocument)
-  : plQtEngineUiWidget(pParent, "AudioMixerSnapshots")
+plEditorUiAudioMixerSnapshots::plEditorUiAudioMixerSnapshots(plDocument* pDocument)
+  : plEditorUiContent("AudioMixerSnapshots")
   , m_pDocument(pDocument)
 {
-  setMinimumSize(0, 0);
-
   if (IsReady())
-    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plQtAudioMixerSnapshotsView::OnPointer, this));
+    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plEditorUiAudioMixerSnapshots::OnPointer, this));
 }
 
-plQtAudioMixerSnapshotsView::~plQtAudioMixerSnapshotsView()
+plEditorUiAudioMixerSnapshots::~plEditorUiAudioMixerSnapshots()
 {
   if (IsReady())
     GetSurface()->m_PointerEvents.RemoveEventHandler(m_PointerSubscription);
 }
 
-void plQtAudioMixerSnapshotsView::Refresh()
+void plEditorUiAudioMixerSnapshots::Refresh()
 {
   m_bDrawDirty = true;
 }
 
-void plQtAudioMixerSnapshotsView::OnUiUpdate()
+void plEditorUiAudioMixerSnapshots::OnUiUpdate()
 {
   if (!IsReady())
     return;
@@ -798,7 +792,7 @@ void plQtAudioMixerSnapshotsView::OnUiUpdate()
     Draw();
 }
 
-void plQtAudioMixerSnapshotsView::BuildDocument()
+void plEditorUiAudioMixerSnapshots::BuildDocument()
 {
   m_bRebuild = false;
   m_vBuiltSize = GetSurface()->GetLogicalSize();
@@ -811,7 +805,7 @@ void plQtAudioMixerSnapshotsView::BuildDocument()
   m_bDrawDirty = true;
 }
 
-void plQtAudioMixerSnapshotsView::Draw()
+void plEditorUiAudioMixerSnapshots::Draw()
 {
   using namespace plEditorUi;
 
@@ -857,7 +851,7 @@ void plQtAudioMixerSnapshotsView::Draw()
   m_Writer.Publish(GetSurface()->GetBlackboard(), s_sSnapshotsEntry);
 }
 
-void plQtAudioMixerSnapshotsView::OnPointer(const plEditorUiPointerEvent& e)
+void plEditorUiAudioMixerSnapshots::OnPointer(const plEditorUiPointerEvent& e)
 {
   if (e.m_Type != plEditorUiPointerEvent::Type::Press || e.m_Button != plEditorUiPointerEvent::Button::Left)
     return;

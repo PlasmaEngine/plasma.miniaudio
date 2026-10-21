@@ -21,5 +21,6 @@ PlasmaAudio.ExtractClips;Extract Clips
 PlasmaAudio.ExtractClips.Tooltip;Turns playlist entries that embed a sound file into Audio Clip references and saves the event
 PlasmaAudio.MigrateAllEvents;Migrate All Audio Events
 PlasmaAudio.MigrateAllEvents.Tooltip;Runs Extract Clips on every Audio Event of the project that embeds sound files
+Panel.AudioProfiler;Audio Profiler
 
 # Properties

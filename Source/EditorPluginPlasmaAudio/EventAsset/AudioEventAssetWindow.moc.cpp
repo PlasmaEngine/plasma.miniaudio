@@ -35,6 +35,7 @@
 #include <QSplitter>
 #include <QTimer>
 #include <QToolButton>
+#include <QtMath>
 
 namespace
 {
@@ -1584,7 +1585,18 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
     m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
   }
 
-  pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
+  // the first instrument, so Details shows what the deck edits (Event Macros shows the event); an empty event selects
+  // its properties
+  const plDocumentObject* pInitial = GetPropertiesObject();
+  for (const plDocumentObject* pChild : pInitial->GetChildren())
+  {
+    if (pChild->GetParentProperty().IsEqual("Instruments"))
+    {
+      pInitial = pChild;
+      break;
+    }
+  }
+  pDocument->GetSelectionManager()->SetSelection(pInitial);
 
   GetDocument()->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::PropertyEventHandler, this));
   GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::StructureEventHandler, this));
@@ -1651,8 +1663,12 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
 
     pRowLayout->addWidget(m_pToolStrip, 1);
 
-    m_pMeterView = new plQtAudioMeterView(pRow);
-    pRowLayout->addWidget(m_pMeterView);
+    plQtEngineUiContentWidget* pMeterWidget = nullptr;
+    m_pMeterView = plQtEngineUiContentWidget::Create<plEditorUiAudioMeter>(pRow, "AudioEventMeter", &pMeterWidget);
+    const plVec2 vMeter = plEditorUiAudioMeter::GetSize();
+    pMeterWidget->setFixedWidth(qCeil(vMeter.x * pMeterWidget->GetUiScale()));
+    pMeterWidget->SetFixedLogicalHeight(vMeter.y);
+    pRowLayout->addWidget(pMeterWidget);
 
     pCentralLayout->addWidget(pRow);
   }
@@ -1663,10 +1679,11 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
 
   // parameter tabs and the timeline
   {
-    m_pTimelineView = new plQtAudioEventTimelineView(pSplitter, GetDocument());
+    plQtEngineUiContentWidget* pTimelineWidget = nullptr;
+    m_pTimelineView = plQtEngineUiContentWidget::Create<plEditorUiAudioEventTimeline>(pSplitter, "AudioEventTimeline", &pTimelineWidget, GetDocument());
     m_pTimelineView->m_OnAddParameter = [this]()
     { OnAddParameter(); };
-    pSplitter->addWidget(m_pTimelineView);
+    pSplitter->addWidget(pTimelineWidget);
   }
 
   // deck: INSTRUMENT and PLAYBACK above, AUTOMATION and DETAILS below
@@ -1678,7 +1695,8 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
     pDeckLayout->setColumnStretch(0, 1);
     pDeckLayout->setColumnStretch(1, 1);
 
-    m_pDeckView = new plQtAudioEventDeckView(pDeck, GetDocument());
+    m_pDeckView = plQtEngineUiContentWidget::Create<plEditorUiAudioEventDeck>(pDeck, "AudioEventDeck", &m_pDeckWidget, GetDocument());
+    m_pDeckWidget->SetFixedLogicalHeight(m_pDeckView->GetContentHeight());
     m_pDeckView->m_OnInstrumentPicked = [this](const plUuid& instrumentGuid)
     {
       m_ActiveInstrumentGuid = instrumentGuid;
@@ -1693,19 +1711,24 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
     { OnAddPlaylistEntry(); };
     m_pDeckView->m_OnPickEntryClip = [this](const plUuid& entryGuid)
     { PickEntryClip(entryGuid); };
-    pDeckLayout->addWidget(m_pDeckView, 0, 0, 1, 2);
+    pDeckLayout->addWidget(m_pDeckWidget, 0, 0, 1, 2);
 
-    m_pAutomationView = new plQtAudioEventAutomationView(pDeck, GetDocument());
+    plQtEngineUiContentWidget* pAutomationWidget = nullptr;
+    m_pAutomationView = plQtEngineUiContentWidget::Create<plEditorUiAudioEventAutomation>(pDeck, "AudioEventAutomation", &pAutomationWidget, GetDocument());
     m_pAutomationView->m_OnAddAutomation = [this](plUInt8 uiTarget, const plString& sParameter)
     { OnAddAutomationFor(uiTarget, sParameter); };
-    pDeckLayout->addWidget(m_pAutomationView, 1, 0);
+    pAutomationWidget->setMinimumHeight(qCeil(plEditorUiAudioEventAutomation::GetMinimumHeight() * pAutomationWidget->GetUiScale()));
+    pDeckLayout->addWidget(pAutomationWidget, 1, 0);
 
     // DETAILS · selection: the property grid of the selected object
     QWidget* pDetails = new QWidget(pDeck);
     QVBoxLayout* pDetailsLayout = new QVBoxLayout(pDetails);
     pDetailsLayout->setContentsMargins(0, 0, 0, 0);
     pDetailsLayout->setSpacing(0);
-    pDetailsLayout->addWidget(new plQtAudioSectionHeaderView(pDetails, "Details \xC2\xB7 selection", plAudioEngineUi::AudioColor()));
+    plQtEngineUiContentWidget* pDetailsHeader = nullptr;
+    plQtEngineUiContentWidget::Create<plEditorUiAudioSectionHeader>(pDetails, "AudioEventDetailsHeader", &pDetailsHeader, "Details \xC2\xB7 selection", plAudioEngineUi::AudioColor());
+    pDetailsHeader->SetFixedLogicalHeight(plEditorUiAudioSectionHeader::GetHeight());
+    pDetailsLayout->addWidget(pDetailsHeader);
     pDetailsLayout->addWidget(new plQtPropertyGridWidget(pDetails, GetDocument()), 1);
     pDeckLayout->addWidget(pDetails, 1, 1);
     pDeckLayout->setRowStretch(1, 1);
@@ -1717,9 +1740,11 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
   pSplitter->setStretchFactor(1, 2);
   pCentralLayout->addWidget(pSplitter, 1);
 
-  m_pStatusView = new plQtAudioStatusRowView(pCentralWidget);
+  plQtEngineUiContentWidget* pStatusWidget = nullptr;
+  m_pStatusView = plQtEngineUiContentWidget::Create<plEditorUiAudioStatusRow>(pCentralWidget, "AudioEventStatus", &pStatusWidget);
   m_pStatusView->SetRight("backend: MiniAudio");
-  pCentralLayout->addWidget(m_pStatusView);
+  pStatusWidget->SetFixedLogicalHeight(plEditorUiAudioStatusRow::GetHeight());
+  pCentralLayout->addWidget(pStatusWidget);
 }
 
 void plAudioEventAssetDocumentWindow::CreateQtCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout)
@@ -2287,6 +2312,7 @@ void plAudioEventAssetDocumentWindow::QueueRefresh()
 
         m_pTimelineView->Refresh();
         m_pDeckView->SetInstrument(pInstrument != nullptr ? pInstrument->GetGuid() : plUuid());
+        m_pDeckWidget->SetFixedLogicalHeight(m_pDeckView->GetContentHeight());
         m_pAutomationView->SetAutomation(pAutomation != nullptr ? pAutomation->GetGuid() : plUuid());
       }
       else
@@ -2319,7 +2345,7 @@ void plAudioEventAssetDocumentWindow::QueueRefresh()
         sParameters.SetFormat("{}", parameters.GetCount());
         sAutomations.SetFormat("{}", automations.GetCount());
 
-        const plQtAudioStatusRowView::Part parts[] = {{sInstruments, "instruments"}, {sEntries, "playlist entries"}, {sParameters, "parameters"}, {sAutomations, "automations"}};
+        const plEditorUiAudioStatusRow::Part parts[] = {{sInstruments, "instruments"}, {sEntries, "playlist entries"}, {sParameters, "parameters"}, {sAutomations, "automations"}};
         m_pStatusView->SetParts(parts);
       }
 

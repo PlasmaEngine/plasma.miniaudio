@@ -4,8 +4,8 @@
 #include <EditorUi/Tree.h>
 #include <Foundation/Types/SharedPtr.h>
 #include <Foundation/Types/UniquePtr.h>
+#include <EditorUi/Content.h>
 #include <GameUiPlugin/Elements/UiDrawList.h>
-#include <GuiFoundation/EngineUi/EngineUiWidget.h>
 
 struct plAudioClipPreview;
 struct plEditorUiPointerEvent;
@@ -16,11 +16,11 @@ class plDocument;
 ///
 /// Dragging across the waveform creates a loop, dragging a marker moves it. On release the window's
 /// m_OnLoopChanged writes LoopStart, LoopEnd and OverrideLoop as one transaction.
-class plQtAudioClipWaveformView : public plQtEngineUiWidget
+class plEditorUiAudioClipWaveform : public plEditorUiContent
 {
 public:
-  plQtAudioClipWaveformView(QWidget* pParent);
-  ~plQtAudioClipWaveformView() override;
+  plEditorUiAudioClipWaveform();
+  ~plEditorUiAudioClipWaveform() override;
 
   /// One stat of the row under the waveform: "Resident 64 KB per voice".
   struct Stat
@@ -48,13 +48,11 @@ public:
   /// A loop drag ended: start and end frame of the built clip.
   plDelegate<void(plUInt64, plUInt64)> m_OnLoopChanged;
 
-  QSize sizeHint() const override { return QSize(600, 260); }
-  QSize minimumSizeHint() const override { return QSize(200, 160); }
+  plString GetToolTipAt(const plVec2& vLogical) const override;
 
 protected:
   void OnUiUpdate() override;
   void OnUiEvent(const plMsgUiEvent& event) override;
-  plString GetToolTipAt(const plVec2& vLogical) const override;
 
 private:
   enum class Drag
@@ -109,11 +107,11 @@ private:
 
 /// \brief Engine-drawn "Used by" list of the Clip Properties dock: a section header with the count and one row per
 /// asset that references the clip. Double-click (or Enter) opens the asset.
-class plQtAudioClipUsedByView : public plQtEngineUiWidget
+class plEditorUiAudioClipUsedBy : public plEditorUiContent
 {
 public:
-  plQtAudioClipUsedByView(QWidget* pParent);
-  ~plQtAudioClipUsedByView() override;
+  plEditorUiAudioClipUsedBy();
+  ~plEditorUiAudioClipUsedBy() override;
 
   /// One referencing asset: its data-directory relative path and absolute path.
   struct Entry
@@ -124,8 +122,7 @@ public:
 
   void SetEntries(plArrayPtr<const Entry> entries);
 
-  QSize sizeHint() const override { return QSize(200, 140); }
-  QSize minimumSizeHint() const override { return QSize(100, 80); }
+  static constexpr float Height = 170.0f;
 
 protected:
   void OnUiUpdate() override;

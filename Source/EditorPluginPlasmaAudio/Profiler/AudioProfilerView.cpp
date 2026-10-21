@@ -167,25 +167,26 @@ namespace
   }
 } // namespace
 
-plQtAudioProfilerView::plQtAudioProfilerView(QWidget* pParent)
-  : plQtEngineUiWidget(pParent, "AudioProfiler")
+plEditorUiAudioProfilerView::plEditorUiAudioProfilerView()
+  : plEditorUiContent("AudioProfiler")
 {
-  setMinimumSize(0, 0);
-
   if (IsReady())
   {
-    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plQtAudioProfilerView::OnPointer, this));
+    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plEditorUiAudioProfilerView::OnPointer, this));
 
     m_pVoiceSearch = PL_DEFAULT_NEW(plEditorUiSearchField, *GetSurface(), "Ap.VoiceSearch");
-    m_VoiceSearchSubscription = m_pVoiceSearch->m_Events.AddEventHandler(plMakeDelegate(&plQtAudioProfilerView::OnSearch, this));
+    m_VoiceSearchSubscription = m_pVoiceSearch->m_Events.AddEventHandler(plMakeDelegate(&plEditorUiAudioProfilerView::OnSearch, this));
 
     m_pLogSearch = PL_DEFAULT_NEW(plEditorUiSearchField, *GetSurface(), "Ap.LogSearch");
-    m_LogSearchSubscription = m_pLogSearch->m_Events.AddEventHandler(plMakeDelegate(&plQtAudioProfilerView::OnSearch, this));
+    m_LogSearchSubscription = m_pLogSearch->m_Events.AddEventHandler(plMakeDelegate(&plEditorUiAudioProfilerView::OnSearch, this));
   }
 }
 
-plQtAudioProfilerView::~plQtAudioProfilerView()
+plEditorUiAudioProfilerView::~plEditorUiAudioProfilerView()
 {
+  if (m_OnDestroyed.IsValid())
+    m_OnDestroyed(this);
+
   if (IsReady())
   {
     m_pLogSearch->m_Events.RemoveEventHandler(m_LogSearchSubscription);
@@ -194,7 +195,7 @@ plQtAudioProfilerView::~plQtAudioProfilerView()
   }
 }
 
-void plQtAudioProfilerView::SetLinkState(LinkState state)
+void plEditorUiAudioProfilerView::SetLinkState(LinkState state)
 {
   if (m_LinkState == state)
     return;
@@ -203,7 +204,7 @@ void plQtAudioProfilerView::SetLinkState(LinkState state)
   m_bDrawDirty = true;
 }
 
-void plQtAudioProfilerView::SetSnapshot(const plAudioProfilingSnapshot& snapshot, plArrayPtr<const plAudioProfilerLogLine> newLines)
+void plEditorUiAudioProfilerView::SetSnapshot(const plAudioProfilingSnapshot& snapshot, plArrayPtr<const plAudioProfilerLogLine> newLines)
 {
   m_Snapshot = snapshot;
   m_bHasSnapshot = true;
@@ -228,7 +229,7 @@ void plQtAudioProfilerView::SetSnapshot(const plAudioProfilingSnapshot& snapshot
 //////////////////////////////////////////////////////////////////////////
 // Data
 
-void plQtAudioProfilerView::RebuildVoiceRows()
+void plEditorUiAudioProfilerView::RebuildVoiceRows()
 {
   m_VoiceRows.Clear();
 
@@ -273,7 +274,7 @@ void plQtAudioProfilerView::RebuildVoiceRows()
   }
 }
 
-void plQtAudioProfilerView::RebuildMemoryRows()
+void plEditorUiAudioProfilerView::RebuildMemoryRows()
 {
   const plAudioProfilingSnapshot& s = m_Snapshot;
   m_MemoryRows.Clear();
@@ -361,7 +362,7 @@ void plQtAudioProfilerView::RebuildMemoryRows()
       return a.m_sName < b.m_sName; });
 }
 
-bool plQtAudioProfilerView::IsLogLineVisible(const plAudioProfilerLogLine& line) const
+bool plEditorUiAudioProfilerView::IsLogLineVisible(const plAudioProfilerLogLine& line) const
 {
   if (line.m_uiType == plAudioProfilerLogLine::GapType)
     return true;
@@ -376,7 +377,7 @@ bool plQtAudioProfilerView::IsLogLineVisible(const plAudioProfilerLogLine& line)
          plStringView(plAudioLogEventType::GetName(static_cast<plAudioLogEventType::Enum>(line.m_uiType))).FindSubString_NoCase(m_sLogFilter) != nullptr;
 }
 
-void plQtAudioProfilerView::RebuildVisibleLog()
+void plEditorUiAudioProfilerView::RebuildVisibleLog()
 {
   m_VisibleLog.Clear();
   for (plUInt32 i = 0; i < m_LogLines.GetCount(); ++i)
@@ -389,20 +390,20 @@ void plQtAudioProfilerView::RebuildVisibleLog()
 //////////////////////////////////////////////////////////////////////////
 // Layout
 
-plRectFloat plQtAudioProfilerView::GetBodyRect() const
+plRectFloat plEditorUiAudioProfilerView::GetBodyRect() const
 {
   const plVec2 size = IsReady() ? GetSurface()->GetLogicalSize() : plVec2(800.0f, 400.0f);
   const float y = s_fHeaderRow + s_fTabRow;
   return plRectFloat(0.0f, y, size.x, plMath::Max(size.y - y - s_fStatus, 1.0f));
 }
 
-plRectFloat plQtAudioProfilerView::GetToolRowRect() const
+plRectFloat plEditorUiAudioProfilerView::GetToolRowRect() const
 {
   const plRectFloat body = GetBodyRect();
   return plRectFloat(body.x, body.y, body.width, s_fToolRow);
 }
 
-plRectFloat plQtAudioProfilerView::GetTableRect() const
+plRectFloat plEditorUiAudioProfilerView::GetTableRect() const
 {
   const plRectFloat body = GetBodyRect();
 
@@ -419,14 +420,14 @@ plRectFloat plQtAudioProfilerView::GetTableRect() const
   }
 }
 
-plRectFloat plQtAudioProfilerView::GetDetailsRect() const
+plRectFloat plEditorUiAudioProfilerView::GetDetailsRect() const
 {
   const plRectFloat table = GetTableRect();
   const plRectFloat body = GetBodyRect();
   return plRectFloat(table.x + table.width, table.y, body.width - table.width, table.height);
 }
 
-plString plQtAudioProfilerView::GetTabLabel(Tab tab) const
+plString plEditorUiAudioProfilerView::GetTabLabel(Tab tab) const
 {
   switch (tab)
   {
@@ -441,7 +442,7 @@ plString plQtAudioProfilerView::GetTabLabel(Tab tab) const
   }
 }
 
-plString plQtAudioProfilerView::GetTabCount(Tab tab) const
+plString plEditorUiAudioProfilerView::GetTabCount(Tab tab) const
 {
   plStringBuilder s;
 
@@ -476,7 +477,7 @@ plString plQtAudioProfilerView::GetTabCount(Tab tab) const
   return s;
 }
 
-float plQtAudioProfilerView::GetTabWidth(Tab tab) const
+float plEditorUiAudioProfilerView::GetTabWidth(Tab tab) const
 {
   plStringBuilder sLabel = GetTabLabel(tab);
   sLabel.ToUpper();
@@ -493,7 +494,7 @@ float plQtAudioProfilerView::GetTabWidth(Tab tab) const
 //////////////////////////////////////////////////////////////////////////
 // Document
 
-void plQtAudioProfilerView::OnUiUpdate()
+void plEditorUiAudioProfilerView::OnUiUpdate()
 {
   if (!IsReady())
     return;
@@ -519,7 +520,7 @@ void plQtAudioProfilerView::OnUiUpdate()
     Draw();
 }
 
-void plQtAudioProfilerView::BuildDocument()
+void plEditorUiAudioProfilerView::BuildDocument()
 {
   using namespace plEditorUi;
 
@@ -591,7 +592,7 @@ void plQtAudioProfilerView::BuildDocument()
   m_bDrawDirty = true;
 }
 
-void plQtAudioProfilerView::OnUiEvent(const plMsgUiEvent& event)
+void plEditorUiAudioProfilerView::OnUiEvent(const plMsgUiEvent& event)
 {
   const plStringView sId = event.m_sIdentifier.GetView();
 
@@ -653,7 +654,7 @@ void plQtAudioProfilerView::OnUiEvent(const plMsgUiEvent& event)
   }
 }
 
-void plQtAudioProfilerView::OnSearch(const plEditorUiSearchFieldEvent& e)
+void plEditorUiAudioProfilerView::OnSearch(const plEditorUiSearchFieldEvent& e)
 {
   if (e.m_Type != plEditorUiSearchFieldEvent::Type::TextChanged)
     return;
@@ -679,7 +680,7 @@ void plQtAudioProfilerView::OnSearch(const plEditorUiSearchFieldEvent& e)
 //////////////////////////////////////////////////////////////////////////
 // Drawing
 
-void plQtAudioProfilerView::Draw()
+void plEditorUiAudioProfilerView::Draw()
 {
   m_bDrawDirty = false;
   m_Writer.Clear();
@@ -707,7 +708,7 @@ void plQtAudioProfilerView::Draw()
   m_Writer.Publish(GetSurface()->GetBlackboard(), s_sDrawing);
 }
 
-void plQtAudioProfilerView::DrawHeader()
+void plEditorUiAudioProfilerView::DrawHeader()
 {
   using namespace plEditorUi;
 
@@ -776,7 +777,7 @@ void plQtAudioProfilerView::DrawHeader()
   m_Writer.Rect(plRectFloat(0.0f, s_fHeaderRow + s_fTabRow - 1.0f, size.x, 1.0f), Line());
 }
 
-void plQtAudioProfilerView::DrawTableHeader(const plRectFloat& rect, plArrayPtr<const char* const> titles, plArrayPtr<const float> widths, plArrayPtr<const bool> rightAligned)
+void plEditorUiAudioProfilerView::DrawTableHeader(const plRectFloat& rect, plArrayPtr<const char* const> titles, plArrayPtr<const float> widths, plArrayPtr<const bool> rightAligned)
 {
   using namespace plEditorUi;
 
@@ -794,7 +795,7 @@ void plQtAudioProfilerView::DrawTableHeader(const plRectFloat& rect, plArrayPtr<
   }
 }
 
-void plQtAudioProfilerView::DrawVoices()
+void plEditorUiAudioProfilerView::DrawVoices()
 {
   using namespace plEditorUi;
 
@@ -908,7 +909,7 @@ void plQtAudioProfilerView::DrawVoices()
   }
 }
 
-void plQtAudioProfilerView::DrawBuses()
+void plEditorUiAudioProfilerView::DrawBuses()
 {
   using namespace plEditorUi;
 
@@ -1020,7 +1021,7 @@ void plQtAudioProfilerView::DrawBuses()
   m_Writer.PopClip();
 }
 
-void plQtAudioProfilerView::DrawMemory()
+void plEditorUiAudioProfilerView::DrawMemory()
 {
   using namespace plEditorUi;
 
@@ -1093,7 +1094,7 @@ void plQtAudioProfilerView::DrawMemory()
   m_Writer.Text(plRectFloat(totals.x + 8.0f, totals.y, totals.width - 16.0f, totals.height), sLine, Dim(), FontSize - 2, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
 }
 
-void plQtAudioProfilerView::DrawLog()
+void plEditorUiAudioProfilerView::DrawLog()
 {
   using namespace plEditorUi;
 
@@ -1168,7 +1169,7 @@ void plQtAudioProfilerView::DrawLog()
     m_Writer.Text(plRectFloat(rows.x, rows.y + 8.0f, rows.width, 20.0f), m_LogLines.IsEmpty() ? "No log entries" : "No entries match the filter", Dim(), FontSize - 1, plUiTextHAlign::Center);
 }
 
-void plQtAudioProfilerView::DrawStatus()
+void plEditorUiAudioProfilerView::DrawStatus()
 {
   using namespace plEditorUi;
 
@@ -1216,7 +1217,7 @@ void plQtAudioProfilerView::DrawStatus()
 //////////////////////////////////////////////////////////////////////////
 // Input
 
-void plQtAudioProfilerView::ClampScroll()
+void plEditorUiAudioProfilerView::ClampScroll()
 {
   const plRectFloat table = GetTableRect();
   const float fVisible = plMath::Max(table.height - s_fTableHeader, 1.0f);
@@ -1250,7 +1251,7 @@ void plQtAudioProfilerView::ClampScroll()
   m_fScroll = plMath::Clamp(m_fScroll, 0.0f, fMax);
 }
 
-void plQtAudioProfilerView::OnPointer(const plEditorUiPointerEvent& e)
+void plEditorUiAudioProfilerView::OnPointer(const plEditorUiPointerEvent& e)
 {
   using Type = plEditorUiPointerEvent::Type;
 
@@ -1292,9 +1293,9 @@ void plQtAudioProfilerView::OnPointer(const plEditorUiPointerEvent& e)
   m_bDrawDirty = true;
 }
 
-plString plQtAudioProfilerView::GetToolTipAt(const plVec2& vLogical) const
+plString plEditorUiAudioProfilerView::GetToolTipAt(const plVec2& vLogical) const
 {
-  const plString sElementTip = plQtEngineUiWidget::GetToolTipAt(vLogical);
+  const plString sElementTip = plEditorUiContent::GetToolTipAt(vLogical);
   if (!sElementTip.IsEmpty())
     return sElementTip;
 

@@ -1,10 +1,10 @@
 #pragma once
 
+#include <EditorUi/Content.h>
 #include <EditorUi/Tree.h>
 #include <Foundation/Types/UniquePtr.h>
 #include <Foundation/Types/Uuid.h>
 #include <GameUiPlugin/Elements/UiDrawList.h>
-#include <GuiFoundation/EngineUi/EngineUiWidget.h>
 
 class plDocument;
 class plDocumentObject;
@@ -17,11 +17,11 @@ struct plEditorUiPointerEvent;
 /// bus), a fader from -60 to +12 dB with its scale, the bus meter on the dBFS scale, the readout and the routing.
 /// Clicking selects the bus or VCA; dragging a fader snaps to 0.5 dB with a detent at 0 dB and writes one
 /// "Set Volume" step on release.
-class plQtAudioMixerStripsView : public plQtEngineUiWidget
+class plEditorUiAudioMixerStrips : public plEditorUiContent
 {
 public:
-  plQtAudioMixerStripsView(QWidget* pParent, plDocument* pDocument);
-  ~plQtAudioMixerStripsView() override;
+  explicit plEditorUiAudioMixerStrips(plDocument* pDocument);
+  ~plEditorUiAudioMixerStrips() override;
 
   /// Re-reads the document.
   void Refresh();
@@ -31,9 +31,6 @@ public:
 
   /// Redraws the meters (called while the preview runs).
   void UpdateMeters();
-
-  QSize sizeHint() const override { return QSize(800, 420); }
-  QSize minimumSizeHint() const override { return QSize(200, 200); }
 
 protected:
   void OnUiUpdate() override;
@@ -76,11 +73,11 @@ private:
 
 /// \brief The Routing dock: the buses as a hierarchy (parents by name, unknown parents under the master bus), the
 /// VCAs and the snapshots, each under its group. Clicking selects the object.
-class plQtAudioMixerRoutingView : public plQtEngineUiWidget
+class plEditorUiAudioMixerRouting : public plEditorUiContent
 {
 public:
-  plQtAudioMixerRoutingView(QWidget* pParent, plDocument* pDocument);
-  ~plQtAudioMixerRoutingView() override;
+  explicit plEditorUiAudioMixerRouting(plDocument* pDocument);
+  ~plEditorUiAudioMixerRouting() override;
 
   /// Re-reads the document and shows the document's selection.
   void Refresh();
@@ -104,11 +101,11 @@ private:
 
 /// \brief The Snapshots dock: one row per snapshot with its name and "3 overrides · in 0.5s / out 0.5s · prio 10".
 /// Clicking selects the snapshot.
-class plQtAudioMixerSnapshotsView : public plQtEngineUiWidget
+class plEditorUiAudioMixerSnapshots : public plEditorUiContent
 {
 public:
-  plQtAudioMixerSnapshotsView(QWidget* pParent, plDocument* pDocument);
-  ~plQtAudioMixerSnapshotsView() override;
+  explicit plEditorUiAudioMixerSnapshots(plDocument* pDocument);
+  ~plEditorUiAudioMixerSnapshots() override;
 
   /// Re-reads the document.
   void Refresh();

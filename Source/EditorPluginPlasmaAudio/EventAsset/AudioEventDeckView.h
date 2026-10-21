@@ -1,8 +1,8 @@
 #pragma once
 
+#include <EditorUi/Content.h>
 #include <Foundation/Types/Uuid.h>
 #include <GameUiPlugin/Elements/UiDrawList.h>
-#include <GuiFoundation/EngineUi/EngineUiWidget.h>
 
 class plDocument;
 class plDocumentObject;
@@ -13,14 +13,17 @@ struct plEditorUiPointerEvent;
 /// pitch randomization, loop, start delay, retrigger gap).
 ///
 /// Number fields commit on Enter or when they lose focus, sliders on release: one undo step per edit or drag.
-class plQtAudioEventDeckView : public plQtEngineUiWidget
+class plEditorUiAudioEventDeck : public plEditorUiContent
 {
 public:
-  plQtAudioEventDeckView(QWidget* pParent, plDocument* pDocument);
-  ~plQtAudioEventDeckView() override;
+  explicit plEditorUiAudioEventDeck(plDocument* pDocument);
+  ~plEditorUiAudioEventDeck() override;
 
   /// The instrument the deck edits (invalid: none) and a re-read of the document.
   void SetInstrument(const plUuid& instrumentGuid);
+
+  /// The height the deck needs for the instrument's playlist.
+  float GetContentHeight() const;
 
   /// An instrument was picked in the dropdown.
   plDelegate<void(const plUuid&)> m_OnInstrumentPicked;
@@ -33,13 +36,11 @@ public:
   /// "..." of a playlist entry: pick its Audio Clip.
   plDelegate<void(const plUuid&)> m_OnPickEntryClip;
 
-  QSize sizeHint() const override;
-  QSize minimumSizeHint() const override;
+  plString GetToolTipAt(const plVec2& vLogical) const override;
 
 protected:
   void OnUiUpdate() override;
   void OnUiEvent(const plMsgUiEvent& event) override;
-  plString GetToolTipAt(const plVec2& vLogical) const override;
 
 private:
   enum class Slider
@@ -51,7 +52,6 @@ private:
 
   const plDocumentObject* GetInstrument() const;
   void GatherPlaylist(plHybridArray<const plDocumentObject*, 8>& out_entries) const;
-  float GetContentHeight() const;
   float GetColumnSplit() const;
   plRectFloat GetSliderRect(Slider slider) const;
 
@@ -88,11 +88,11 @@ private:
 ///
 /// Dragging a point is one "Move Curve Point" undo step, written on release; double-click adds a point, right-click
 /// removes one (two stay).
-class plQtAudioEventAutomationView : public plQtEngineUiWidget
+class plEditorUiAudioEventAutomation : public plEditorUiContent
 {
 public:
-  plQtAudioEventAutomationView(QWidget* pParent, plDocument* pDocument);
-  ~plQtAudioEventAutomationView() override;
+  explicit plEditorUiAudioEventAutomation(plDocument* pDocument);
+  ~plEditorUiAudioEventAutomation() override;
 
   /// The automation the curve shows (invalid: none) and a re-read of the document.
   void SetAutomation(const plUuid& automationGuid);
@@ -100,13 +100,14 @@ public:
   /// "+ automate property..." picked a target (plAudioEventAutomationTarget) and a parameter.
   plDelegate<void(plUInt8, const plString&)> m_OnAddAutomation;
 
-  QSize sizeHint() const override;
-  QSize minimumSizeHint() const override;
+  /// The least height that shows the whole curve and the add button.
+  static float GetMinimumHeight();
+
+  plString GetToolTipAt(const plVec2& vLogical) const override;
 
 protected:
   void OnUiUpdate() override;
   void OnUiEvent(const plMsgUiEvent& event) override;
-  plString GetToolTipAt(const plVec2& vLogical) const override;
 
 private:
   struct CurvePoint

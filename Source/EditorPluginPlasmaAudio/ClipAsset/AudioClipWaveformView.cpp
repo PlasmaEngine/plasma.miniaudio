@@ -50,24 +50,21 @@ namespace
 } // namespace
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioClipWaveformView
+// plEditorUiAudioClipWaveform
 
-plQtAudioClipWaveformView::plQtAudioClipWaveformView(QWidget* pParent)
-  : plQtEngineUiWidget(pParent, "AudioClipWaveform")
+plEditorUiAudioClipWaveform::plEditorUiAudioClipWaveform()
+  : plEditorUiContent("AudioClipWaveform")
 {
-  setMinimumSize(0, 0);
-  setMouseTracking(true);
-
   if (IsReady())
   {
-    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plQtAudioClipWaveformView::OnPointer, this));
+    m_PointerSubscription = GetSurface()->m_PointerEvents.AddEventHandler(plMakeDelegate(&plEditorUiAudioClipWaveform::OnPointer, this));
 
     m_pTabs = PL_DEFAULT_NEW(plEditorUiTabs, *GetSurface(), s_szTabs);
-    m_TabSubscription = m_pTabs->m_CurrentChanged.AddEventHandler(plMakeDelegate(&plQtAudioClipWaveformView::OnTabChanged, this));
+    m_TabSubscription = m_pTabs->m_CurrentChanged.AddEventHandler(plMakeDelegate(&plEditorUiAudioClipWaveform::OnTabChanged, this));
   }
 }
 
-plQtAudioClipWaveformView::~plQtAudioClipWaveformView()
+plEditorUiAudioClipWaveform::~plEditorUiAudioClipWaveform()
 {
   if (IsReady())
   {
@@ -76,14 +73,14 @@ plQtAudioClipWaveformView::~plQtAudioClipWaveformView()
   }
 }
 
-void plQtAudioClipWaveformView::SetPreview(const plSharedPtr<plAudioClipPreview>& pPreview)
+void plEditorUiAudioClipWaveform::SetPreview(const plSharedPtr<plAudioClipPreview>& pPreview)
 {
   m_pPreview = pPreview;
   m_Drag = Drag::None;
   m_bDrawDirty = true;
 }
 
-void plQtAudioClipWaveformView::SetMessage(plStringView sMessage)
+void plEditorUiAudioClipWaveform::SetMessage(plStringView sMessage)
 {
   if (m_sMessage == sMessage)
     return;
@@ -92,7 +89,7 @@ void plQtAudioClipWaveformView::SetMessage(plStringView sMessage)
   m_bDrawDirty = true;
 }
 
-void plQtAudioClipWaveformView::SetPlayCursor(plInt64 iFrame)
+void plEditorUiAudioClipWaveform::SetPlayCursor(plInt64 iFrame)
 {
   if (m_iPlayCursor == iFrame)
     return;
@@ -101,34 +98,34 @@ void plQtAudioClipWaveformView::SetPlayCursor(plInt64 iFrame)
   m_bDrawDirty = true;
 }
 
-void plQtAudioClipWaveformView::SetTabs(plArrayPtr<const plString> labels, plUInt32 uiCurrent)
+void plEditorUiAudioClipWaveform::SetTabs(plArrayPtr<const plString> labels, plUInt32 uiCurrent)
 {
   m_TabLabels = labels;
   m_uiCurrentTab = uiCurrent;
   m_bRebuild = true;
 }
 
-void plQtAudioClipWaveformView::SetStats(plArrayPtr<const Stat> stats)
+void plEditorUiAudioClipWaveform::SetStats(plArrayPtr<const Stat> stats)
 {
   m_Stats = stats;
   m_bDrawDirty = true;
 }
 
-plRectFloat plQtAudioClipWaveformView::GetWaveRect() const
+plRectFloat plEditorUiAudioClipWaveform::GetWaveRect() const
 {
   const plVec2 size = IsReady() ? GetSurface()->GetLogicalSize() : plVec2(1.0f);
   const float y = s_fTabRowTop + s_fTabRowHeight;
   return plRectFloat(0.0f, y, size.x, plMath::Max(size.y - y - s_fStatsHeight, 1.0f));
 }
 
-plRectFloat plQtAudioClipWaveformView::GetPlotRect() const
+plRectFloat plEditorUiAudioClipWaveform::GetPlotRect() const
 {
   const plRectFloat wave = GetWaveRect();
   const float y = wave.y + plEditorUiTimeRuler::Height + 4.0f;
   return plRectFloat(wave.x + s_fPlotInset, y, plMath::Max(wave.width - 2.0f * s_fPlotInset, 1.0f), plMath::Max(wave.y + wave.height - 6.0f - y, 1.0f));
 }
 
-float plQtAudioClipWaveformView::FrameToX(plUInt64 uiFrame) const
+float plEditorUiAudioClipWaveform::FrameToX(plUInt64 uiFrame) const
 {
   const plRectFloat plot = GetPlotRect();
   const plUInt64 uiFrames = m_pPreview != nullptr ? m_pPreview->m_Header.m_uiFrames : 0;
@@ -138,7 +135,7 @@ float plQtAudioClipWaveformView::FrameToX(plUInt64 uiFrame) const
   return plot.x + static_cast<float>(static_cast<double>(uiFrame) / uiFrames * plot.width);
 }
 
-plUInt64 plQtAudioClipWaveformView::XToFrame(float x) const
+plUInt64 plEditorUiAudioClipWaveform::XToFrame(float x) const
 {
   const plRectFloat plot = GetPlotRect();
   const plUInt64 uiFrames = m_pPreview != nullptr ? m_pPreview->m_Header.m_uiFrames : 0;
@@ -149,7 +146,7 @@ plUInt64 plQtAudioClipWaveformView::XToFrame(float x) const
   return static_cast<plUInt64>(fRel * uiFrames + 0.5);
 }
 
-bool plQtAudioClipWaveformView::GetLoop(plUInt64& out_uiStart, plUInt64& out_uiEnd) const
+bool plEditorUiAudioClipWaveform::GetLoop(plUInt64& out_uiStart, plUInt64& out_uiEnd) const
 {
   if (m_Drag != Drag::None)
   {
@@ -166,7 +163,7 @@ bool plQtAudioClipWaveformView::GetLoop(plUInt64& out_uiStart, plUInt64& out_uiE
   return true;
 }
 
-void plQtAudioClipWaveformView::UpdateBars(float fPlotWidth)
+void plEditorUiAudioClipWaveform::UpdateBars(float fPlotWidth)
 {
   if (m_pPreview == nullptr || !m_pPreview->m_bSuccess)
   {
@@ -236,7 +233,7 @@ void plQtAudioClipWaveformView::UpdateBars(float fPlotWidth)
   }
 }
 
-void plQtAudioClipWaveformView::OnUiUpdate()
+void plEditorUiAudioClipWaveform::OnUiUpdate()
 {
   if (!IsReady())
     return;
@@ -251,7 +248,7 @@ void plQtAudioClipWaveformView::OnUiUpdate()
     Draw();
 }
 
-void plQtAudioClipWaveformView::BuildDocument()
+void plEditorUiAudioClipWaveform::BuildDocument()
 {
   using namespace plEditorUi;
 
@@ -294,7 +291,7 @@ void plQtAudioClipWaveformView::BuildDocument()
   m_bDrawDirty = true;
 }
 
-void plQtAudioClipWaveformView::Draw()
+void plEditorUiAudioClipWaveform::Draw()
 {
   using namespace plEditorUi;
 
@@ -418,7 +415,7 @@ void plQtAudioClipWaveformView::Draw()
   m_Writer.Publish(GetSurface()->GetBlackboard(), s_sWaveEntry);
 }
 
-void plQtAudioClipWaveformView::DrawStats()
+void plEditorUiAudioClipWaveform::DrawStats()
 {
   using namespace plEditorUi;
 
@@ -449,14 +446,14 @@ void plQtAudioClipWaveformView::DrawStats()
   }
 }
 
-plString plQtAudioClipWaveformView::GetToolTipAt(const plVec2& vLogical) const
+plString plEditorUiAudioClipWaveform::GetToolTipAt(const plVec2& vLogical) const
 {
   if (!IsReady())
     return {};
 
   const plVec2 size = GetSurface()->GetLogicalSize();
   if (vLogical.y < size.y - s_fStatsHeight)
-    return plQtEngineUiWidget::GetToolTipAt(vLogical);
+    return plEditorUiContent::GetToolTipAt(vLogical);
 
   // the stat under the pointer, laid out as DrawStats does
   float x = 8.0f;
@@ -475,7 +472,7 @@ plString plQtAudioClipWaveformView::GetToolTipAt(const plVec2& vLogical) const
   return {};
 }
 
-void plQtAudioClipWaveformView::OnTabChanged(plUInt32 uiTab)
+void plEditorUiAudioClipWaveform::OnTabChanged(plUInt32 uiTab)
 {
   m_uiCurrentTab = uiTab;
 
@@ -483,7 +480,7 @@ void plQtAudioClipWaveformView::OnTabChanged(plUInt32 uiTab)
     m_OnTabPicked(uiTab);
 }
 
-void plQtAudioClipWaveformView::OnUiEvent(const plMsgUiEvent& event)
+void plEditorUiAudioClipWaveform::OnUiEvent(const plMsgUiEvent& event)
 {
   if (event.m_sIdentifier.GetView() == s_szAddTab && m_OnAddTab.IsValid())
   {
@@ -492,7 +489,7 @@ void plQtAudioClipWaveformView::OnUiEvent(const plMsgUiEvent& event)
   }
 }
 
-void plQtAudioClipWaveformView::OnPointer(const plEditorUiPointerEvent& e)
+void plEditorUiAudioClipWaveform::OnPointer(const plEditorUiPointerEvent& e)
 {
   using Type = plEditorUiPointerEvent::Type;
   using Button = plEditorUiPointerEvent::Button;
@@ -530,11 +527,11 @@ void plQtAudioClipWaveformView::OnPointer(const plEditorUiPointerEvent& e)
       const bool bOverMarker = bInWave && GetLoop(uiStart, uiEnd) && (plMath::Abs(e.m_vPosition.x - FrameToX(uiStart)) <= s_fMarkerGrab || plMath::Abs(e.m_vPosition.x - FrameToX(uiEnd)) <= s_fMarkerGrab);
 
       if (bOverMarker)
-        setCursor(Qt::SizeHorCursor);
+        SetCursor(plEditorPlatformCursor::SizeWE);
       else if (bInWave)
-        setCursor(Qt::IBeamCursor);
+        SetCursor(plEditorPlatformCursor::IBeam);
       else
-        unsetCursor();
+        SetCursor(plEditorPlatformCursor::Arrow);
       return;
     }
 
@@ -631,10 +628,10 @@ void plQtAudioClipWaveformView::OnPointer(const plEditorUiPointerEvent& e)
 }
 
 //////////////////////////////////////////////////////////////////////////
-// plQtAudioClipUsedByView
+// plEditorUiAudioClipUsedBy
 
 /// The referencing assets as a flat list; an empty list shows one dim row.
-class plQtAudioClipUsedByView::Adapter : public plEditorUiTreeAdapter
+class plEditorUiAudioClipUsedBy::Adapter : public plEditorUiTreeAdapter
 {
 public:
   explicit Adapter(const plDynamicArray<Entry>& entries)
@@ -694,25 +691,21 @@ namespace
   const plHashedString s_sUsedByCount = plMakeHashedString("Clip.UsedBy.Count");
 }
 
-plQtAudioClipUsedByView::plQtAudioClipUsedByView(QWidget* pParent)
-  : plQtEngineUiWidget(pParent, "AudioClipUsedBy")
+plEditorUiAudioClipUsedBy::plEditorUiAudioClipUsedBy()
+  : plEditorUiContent("AudioClipUsedBy")
 {
-  setMinimumSize(0, 0);
-  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-  setFixedHeight(170);
-
   m_pAdapter = PL_DEFAULT_NEW(Adapter, m_Entries);
 
   if (IsReady())
     m_pTree = PL_DEFAULT_NEW(plEditorUiTree, *GetSurface(), "Clip.UsedBy", *m_pAdapter);
 }
 
-plQtAudioClipUsedByView::~plQtAudioClipUsedByView()
+plEditorUiAudioClipUsedBy::~plEditorUiAudioClipUsedBy()
 {
   m_pTree.Clear();
 }
 
-void plQtAudioClipUsedByView::SetEntries(plArrayPtr<const Entry> entries)
+void plEditorUiAudioClipUsedBy::SetEntries(plArrayPtr<const Entry> entries)
 {
   m_Entries = entries;
 
@@ -727,13 +720,13 @@ void plQtAudioClipUsedByView::SetEntries(plArrayPtr<const Entry> entries)
   }
 }
 
-void plQtAudioClipUsedByView::OnUiUpdate()
+void plEditorUiAudioClipUsedBy::OnUiUpdate()
 {
   if (IsReady() && m_bRebuild)
     BuildDocument();
 }
 
-void plQtAudioClipUsedByView::BuildDocument()
+void plEditorUiAudioClipUsedBy::BuildDocument()
 {
   using namespace plEditorUi;
 

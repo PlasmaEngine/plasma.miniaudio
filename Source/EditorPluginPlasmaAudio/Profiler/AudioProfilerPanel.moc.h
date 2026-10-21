@@ -33,7 +33,9 @@ class plQtAudioBusStripsWidget;
 /// at most one request in flight. The stat "PlasmaAudio/VoiceSnapshot" carries a serialized plAudioProfilingSnapshot.
 /// Pause freezes every tab and stops polling; log entries produced meanwhile are reported as lost.
 ///
-/// The content is the engine-drawn plQtAudioProfilerView; "-engineAudioEditors false" creates the Qt widgets instead.
+/// The content is the engine-drawn plEditorUiAudioProfilerView; "-engineAudioEditors false" creates the Qt widgets
+/// instead. The engine shell's "Panel.AudioProfiler" shows a view of its own, which this panel feeds and polls for while
+/// it exists.
 class PL_EDITORPLUGINPLASMAAUDIO_DLL plQtAudioProfilerPanel : public plQtApplicationPanel
 {
   Q_OBJECT
@@ -43,6 +45,8 @@ class PL_EDITORPLUGINPLASMAAUDIO_DLL plQtAudioProfilerPanel : public plQtApplica
 public:
   plQtAudioProfilerPanel();
   ~plQtAudioProfilerPanel();
+
+  static constexpr const char* ShellPanelId = "Panel.AudioProfiler";
 
 private Q_SLOTS:
   void OnTick();
@@ -103,7 +107,18 @@ private:
   void RebuildLogTable();
   void UpdateTabTexts();
 
-  plQtAudioProfilerView* m_pView = nullptr; ///< the engine-drawn content; null with the Qt widgets
+  /// The engine shell's view: fed by this panel until it goes.
+  plUniquePtr<plEditorUiContent> CreateShellView();
+  void OnShellViewDestroyed(plEditorUiAudioProfilerView* pView);
+
+  /// Whether a view shows the snapshots: this panel, open and visible, or the engine shell's.
+  bool IsShown() const;
+
+  /// This panel's view and the engine shell's.
+  void GatherViews(plHybridArray<plEditorUiAudioProfilerView*, 2>& out_views) const;
+
+  plEditorUiAudioProfilerView* m_pView = nullptr; ///< the engine-drawn content; null with the Qt widgets
+  plHybridArray<plEditorUiAudioProfilerView*, 1> m_ShellViews;
 
   QLabel* m_pLinkDot = nullptr;
   QLabel* m_pLinkText = nullptr;

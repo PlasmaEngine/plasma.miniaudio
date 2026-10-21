@@ -1,10 +1,10 @@
 #pragma once
 
+#include <EditorUi/Content.h>
 #include <EditorUi/SearchField.h>
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/Types/UniquePtr.h>
 #include <GameUiPlugin/Elements/UiDrawList.h>
-#include <GuiFoundation/EngineUi/EngineUiWidget.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
 
 struct plEditorUiPointerEvent;
@@ -25,12 +25,13 @@ struct plAudioProfilerLogLine
 /// Memory and Event log with their counts, the tab's content and the status line.
 ///
 /// The panel polls the engine process and hands every snapshot and the new log lines to this view; the view keeps
-/// the filters, the selected voice and the last 2000 log lines.
-class plQtAudioProfilerView : public plQtEngineUiWidget
+/// the filters, the selected voice and the last 2000 log lines. The Qt panel shows one, the engine shell's Audio
+/// Profiler panel another, fed by the same panel.
+class plEditorUiAudioProfilerView : public plEditorUiContent
 {
 public:
-  explicit plQtAudioProfilerView(QWidget* pParent);
-  ~plQtAudioProfilerView() override;
+  plEditorUiAudioProfilerView();
+  ~plEditorUiAudioProfilerView() override;
 
   enum class LinkState : plUInt8
   {
@@ -49,10 +50,14 @@ public:
   /// Pause was toggled: the panel stops or resumes polling.
   plDelegate<void(bool)> m_OnPauseToggled;
 
+  /// The view goes (the engine shell closed its panel): the panel stops feeding it.
+  plDelegate<void(plEditorUiAudioProfilerView*)> m_OnDestroyed;
+
+  plString GetToolTipAt(const plVec2& vLogical) const override;
+
 protected:
   void OnUiUpdate() override;
   void OnUiEvent(const plMsgUiEvent& event) override;
-  plString GetToolTipAt(const plVec2& vLogical) const override;
 
 private:
   enum class Tab : plUInt8

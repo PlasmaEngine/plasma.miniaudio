@@ -719,11 +719,14 @@ void plAudioMixerAssetDocumentWindow::CreateEngineViews()
 
     pCentralLayout->addWidget(m_pToolStrip);
 
-    m_pStripsView = new plQtAudioMixerStripsView(pCentralWidget, GetDocument());
-    pCentralLayout->addWidget(m_pStripsView, 1);
+    plQtEngineUiContentWidget* pStripsWidget = nullptr;
+    m_pStripsView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerStrips>(pCentralWidget, "AudioMixerStrips", &pStripsWidget, GetDocument());
+    pCentralLayout->addWidget(pStripsWidget, 1);
 
-    m_pStatusView = new plQtAudioStatusRowView(pCentralWidget);
-    pCentralLayout->addWidget(m_pStatusView);
+    plQtEngineUiContentWidget* pStatusWidget = nullptr;
+    m_pStatusView = plQtEngineUiContentWidget::Create<plEditorUiAudioStatusRow>(pCentralWidget, "AudioMixerStatus", &pStatusWidget);
+    pStatusWidget->SetFixedLogicalHeight(plEditorUiAudioStatusRow::GetHeight());
+    pCentralLayout->addWidget(pStatusWidget);
 
     plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, GetDocument());
     pCentral->setObjectName("AudioMixerConsoleDockWidget");
@@ -739,8 +742,9 @@ void plAudioMixerAssetDocumentWindow::CreateEngineViews()
     pRoutingPanel->setWindowTitle("Routing");
     pRoutingPanel->show();
 
-    m_pRoutingView = new plQtAudioMixerRoutingView(pRoutingPanel, GetDocument());
-    pRoutingPanel->setWidget(m_pRoutingView, ads::CDockWidget::ForceNoScrollArea);
+    plQtEngineUiContentWidget* pRoutingWidget = nullptr;
+    m_pRoutingView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerRouting>(pRoutingPanel, "AudioMixerRouting", &pRoutingWidget, GetDocument());
+    pRoutingPanel->setWidget(pRoutingWidget, ads::CDockWidget::ForceNoScrollArea);
     m_pDockManager->addDockWidget(ads::LeftDockWidgetArea, pRoutingPanel);
   }
 
@@ -752,8 +756,9 @@ void plAudioMixerAssetDocumentWindow::CreateEngineViews()
     pSnapshotPanel->show();
     m_pSnapshotPanel = pSnapshotPanel;
 
-    m_pSnapshotsView = new plQtAudioMixerSnapshotsView(pSnapshotPanel, GetDocument());
-    pSnapshotPanel->setWidget(m_pSnapshotsView, ads::CDockWidget::ForceNoScrollArea);
+    plQtEngineUiContentWidget* pSnapshotsWidget = nullptr;
+    m_pSnapshotsView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerSnapshots>(pSnapshotPanel, "AudioMixerSnapshots", &pSnapshotsWidget, GetDocument());
+    pSnapshotPanel->setWidget(pSnapshotsWidget, ads::CDockWidget::ForceNoScrollArea);
     m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pSnapshotPanel);
   }
 }
@@ -998,7 +1003,7 @@ void plAudioMixerAssetDocumentWindow::QueueRefresh()
         sSnapshots.SetFormat("{}", snapshots.GetCount());
         sEffects.SetFormat("{}", uiEffects);
 
-        const plQtAudioStatusRowView::Part parts[] = {{sBuses, "buses"}, {sAux, ""}, {sVcas, "VCAs"}, {sSnapshots, "snapshots"}, {sEffects, "insert effects"}};
+        const plEditorUiAudioStatusRow::Part parts[] = {{sBuses, "buses"}, {sAux, ""}, {sVcas, "VCAs"}, {sSnapshots, "snapshots"}, {sEffects, "insert effects"}};
         m_pStatusView->SetParts(parts);
         m_pStatusView->SetRight(m_bLiveMeters ? "backend: MiniAudio \xC2\xB7 preview meters" : "backend: MiniAudio \xC2\xB7 live meters need a running engine");
       }
