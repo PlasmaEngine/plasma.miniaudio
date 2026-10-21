@@ -179,6 +179,7 @@ bool plAudioStream::Serve(plUInt64 uiOffset, void* pOut, plUInt32 uiBytes)
   if (uiCursor < uiEnd)
   {
     m_iUnderruns.Increment();
+    m_pService->CountUnderrun();
 
     if (!IsRingHeadingFor(uiCursor))
     {

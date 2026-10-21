@@ -36,6 +36,9 @@ public:
   /// \brief The sequence number the next entry gets, which is the number of entries added so far.
   plUInt64 GetNextSequence() const;
 
+  /// \brief Now on the log's clock: seconds since the log was created, as the entries' times count.
+  double GetTime() const { return (plTime::Now() - m_StartTime).GetSeconds(); }
+
 private:
   struct Entry
   {

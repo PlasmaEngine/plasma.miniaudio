@@ -127,6 +127,15 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
   UpdatePendingBanks();
   UpdateBankReadiness();
 
+  // streamed voices that ran dry since the last update, for the profiler's log
+  if (const plUInt64 uiUnderruns = m_StreamService.GetTotalUnderruns(); uiUnderruns > m_uiLoggedUnderruns)
+  {
+    plStringBuilder sDetail;
+    sDetail.SetFormat("{} underrun(s)", uiUnderruns - m_uiLoggedUnderruns);
+    m_EventManager.GetEventLog().Add(plAudioLogEventType::StreamUnderrun, "streams", sDetail);
+    m_uiLoggedUnderruns = uiUnderruns;
+  }
+
   if (m_pBackend != nullptr)
   {
     if (m_pBackend->IsDeviceReinitRequired())
@@ -192,6 +201,9 @@ void plPlasmaAudioMiddleware::UpdateProfilingSnapshot()
   m_ProfilingSnapshot.m_fDspLoad = m_pBackend->GetDspLoad();
   m_ProfilingSnapshot.m_fUpdateMs = GetLastUpdateMilliseconds();
   m_ProfilingSnapshot.m_uiMemoryBytes = plAudioClipResource::GetTotalResidentBytes() + m_StreamService.GetRingBytesInUse();
+  m_ProfilingSnapshot.m_fTime = m_EventManager.GetEventLog().GetTime();
+  m_ProfilingSnapshot.m_uiStreamUnderruns = m_StreamService.GetTotalUnderruns();
+  m_ProfilingSnapshot.m_uiMemoryBudgetBytes = m_MemoryBudget.m_uiTotalBytes;
 
   FillBusSnapshot();
   FillMemorySnapshot();
@@ -505,8 +517,12 @@ plResult plPlasmaAudioMiddleware::StopAllSounds()
 
 plResult plPlasmaAudioMiddleware::AddEntity(plAudioSystemEntityData* pEntityData, const char* szEntityName)
 {
-  PL_IGNORE_UNUSED(pEntityData);
-  PL_IGNORE_UNUSED(szEntityName);
+  // the profiler shows the entity by this name
+  if (auto* pEntity = plDynamicCast<plPlasmaAudioEntityData*>(pEntityData))
+  {
+    pEntity->m_sName = szEntityName;
+  }
+
   return PL_SUCCESS;
 }
 

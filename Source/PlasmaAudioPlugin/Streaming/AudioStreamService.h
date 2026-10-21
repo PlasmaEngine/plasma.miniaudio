@@ -199,6 +199,9 @@ public:
   /// \brief Heap bytes of the rings of all stream objects the service holds, open and pooled.
   plUInt64 GetRingBytesInUse() const;
 
+  /// \brief Underruns of all streams since the service was created. Any thread.
+  plUInt64 GetTotalUnderruns() const { return static_cast<plUInt64>(static_cast<plInt64>(m_iTotalUnderruns)); }
+
   /// \brief Test hook: while paused the IO thread does no work (no fills, no seeks), so reads past the priming data
   /// starve.
   void SetIoPaused(bool bPaused);
@@ -213,8 +216,13 @@ public:
   /// \brief Wakes the IO thread. Any thread, including the device thread: takes no lock (a semaphore token).
   void WakeIo();
 
+  /// \brief Counts an underrun of one of the service's streams. Any thread, including the device thread.
+  void CountUnderrun() { m_iTotalUnderruns.Increment(); }
+
 private:
   friend class plAudioStreamThread;
+
+  plAtomicInteger64 m_iTotalUnderruns;
 
   /// \brief One pass over all streams; returns whether any stream did work. Recycles retired streams first.
   bool RunIoPass();

@@ -2,25 +2,27 @@
 
 #include <EditorFramework/IPC/EngineProcessConnection.h>
 #include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioDLL.h>
+#include <EditorPluginPlasmaAudio/Profiler/AudioProfilerView.h>
 #include <Foundation/Configuration/Singleton.h>
 #include <Foundation/Time/Time.h>
-#include <EditorPluginPlasmaAudio/Profiler/AudioProfilerView.h>
+#include <Foundation/Types/VariantType.h>
 #include <GuiFoundation/DockPanels/ApplicationPanel.moc.h>
+#include <PlasmaAudioPlugin/Profiling/AudioProfilerCapture.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
 
 class QTimer;
 
-/// \brief The editor's Audio Profiler panel, showing the PlasmaAudio state of the engine process on four tabs:
-/// - Voices: the active voices with their state, priority, audibility, distance, bus and codec.
-/// - Buses: a strip per mixer bus with its RMS and peak meter and gain, and the active mixer snapshots.
-/// - Memory: the loaded clips, events and banks with their resident bytes and open streams.
-/// - Event log: instance starts and stops, stealing, voice changes, clip problems, device, mixer, bank and language
-///   changes, received through the sequence-numbered log of the snapshots.
+/// \brief The editor's Audio Profiler panel: the PlasmaAudio state of a target, live and recorded.
 ///
-/// While the panel is open and the engine process runs, it sets PlasmaAudio.ProfilerSnapshotHz in the engine process
-/// to 10 (back to 0 when it closes) and polls the engine's stats map with plStatsSnapshotMsgToEngine every 250 ms, with
-/// at most one request in flight. The stat "PlasmaAudio/VoiceSnapshot" carries a serialized plAudioProfilingSnapshot.
-/// Pause freezes every tab and stops polling; log entries produced meanwhile are reported as lost.
+/// The target is the editor's engine process or a Player on this computer. For the engine process the panel sets
+/// PlasmaAudio.ProfilerSnapshotHz there to 10 (back to 0 when it closes) and polls its stats map with
+/// plStatsSnapshotMsgToEngine every 250 ms, with at most one request in flight. A Player is reached as a telemetry
+/// client on port 1040 (its Inspector plugin sends the stats and takes the cvar). Either way the stat
+/// "PlasmaAudio/VoiceSnapshot" carries a serialized plAudioProfilingSnapshot.
+///
+/// While Record is on, every snapshot is added to the capture, which the views draw as graphs and instance lanes. Save
+/// writes it as a .plAudioCapture file, Open reads one (and stops recording). Record after Open, after a full capture or
+/// after switching the target starts a new capture.
 ///
 /// The content is the engine-drawn plEditorUiAudioProfilerView. The engine shell's "Panel.AudioProfiler" shows a view of
 /// its own, which this panel feeds and polls for while it exists.
@@ -36,25 +38,39 @@ public:
 
   static constexpr const char* ShellPanelId = "Panel.AudioProfiler";
 
+protected:
+  virtual void ToolsProjectEventHandler(const plToolsProjectEvent& e) override;
+
 private Q_SLOTS:
   void OnTick();
-  void OnPauseToggled(bool bPaused);
 
 private:
   enum class LinkState
   {
-    NoEngine,   ///< the engine process is not running
-    NoData,     ///< the engine process answers, but without PlasmaAudio snapshot data
+    NoEngine, ///< the target is not running or not connected
+    NoData,   ///< the target answers, but without PlasmaAudio snapshot data
     Live,
+  };
+
+  enum class Target
+  {
+    EngineProcess,
+    Player,
   };
 
   void EngineProcessMsgHandler(const plEditorEngineProcessConnection::Event& e);
 
+  /// \brief Registers the engine shell's panel (again, which replaces it).
+  void RegisterShellPanel();
+
   /// \brief The engine process connection when it can take messages, else null.
   static plEditorEngineProcessConnection* GetLiveConnection();
 
-  /// \brief Sends PlasmaAudio.ProfilerSnapshotHz to the engine process.
+  /// \brief Sends PlasmaAudio.ProfilerSnapshotHz to the target.
   void SendSnapshotRate(plInt32 iHz);
+
+  void TickEngineProcess();
+  void TickPlayer();
 
   /// One received event log entry, or a marker for lost entries (m_uiType == LogGapType).
   using LogLine = plAudioProfilerLogLine;
@@ -62,14 +78,31 @@ private:
   static constexpr plUInt8 LogGapType = plAudioProfilerLogLine::GapType;
 
   void ApplyStats(const plVariant& stats);
+
+  /// A serialized snapshot arrived from the target.
+  void ApplySnapshotData(const plDataBuffer& data);
+
+  void SetLinkState(LinkState state);
   void UpdateLinkIndicator();
 
   /// The log entries of m_Snapshot that were not seen yet, with a gap marker for lost ones.
   void CollectNewLogLines(plHybridArray<LogLine, 32>& out_lines);
 
+  void SetTarget(Target target);
+  void SetRecording(bool bRecording);
+  void SaveCapture();
+  void OpenCapture();
+  void SelectEntity(plStringView sEntity);
+  void OpenEvent(plStringView sEvent);
+  void CaptureChanged();
+  void ShowToast(plStringView sText);
+
   /// The engine shell's view: fed by this panel until it goes.
   plUniquePtr<plEditorUiContent> CreateShellView();
   void OnShellViewDestroyed(plEditorUiAudioProfilerView* pView);
+
+  /// Hooks a view to this panel and gives it the current state.
+  void ConnectView(plEditorUiAudioProfilerView* pView);
 
   /// Whether a view shows the snapshots: this panel, open and visible, or the engine shell's.
   bool IsShown() const;
@@ -89,9 +122,22 @@ private:
   plAudioProfilingSnapshot m_Snapshot;
   bool m_bHasSnapshot = false;
 
+  // capture
+  plAudioProfilerCapture m_Capture;
+  bool m_bRecording = false;
+  bool m_bCaptureFromFile = false;
+  plTime m_CaptureStart;
+  double m_fLastCapturedTime = -1.0; ///< the snapshot time of the last recorded snapshot
+
+  Target m_Target = Target::EngineProcess;
   LinkState m_LinkState = LinkState::NoEngine;
-  bool m_bSnapshotsEnabled = false; ///< PlasmaAudio.ProfilerSnapshotHz was set to a rate in the current engine process
+  bool m_bSnapshotsEnabled = false; ///< PlasmaAudio.ProfilerSnapshotHz was set to a rate in the current target
   bool m_bRequestPending = false;
-  bool m_bPaused = false;
   plTime m_LastRequest;
+
+  // Player
+  plString m_sPlayerAddress = "127.0.0.1";
+  bool m_bTelemetryOpen = false;
+  plTime m_LastConnectAttempt;
+  plTime m_LastPlayerData;
 };

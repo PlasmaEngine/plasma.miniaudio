@@ -1838,6 +1838,7 @@ void plPlasmaAudioEventInstance::AppendSnapshotVoices(plDynamicArray<plAudioVoic
     entry.m_uiId = static_cast<plUInt32>((m_uiSerial << 8) | (uiVoice & 0xFFu));
     entry.m_sEvent = sEvent;
     entry.m_uiEntityId = (m_pEntity != nullptr) ? static_cast<plUInt64>(m_pEntity->m_uiEntityId) : 0;
+    entry.m_sEntity = (m_pEntity != nullptr) ? m_pEntity->m_sName.GetView() : plStringView();
     entry.m_uiState = m_bStopping ? plAudioVoiceSnapshotEntry::Stopping : (voice.m_bVirtual ? plAudioVoiceSnapshotEntry::Virtual : plAudioVoiceSnapshotEntry::Real);
     entry.m_uiPriority = uiPriority;
     entry.m_uiCodec = plAudioVoiceSnapshotEntry::Embedded;

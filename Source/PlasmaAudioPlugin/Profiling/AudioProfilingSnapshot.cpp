@@ -78,6 +78,8 @@ const char* plAudioLogEventType::GetName(Enum type)
       return "event dropped";
     case BudgetExceeded:
       return "over budget";
+    case StreamUnderrun:
+      return "underrun";
     default:
       return "?";
   }
@@ -95,6 +97,7 @@ bool plAudioLogEventType::IsWarning(Enum type)
     case LimitRejected:
     case EventDropped:
     case BudgetExceeded:
+    case StreamUnderrun:
       return true;
     default:
       return false;
@@ -124,6 +127,9 @@ void plAudioProfilingSnapshot::Clear()
   m_uiPooledStreams = 0;
   m_uiEventLogFirstSequence = 0;
   m_EventLog.Clear();
+  m_fTime = 0.0;
+  m_uiStreamUnderruns = 0;
+  m_uiMemoryBudgetBytes = 0;
 }
 
 void plAudioProfilingSnapshot::Write(plStreamWriter& inout_stream) const
@@ -220,6 +226,16 @@ void plAudioProfilingSnapshot::Write(plStreamWriter& inout_stream) const
     WriteValue(inout_stream, entry.m_uiType);
     inout_stream.WriteString(entry.m_sName).AssertSuccess();
     inout_stream.WriteString(entry.m_sDetail).AssertSuccess();
+  }
+
+  // version 3: capture
+  WriteValue(inout_stream, m_fTime);
+  WriteValue(inout_stream, m_uiStreamUnderruns);
+  WriteValue(inout_stream, m_uiMemoryBudgetBytes);
+
+  for (const plAudioVoiceSnapshotEntry& voice : m_Voices)
+  {
+    inout_stream.WriteString(voice.m_sEntity).AssertSuccess();
   }
 }
 
@@ -342,6 +358,19 @@ plResult plAudioProfilingSnapshot::Read(plStreamReader& inout_stream)
     PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, entry.m_uiType));
     PL_SUCCEED_OR_RETURN(inout_stream.ReadString(entry.m_sName, MaxSnapshotStringBytes));
     PL_SUCCEED_OR_RETURN(inout_stream.ReadString(entry.m_sDetail, MaxSnapshotStringBytes));
+  }
+
+  if (uiVersion < 3)
+    return PL_SUCCESS;
+
+  // capture
+  PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, m_fTime));
+  PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, m_uiStreamUnderruns));
+  PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, m_uiMemoryBudgetBytes));
+
+  for (plAudioVoiceSnapshotEntry& voice : m_Voices)
+  {
+    PL_SUCCEED_OR_RETURN(inout_stream.ReadString(voice.m_sEntity, MaxSnapshotStringBytes));
   }
 
   return PL_SUCCESS;

@@ -31,6 +31,7 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioVoiceSnapshotEntry
   float m_fVolume = 0.0f;      ///< linear voice volume (instance volume times the voice's base volume)
   float m_fAge = 0.0f;         ///< seconds since the instance started
   plString m_sBus;             ///< name of the mixer bus the instance plays on
+  plString m_sEntity;          ///< name the entity was registered with (its game object's name); empty without one
 };
 
 /// \brief One bus of the loaded mixer, as shown on the Buses tab of the editor's Audio Profiler.
@@ -114,6 +115,7 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioLogEventType
     EventLoadWait,    ///< a start waits for its event to finish loading
     EventDropped,     ///< a waiting start was dropped: the event is missing, or a one-shot did not load in time
     BudgetExceeded,   ///< a bank finished loading with the loaded content over a memory budget
+    StreamUnderrun,   ///< streamed voices ran out of data since the last audio update (detail: how often)
     Count
   };
 
@@ -140,9 +142,10 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventLogSnapshotEntry
 /// application publishes the serialized form as the stat "PlasmaAudio/VoiceSnapshot" (a plDataBuffer).
 ///
 /// Version 2 adds the buses, memory and event log sections; data of version 1 reads with those sections empty.
+/// Version 3 adds the capture section (time, stream underruns, memory budget) and the voices' entity names.
 struct PL_PLASMAAUDIOPLUGIN_DLL plAudioProfilingSnapshot
 {
-  static constexpr plUInt8 kSnapshotVersion = 2;
+  static constexpr plUInt8 kSnapshotVersion = 3;
 
   plUInt32 m_uiRealVoices = 0;
   plUInt32 m_uiVirtualVoices = 0;
@@ -180,6 +183,14 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioProfilingSnapshot
   ///@{
   plUInt64 m_uiEventLogFirstSequence = 0;
   plDynamicArray<plAudioEventLogSnapshotEntry> m_EventLog;
+  ///@}
+
+  /// \name Capture
+  /// What a profiler capture lines snapshots up by and plots.
+  ///@{
+  double m_fTime = 0.0;                ///< when the snapshot was taken, on the event log's clock (seconds)
+  plUInt64 m_uiStreamUnderruns = 0;    ///< stream underruns since the middleware started
+  plUInt64 m_uiMemoryBudgetBytes = 0;  ///< total memory budget of the loaded banks, 0 without one
   ///@}
 
   void Clear();

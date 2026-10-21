@@ -5,6 +5,7 @@
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/Types/UniquePtr.h>
 #include <GameUiPlugin/Elements/UiDrawList.h>
+#include <PlasmaAudioPlugin/Profiling/AudioProfilerCapture.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
 
 struct plEditorUiPointerEvent;
@@ -21,12 +22,14 @@ struct plAudioProfilerLogLine
   plString m_sDetail;
 };
 
-/// \brief The engine-drawn content of the Audio Profiler panel: the link state and Pause, the tabs Voices, Buses,
-/// Memory and Event log with their counts, the tab's content and the status line.
+/// \brief The engine-drawn content of the Audio Profiler panel: Record, Save capture, Open and the target, the capture's
+/// graphs (voices, DSP load, streams with underruns, memory against the budget) with a draggable time range, the tabs
+/// Instances, Event log, Voices, Buses and Memory with their counts, the tab's content and the status line.
 ///
-/// The panel polls the engine process and hands every snapshot and the new log lines to this view; the view keeps
-/// the filters, the selected voice and the last 2000 log lines. The Qt panel shows one, the engine shell's Audio
-/// Profiler panel another, fed by the same panel.
+/// The panel polls the target and hands every snapshot and the new log lines to this view, and records them into the
+/// capture the view draws. Without a range the tabs show the live state; with a range, Voices, Buses and Memory show the
+/// snapshot at its end, and Instances and Event log what happened in it. The Qt panel shows one view, the engine shell's
+/// Audio Profiler panel another, fed by the same panel.
 class plEditorUiAudioProfilerView : public plEditorUiContent
 {
 public:
@@ -35,20 +38,41 @@ public:
 
   enum class LinkState : plUInt8
   {
-    NoEngine, ///< the engine process is not running
-    NoData,   ///< the engine process answers, but without PlasmaAudio snapshot data
+    NoEngine, ///< the target is not running or not connected
+    NoData,   ///< the target answers, but without PlasmaAudio snapshot data
     Live,
   };
 
   void SetLinkState(LinkState state);
 
-  /// A new snapshot and the log lines it brought.
+  /// What the profiler listens to, as the header shows it ("Editor engine process", "Player · 127.0.0.1").
+  void SetTargetText(plStringView sText);
+
+  /// A new live snapshot and the log lines it brought.
   void SetSnapshot(const plAudioProfilingSnapshot& snapshot, plArrayPtr<const plAudioProfilerLogLine> newLines);
 
-  bool IsPaused() const { return m_bPaused; }
+  /// The capture the graphs and the Instances tab draw; the panel owns it.
+  void SetCapture(const plAudioProfilerCapture* pCapture);
 
-  /// Pause was toggled: the panel stops or resumes polling.
-  plDelegate<void(bool)> m_OnPauseToggled;
+  /// The capture changed (a snapshot was recorded, a file was opened, it was cleared).
+  void OnCaptureChanged();
+
+  void SetRecording(bool bRecording);
+
+  /// A line for the status row that goes away after a few seconds ("Saved ...").
+  void ShowToast(plStringView sText);
+
+  /// Record was toggled.
+  plDelegate<void(bool)> m_OnRecordToggled;
+
+  /// Save capture, Open... and the target menu's choice (0: editor engine process, 1: Player on this computer).
+  plDelegate<void()> m_OnSave;
+  plDelegate<void()> m_OnOpen;
+  plDelegate<void(plUInt32)> m_OnTargetChosen;
+
+  /// The selected instance's Select entity (the entity's name) and Open event (the event's resource name).
+  plDelegate<void(plStringView)> m_OnSelectEntity;
+  plDelegate<void(plStringView)> m_OnOpenEvent;
 
   /// The view goes (the engine shell closed its panel): the panel stops feeding it.
   plDelegate<void(plEditorUiAudioProfilerView*)> m_OnDestroyed;
@@ -62,11 +86,19 @@ protected:
 private:
   enum class Tab : plUInt8
   {
+    Instances,
+    Log,
     Voices,
     Buses,
     Memory,
-    Log,
     Count
+  };
+
+  /// The instances of one event in the range, in start order, as one lane.
+  struct Lane
+  {
+    plString m_sEvent;
+    plHybridArray<plUInt32, 8> m_Instances; ///< indices into the capture's instances
   };
 
   /// A row of the memory table.
@@ -95,6 +127,9 @@ private:
   void BuildDocument();
   void Draw();
   void DrawHeader();
+  void DrawGraphs();
+  void DrawInstances();
+  void DrawInstanceCard(const plRectFloat& rect);
   void DrawVoices();
   void DrawBuses();
   void DrawMemory();
@@ -107,15 +142,49 @@ private:
   bool IsLogLineVisible(const plAudioProfilerLogLine& line) const;
   void RebuildVisibleLog();
 
+  /// The capture's samples, lanes and log for the range; the shown snapshot is the range's last one, or the live one.
+  void ApplyRange();
+  void RebuildLanes();
+
+  /// The capture time range the tabs show: the selection, or the whole capture.
+  void GetRange(double& out_fStart, double& out_fEnd) const;
+  bool HasRange() const { return m_fRangeA >= 0.0 && m_fRangeB >= 0.0 && plMath::Abs(m_fRangeA - m_fRangeB) >= 0.05; }
+
+  /// The graphs' plot area (right of the row titles) and the capture time at an x in it.
+  plRectFloat GetGraphRect() const;
+  float GetGraphHeight() const;
+  double GraphTimeAt(float x) const;
+  float GraphXAt(double fTime) const;
+
+  /// The log the Event log tab shows: the live lines, or the capture's lines in the range.
+  const plDeque<plAudioProfilerLogLine>& GetShownLog() const { return HasRange() ? m_RangeLog : m_LogLines; }
+
+  void ShowTargetMenu();
+
   void OnPointer(const plEditorUiPointerEvent& e);
   void OnSearch(const plEditorUiSearchFieldEvent& e);
   void ClampScroll();
 
   // data
-  plAudioProfilingSnapshot m_Snapshot;
+  plAudioProfilingSnapshot m_Snapshot;     ///< the snapshot the tabs show
+  plAudioProfilingSnapshot m_LiveSnapshot; ///< the last live snapshot
   bool m_bHasSnapshot = false;
+  bool m_bHasLiveSnapshot = false;
   LinkState m_LinkState = LinkState::NoEngine;
-  bool m_bPaused = false;
+  plString m_sTargetText = "Editor engine process";
+
+  // capture
+  const plAudioProfilerCapture* m_pCapture = nullptr;
+  bool m_bRecording = false;
+  double m_fRangeA = -1.0;
+  double m_fRangeB = -1.0;
+  bool m_bDraggingRange = false;
+  double m_fHoverTime = -1.0;
+  plDynamicArray<Lane> m_Lanes;
+  plInt32 m_iSelectedInstance = -1;
+  plDeque<plAudioProfilerLogLine> m_RangeLog;
+  plString m_sToast;
+  plTime m_ToastTime;
 
   // voices
   bool m_StateFilter[3] = {true, true, true};
@@ -138,7 +207,7 @@ private:
   plUInt64 m_uiLogReceived = 0;
   bool m_bFollowLog = true;
 
-  Tab m_Tab = Tab::Voices;
+  Tab m_Tab = Tab::Instances;
   float m_fScroll = 0.0f;
   plUniquePtr<plEditorUiSearchField> m_pVoiceSearch;
   plUniquePtr<plEditorUiSearchField> m_pLogSearch;

@@ -309,7 +309,7 @@ PL_CREATE_SIMPLE_TEST(AudioProfiling, SnapshotRoundTripV2)
 
   plDataBuffer buffer;
   WriteSnapshot(snapshot, buffer);
-  PL_TEST_INT(buffer[0], 2);
+  PL_TEST_INT(buffer[0], plAudioProfilingSnapshot::kSnapshotVersion);
 
   plAudioProfilingSnapshot read;
   {

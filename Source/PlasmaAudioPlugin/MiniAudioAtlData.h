@@ -23,6 +23,7 @@ public:
   explicit plPlasmaAudioEntityData(plAudioSystemDataID uiEntityId, bool bIsGlobal = false);
 
   plAudioSystemDataID m_uiEntityId = 0;
+  plString m_sName; ///< the name the entity was registered with (its game object's name)
   bool m_bGlobalEntity = false;
   plAudioSystemTransform m_LastTransform;
 

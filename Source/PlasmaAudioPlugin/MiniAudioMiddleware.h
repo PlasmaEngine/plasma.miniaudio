@@ -269,6 +269,9 @@ private:
   plAudioMemoryBudget m_MemoryBudget;
   plTime m_LastBankMonitorRefresh;
 
+  /// stream underruns already reported in the event log
+  plUInt64 m_uiLoggedUnderruns = 0;
+
   /// Applies a language set through SetLanguage (audio thread).
   void ApplyPendingLanguage();
 
