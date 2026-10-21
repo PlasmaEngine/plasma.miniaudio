@@ -6,9 +6,36 @@
 #include <GuiFoundation/UIServices/ImageCache.moc.h>
 
 // clang-format off
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioBudgetProfileConfig, 1, plRTTIDefaultAllocator<plAudioBudgetProfileConfig>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("TotalMB", m_fTotalMB)->AddAttributes(new plClampValueAttribute(0.0f, 65536.0f), new plSuffixAttribute(" MB")),
+    PL_MEMBER_PROPERTY("DecodedMB", m_fDecodedMB)->AddAttributes(new plClampValueAttribute(0.0f, 65536.0f), new plSuffixAttribute(" MB")),
+    PL_MEMBER_PROPERTY("CompressedMB", m_fCompressedMB)->AddAttributes(new plClampValueAttribute(0.0f, 65536.0f), new plSuffixAttribute(" MB")),
+    PL_MEMBER_PROPERTY("StreamingMB", m_fStreamingMB)->AddAttributes(new plClampValueAttribute(0.0f, 65536.0f), new plSuffixAttribute(" MB")),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioBankAssetDocumentManager, 1, plRTTIDefaultAllocator<plAudioBankAssetDocumentManager>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
+
+plUInt64 plAudioBankAssetDocumentManager::ComputeAssetProfileHashImpl(const plPlatformProfile* pAssetProfile) const
+{
+  // the budget the bank bakes, and the profile its packed clips are built for
+  plUInt64 uiHash = plHashingUtils::xxHash64String(pAssetProfile->GetConfigName());
+
+  if (const plAudioBudgetProfileConfig* pConfig = pAssetProfile->GetTypeConfig<plAudioBudgetProfileConfig>())
+  {
+    const float values[] = {pConfig->m_fTotalMB, pConfig->m_fDecodedMB, pConfig->m_fCompressedMB, pConfig->m_fStreamingMB};
+    uiHash = plHashingUtils::xxHash64(values, sizeof(values), uiHash);
+  }
+
+  return uiHash;
+}
 
 plAudioBankAssetDocumentManager::plAudioBankAssetDocumentManager()
 {

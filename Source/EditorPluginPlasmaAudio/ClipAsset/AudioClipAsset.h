@@ -61,6 +61,29 @@ public:
   plDynamicArray<plAudioClipLanguageVariant> m_Languages;
 };
 
+/// \brief How a clip is built for one platform profile, published in the clip's meta info.
+class plAudioClipPlatformInfo : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plAudioClipPlatformInfo, plReflectedClass);
+
+public:
+  plString m_sProfile; ///< the profile's config name
+  plEnum<plAudioClipLoadMode> m_eLoadMode;
+  plEnum<plAudioClipCodec> m_eCodec;
+  plUInt32 m_uiSampleRate = 0; ///< output rate, 0 keeps the source rate
+  plUInt32 m_uiOpusKbps = 96;
+};
+
+/// \brief A localised variant of a clip, published in the clip's meta info.
+class plAudioClipLanguageInfo : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plAudioClipLanguageInfo, plReflectedClass);
+
+public:
+  plString m_sLanguage;
+  double m_fDuration = 0.0; ///< seconds
+};
+
 /// \brief Source file facts published in the asset document info, so tools can show them without opening the clip.
 struct plAudioClipHeader;
 
@@ -76,6 +99,21 @@ public:
   bool m_bHasLoop = false;
   double m_fLoopStart = 0.0; ///< seconds
   double m_fLoopEnd = 0.0;   ///< seconds
+
+  /// \brief Build settings per platform profile and the localised variants, for the bank budgets.
+  bool m_bForceMono = false;
+  plDynamicArray<plAudioClipPlatformInfo> m_Platforms;
+  plDynamicArray<plAudioClipLanguageInfo> m_Languages;
+};
+
+/// \brief What a clip takes in memory on a platform, in a language, estimated from its published meta info.
+struct plAudioClipMemoryEstimate
+{
+  plAudioClipLoadMode::Enum m_eLoadMode = plAudioClipLoadMode::Default;
+  plUInt64 m_uiResidentBytes = 0; ///< while loaded: the decoded PCM, the payload, or the priming data of a streamed clip
+  bool m_bLocalized = false;      ///< the clip has language variants
+  bool m_bHasLanguage = true;     ///< it has the requested language; false means it falls back to the default
+  bool m_bAssumedSettings = false; ///< the meta info has no build settings (saved before they were published): the defaults were assumed
 };
 
 /// \brief Helpers shared by the clip transform, the clip editor preview and the importer.
@@ -105,9 +143,24 @@ struct plAudioClipAssetUtils
   /// \brief The published meta info of the Audio Clip sClipGuid (a GUID string or asset path). False when the clip is unknown to the curator.
   static bool GetClipInfo(plStringView sClipGuid, plAudioClipAssetMetaInfo& out_info, plString* out_pDisplayName = nullptr);
 
-  /// \brief Header of the clip as it was last built (its waveform peaks, frames, loop points). False when the clip has
-  /// not been built for the current platform yet.
-  static bool ReadBuiltHeader(plStringView sClipGuid, plAudioClipHeader& out_header);
+  /// \brief Header of the clip as it was last built (its waveform peaks, frames, loop points) for pProfile, null for the
+  /// current platform. False when the clip has not been built for it yet.
+  static bool ReadBuiltHeader(plStringView sClipGuid, plAudioClipHeader& out_header, const plPlatformProfile* pProfile = nullptr);
+
+  /// \brief The meta info the clip publishes: the source file facts, the build settings of every asset profile and the
+  /// language variants with their lengths.
+  static void MakeMetaInfo(const plAudioClipAssetProperties& props, plAudioClipAssetMetaInfo& out_info);
+
+  /// \brief Reads the properties of the clip document at sDocumentPath (absolute) without opening it, for clips whose
+  /// published meta info predates a field.
+  static plResult ReadProperties(plStringView sDocumentPath, plAudioClipAssetProperties& out_props);
+
+  /// \brief What the clip takes in memory when built for the profile sProfile (its config name) and loaded in the
+  /// language sLanguage ("" = default), estimated from the published meta info without building it.
+  static plAudioClipMemoryEstimate EstimateMemory(const plAudioClipAssetMetaInfo& info, plStringView sProfile, plStringView sLanguage);
+
+  /// \brief What the built clip takes in memory when loaded in the language sLanguage ("" = default).
+  static plAudioClipMemoryEstimate EstimateMemory(const plAudioClipHeader& header, plStringView sLanguage);
 };
 
 class plAudioClipAssetDocument : public plSimpleAssetDocument<plAudioClipAssetProperties>

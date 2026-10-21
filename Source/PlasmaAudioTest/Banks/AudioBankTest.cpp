@@ -8,6 +8,7 @@
 #include <Foundation/Threading/ThreadUtils.h>
 #include <Foundation/Utilities/AssetFileHeader.h>
 #include <PlasmaAudioPlugin/Banks/AudioBankResource.h>
+#include <PlasmaAudioPlugin/Banks/AudioPackedContent.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipBuilder.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResourceLoader.h>
@@ -87,6 +88,35 @@ namespace
     plResourceManager::CreateResource<plAudioClipResource>(sId, std::move(desc));
   }
 
+  /// The bytes of an asset file: the asset header, then the content.
+  plDynamicArray<plUInt8> MakeAssetBytes(plArrayPtr<const plUInt8> content)
+  {
+    plDynamicArray<plUInt8> bytes;
+    plMemoryStreamContainerWrapperStorage<plDynamicArray<plUInt8>> storage(&bytes);
+    plMemoryStreamWriter writer(&storage);
+
+    plAssetFileHeader assetHeader;
+    assetHeader.SetFileHashAndVersion(1, 1);
+    assetHeader.Write(writer).AssertSuccess();
+    writer.WriteBytes(content.GetPtr(), content.GetCount()).AssertSuccess();
+    return bytes;
+  }
+
+  /// Updates the middleware until the bank finished loading, for at most five seconds.
+  bool WaitForBankReady(plPlasmaAudioMiddleware& ref_middleware, plAudioSystemDataID uiBankId)
+  {
+    for (plUInt32 i = 0; i < 5000; ++i)
+    {
+      ref_middleware.Update(plTime::MakeFromMilliseconds(1));
+      if (ref_middleware.IsBankReady(uiBankId))
+        return true;
+
+      plThreadUtils::Sleep(plTime::MakeFromMilliseconds(1));
+    }
+
+    return false;
+  }
+
   /// Updates the middleware until the bank's content is requested, for at most five seconds.
   bool WaitForBankContent(plPlasmaAudioMiddleware& ref_middleware, plAudioSystemDataID uiBankId)
   {
@@ -115,6 +145,12 @@ PL_CREATE_SIMPLE_TEST(AudioBank, Desc)
   desc.m_Events.PushBack("{ 11111111-2222-3333-4444-555555555555 }");
   desc.m_Clips.PushBack("{ aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee }");
 
+  desc.m_Budget.m_uiDecodedBytes = 8 * 1024 * 1024;
+  desc.m_Budget.m_uiStreamingBytes = 3 * 1024 * 1024;
+  desc.m_Budget.m_uiTotalBytes = 48 * 1024 * 1024;
+  desc.m_Packed.PushBack({"{ 01234567-89ab-cdef-0123-456789abcdef }", false, 0, 120});
+  desc.m_Packed.PushBack({"{ aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee }", true, 120, 4000});
+
   PL_TEST_BLOCK(plTestBlock::Enabled, "Round trip")
   {
     plDefaultMemoryStreamStorage storage;
@@ -127,6 +163,56 @@ PL_CREATE_SIMPLE_TEST(AudioBank, Desc)
 
     PL_TEST_BOOL(loaded.m_Events == desc.m_Events);
     PL_TEST_BOOL(loaded.m_Clips == desc.m_Clips);
+    PL_TEST_BOOL(loaded.m_Budget == desc.m_Budget);
+    PL_TEST_BOOL(loaded.m_Packed == desc.m_Packed);
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Version 1")
+  {
+    // a bank built before budgets and packing: the content lists only
+    plDefaultMemoryStreamStorage storage;
+    plMemoryStreamWriter writer(&storage);
+    writer.WriteVersion(1);
+    writer << desc.m_Events.GetCount();
+    for (const plString& sEvent : desc.m_Events)
+      writer << sEvent;
+    writer << desc.m_Clips.GetCount();
+    for (const plString& sClip : desc.m_Clips)
+      writer << sClip;
+
+    plMemoryStreamReader reader(&storage);
+    plAudioBankDesc loaded;
+    loaded.m_Budget.m_uiTotalBytes = 1;
+    PL_TEST_RESULT(loaded.Load(reader));
+
+    PL_TEST_BOOL(loaded.m_Events == desc.m_Events);
+    PL_TEST_BOOL(loaded.m_Clips == desc.m_Clips);
+    PL_TEST_BOOL(!loaded.m_Budget.IsSet());
+    PL_TEST_BOOL(loaded.m_Packed.IsEmpty());
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Excess")
+  {
+    plAudioMemoryUsage usage;
+    usage.m_uiDecodedBytes = 12 * 1024 * 1024;
+    usage.m_uiPrimingBytes = 1 * 1024 * 1024;
+    usage.m_uiRingBytes = 1 * 1024 * 1024;
+
+    plStringBuilder sExcess;
+    usage.DescribeExcess(desc.m_Budget, sExcess);
+    PL_TEST_STRING(sExcess, "decoded 12.0 MB of 8.0 MB");
+
+    usage.m_uiRingBytes = 5 * 512 * 1024;
+    usage.DescribeExcess(desc.m_Budget, sExcess);
+    PL_TEST_STRING(sExcess, "decoded 12.0 MB of 8.0 MB, streaming 3.5 MB of 3.0 MB");
+
+    plAudioMemoryBudget tiny;
+    tiny.m_uiDecodedBytes = 100;
+    usage.DescribeExcess(tiny, sExcess);
+    PL_TEST_STRING(sExcess, "decoded 12.0 MB of 100 B");
+
+    usage.DescribeExcess(plAudioMemoryBudget(), sExcess);
+    PL_TEST_BOOL(sExcess.IsEmpty());
   }
 
   PL_TEST_BLOCK(plTestBlock::Enabled, "Resource from file")
@@ -323,4 +409,164 @@ PL_CREATE_SIMPLE_TEST(AudioBank, Language)
     PL_TEST_STRING(pClip->GetActiveLanguage(), "");
     PL_TEST_INT(MaxAbsDiff(pClip->GetPcm(), expectedEnglish), 0);
   }
+}
+
+PL_CREATE_SIMPLE_TEST(AudioBank, Packed)
+{
+  if (!PL_TEST_RESULT(plFileSystem::AddDataDirectory(">pltest/", "PlasmaAudioBankTest", "banktest", plDataDirUsage::AllowWrites)))
+    return;
+
+  PL_SCOPE_EXIT(plFileSystem::RemoveDataDirectoryGroup("PlasmaAudioBankTest"));
+
+  plUniquePtr<plPlasmaAudioMiddleware> pMiddleware = PL_DEFAULT_NEW(plPlasmaAudioMiddleware);
+
+  // an event and a clip that exist only inside the bank file
+  const plStringView sEventId = ":banktest/PackedOnly.plBinAudioEvent";
+  const plStringView sClipId = ":banktest/PackedOnly.plBinAudioClip";
+
+  const plAudioClipSourcePcm source = MakeSine(4800, 330.0, 0.5f);
+  const plDynamicArray<plInt16> expected = ToPcm16(source);
+
+  plDynamicArray<plUInt8> clipFile;
+  {
+    plAudioClipBuildSettings settings;
+    settings.m_eCodec = plAudioClipCodec::Pcm16;
+    settings.m_eLoadMode = plAudioClipLoadMode::DecompressOnLoad;
+
+    const plAudioClipSourcePcm* sources[] = {&source};
+    plDynamicArray<plUInt8> clip;
+    plMemoryStreamContainerWrapperStorage<plDynamicArray<plUInt8>> storage(&clip);
+    plMemoryStreamWriter writer(&storage);
+    PL_TEST_RESULT(plAudioClipBuilder::Build(plArrayPtr<const plAudioClipSourcePcm* const>(sources), settings, writer));
+    clipFile = MakeAssetBytes(clip);
+  }
+
+  plDynamicArray<plUInt8> eventFile;
+  {
+    plAudioEventDesc eventDesc;
+    eventDesc.m_fMaxDistance = 77.0f;
+
+    plDynamicArray<plUInt8> event;
+    plMemoryStreamContainerWrapperStorage<plDynamicArray<plUInt8>> storage(&event);
+    plMemoryStreamWriter writer(&storage);
+    PL_TEST_RESULT(eventDesc.Save(writer));
+    writer << plUInt32(0); // no embedded samples
+    eventFile = MakeAssetBytes(event);
+  }
+
+  plAudioBankDesc desc;
+  desc.m_Events.PushBack(sEventId);
+  desc.m_Clips.PushBack(sClipId);
+  desc.m_Packed.PushBack({sEventId, false, 0, eventFile.GetCount()});
+  desc.m_Packed.PushBack({sClipId, true, eventFile.GetCount(), clipFile.GetCount()});
+
+  plDynamicArray<plUInt8> packedData = eventFile;
+  packedData.PushBackRange(clipFile);
+
+  {
+    plDynamicArray<plUInt8> bank;
+    plMemoryStreamContainerWrapperStorage<plDynamicArray<plUInt8>> storage(&bank);
+    plMemoryStreamWriter writer(&storage);
+    PL_TEST_RESULT(desc.Save(writer));
+    PL_TEST_RESULT(writer.WriteBytes(packedData.GetData(), packedData.GetCount()));
+
+    if (!PL_TEST_RESULT(WriteAssetFile(":banktest/Packed.plBinAudioBank", bank)))
+      return;
+  }
+
+  PL_TEST_BOOL(!plFileSystem::ExistsFile(sClipId));
+  PL_TEST_BOOL(!plFileSystem::ExistsFile(sEventId));
+
+  const plAudioSystemDataID uiBankId = 1003;
+  plAudioSystemStringBankData bankData(uiBankId, ":banktest/Packed.plBinAudioBank");
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Load from the bank file")
+  {
+    PL_TEST_RESULT(pMiddleware->LoadBank(&bankData));
+    if (!PL_TEST_BOOL(WaitForBankReady(*pMiddleware, uiBankId)))
+      return;
+
+    PL_TEST_INT(plAudioPackedContent::GetCount(), 2);
+
+    plAudioClipResourceHandle hClip = plResourceManager::LoadResource<plAudioClipResource>(sClipId);
+    {
+      plResourceLock<plAudioClipResource> pClip(hClip, plResourceAcquireMode::BlockTillLoaded);
+      if (PL_TEST_BOOL(pClip.GetAcquireResult() == plResourceAcquireResult::Final))
+      {
+        PL_TEST_INT(MaxAbsDiff(pClip->GetPcm(), expected), 0);
+      }
+    }
+
+    plAudioEventResourceHandle hEvent = plResourceManager::LoadResource<plAudioEventResource>(sEventId);
+    {
+      plResourceLock<plAudioEventResource> pEvent(hEvent, plResourceAcquireMode::BlockTillLoaded);
+      if (PL_TEST_BOOL(pEvent.GetAcquireResult() == plResourceAcquireResult::Final))
+      {
+        PL_TEST_FLOAT(pEvent->GetDescriptor().m_fMaxDistance, 77.0f, 0.0f);
+      }
+    }
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Unload")
+  {
+    PL_TEST_RESULT(pMiddleware->UnloadBank(&bankData));
+    PL_TEST_INT(plAudioPackedContent::GetCount(), 0);
+
+    plResourceManager::FreeAllUnusedResources();
+    PL_TEST_BOOL(!plResourceManager::GetExistingResource<plAudioClipResource>(sClipId).IsValid());
+    PL_TEST_BOOL(!plResourceManager::GetExistingResource<plAudioEventResource>(sEventId).IsValid());
+  }
+}
+
+PL_CREATE_SIMPLE_TEST(AudioBank, Budget)
+{
+  plUniquePtr<plPlasmaAudioMiddleware> pMiddleware = PL_DEFAULT_NEW(plPlasmaAudioMiddleware);
+
+  // 480 frames of decoded mono PCM: 960 bytes
+  CreateTestClip("PlasmaAudioTest:BudgetClip");
+
+  auto MakeBank = [](plStringView sId, plUInt64 uiDecodedBudget)
+  {
+    plAudioBankResourceDescriptor bankDesc;
+    bankDesc.m_Desc.m_Clips.PushBack("PlasmaAudioTest:BudgetClip");
+    bankDesc.m_Desc.m_Budget.m_uiDecodedBytes = uiDecodedBudget;
+    plResourceManager::CreateResource<plAudioBankResource>(sId, std::move(bankDesc));
+  };
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Over the budget")
+  {
+    MakeBank("PlasmaAudioTest:TightBank", 100);
+
+    const plAudioSystemDataID uiBankId = 1004;
+    plAudioSystemStringBankData bankData(uiBankId, "PlasmaAudioTest:TightBank");
+
+    PL_TEST_RESULT(pMiddleware->LoadBank(&bankData));
+    if (!PL_TEST_BOOL(WaitForBankReady(*pMiddleware, uiBankId)))
+      return;
+
+    PL_TEST_INT(pMiddleware->GetMemoryBudget().m_uiDecodedBytes, 100);
+    PL_TEST_BOOL(pMiddleware->GetMemoryUsage().m_uiDecodedBytes >= 960);
+    PL_TEST_BOOL(pMiddleware->IsBankOverBudget(uiBankId));
+
+    PL_TEST_RESULT(pMiddleware->UnloadBank(&bankData));
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Within the budget")
+  {
+    MakeBank("PlasmaAudioTest:RoomyBank", 1024ull * 1024 * 1024);
+
+    const plAudioSystemDataID uiBankId = 1005;
+    plAudioSystemStringBankData bankData(uiBankId, "PlasmaAudioTest:RoomyBank");
+
+    PL_TEST_RESULT(pMiddleware->LoadBank(&bankData));
+    if (!PL_TEST_BOOL(WaitForBankReady(*pMiddleware, uiBankId)))
+      return;
+
+    PL_TEST_INT(pMiddleware->GetMemoryBudget().m_uiDecodedBytes, 1024ull * 1024 * 1024);
+    PL_TEST_BOOL(!pMiddleware->IsBankOverBudget(uiBankId));
+
+    PL_TEST_RESULT(pMiddleware->UnloadBank(&bankData));
+  }
+
+  plResourceManager::FreeAllUnusedResources();
 }

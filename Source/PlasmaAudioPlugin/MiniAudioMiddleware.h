@@ -138,6 +138,18 @@ public:
   /// Audio thread only.
   bool IsBankReady(plAudioSystemDataID uiBankId) const;
 
+  /// \brief Whether the loaded content was over a category of the memory budget when the bank finished loading. Audio
+  /// thread only.
+  bool IsBankOverBudget(plAudioSystemDataID uiBankId) const;
+
+  /// \brief The memory budget of the last loaded bank that has one; banks bake the budget of the platform they were
+  /// built for. A bank that finishes loading with the loaded content over a category of it logs a warning and a
+  /// BudgetExceeded event log entry. Audio thread only.
+  const plAudioMemoryBudget& GetMemoryBudget() const { return m_MemoryBudget; }
+
+  /// \brief Memory of the loaded clips by load mode, and of the stream rings. Any thread.
+  plAudioMemoryUsage GetMemoryUsage() const;
+
   /// \brief The language clips are loaded in ("" = default language). SetLanguage() takes effect on the next Update().
   plString GetLanguage() const;
 
@@ -232,14 +244,30 @@ private:
     plDynamicArray<plAudioEventResourceHandle> m_Events;
     plDynamicArray<plAudioClipResourceHandle> m_Clips;
     bool m_bContentRequested = false;
+    bool m_bReady = false;      ///< every event and clip finished loading; the budget was checked then
+    bool m_bOverBudget = false; ///< that check found the loaded content over a category of the budget
   };
 
-  /// Starts loading the events and clips of the bank once its resource is loaded. Returns false while it is still loading.
-  bool RequestBankContent(LoadedBank& ref_bank);
+  /// Starts loading the events and clips of the bank once its resource is loaded, from the bank file when it packs
+  /// them. Returns false while it is still loading.
+  bool RequestBankContent(plAudioSystemDataID uiBankId, LoadedBank& ref_bank);
   void UpdatePendingBanks();
+
+  /// Checks the banks that finished loading against the memory budget and refreshes the audition's bank monitor while
+  /// it is watched (audio thread).
+  void UpdateBankReadiness();
+
+  /// Logs it when the loaded content is over a category of m_MemoryBudget.
+  void CheckMemoryBudget(LoadedBank& ref_bank);
 
   /// Whether every event and clip the bank holds a handle to has finished loading or is missing.
   static bool IsBankContentLoaded(const LoadedBank& bank);
+
+  /// The events and clips of the bank that finished loading or are missing.
+  static plUInt32 CountReadyItems(const LoadedBank& bank);
+
+  plAudioMemoryBudget m_MemoryBudget;
+  plTime m_LastBankMonitorRefresh;
 
   /// Applies a language set through SetLanguage (audio thread).
   void ApplyPendingLanguage();

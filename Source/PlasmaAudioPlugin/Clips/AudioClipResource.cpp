@@ -131,6 +131,31 @@ void plAudioClipResource::GatherLoadedLocalizedClips(plDynamicArray<plString>& o
   }
 }
 
+void plAudioClipResource::GatherMemoryUsage(plAudioMemoryUsage& out_usage)
+{
+  out_usage.m_uiDecodedBytes = 0;
+  out_usage.m_uiCompressedBytes = 0;
+  out_usage.m_uiPrimingBytes = 0;
+
+  PL_LOCK(s_LoadedMutex);
+
+  for (const plAudioClipResource* pClip = s_pFirstLoaded; pClip != nullptr; pClip = pClip->m_pNextLoaded)
+  {
+    switch (pClip->m_Header.m_eLoadMode)
+    {
+      case plAudioClipLoadMode::DecompressOnLoad:
+        out_usage.m_uiDecodedBytes += pClip->m_uiResidentBytes;
+        break;
+      case plAudioClipLoadMode::CompressedInMemory:
+        out_usage.m_uiCompressedBytes += pClip->m_uiResidentBytes;
+        break;
+      case plAudioClipLoadMode::Streamed:
+        out_usage.m_uiPrimingBytes += pClip->m_uiResidentBytes;
+        break;
+    }
+  }
+}
+
 plTime plAudioClipResource::GetDuration() const
 {
   if (m_Header.m_uiSampleRate == 0)

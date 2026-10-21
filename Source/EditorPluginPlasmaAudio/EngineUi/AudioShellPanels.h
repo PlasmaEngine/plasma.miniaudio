@@ -74,4 +74,5 @@ private:
   static void CreateEventPanels(plEditorUiDocumentFrame& ref_frame);
   static void CreateMixerPanels(plEditorUiDocumentFrame& ref_frame);
   static void CreateAttenuationPanels(plEditorUiDocumentFrame& ref_frame);
+  static void CreateBankPanels(plEditorUiDocumentFrame& ref_frame);
 };

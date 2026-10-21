@@ -6,9 +6,14 @@
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAssetManager.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
 #include <Foundation/IO/FileSystem/FileReader.h>
+#include <Foundation/IO/MemoryStream.h>
 #include <Foundation/IO/OSFile.h>
+#include <Foundation/Serialization/AbstractObjectGraph.h>
+#include <Foundation/Serialization/DdlSerializer.h>
+#include <Foundation/Serialization/RttiConverter.h>
 #include <Foundation/Utilities/AssetFileHeader.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipDesc.h>
+#include <PlasmaAudioPlugin/Codecs/ImaAdpcm.h>
 #include <Foundation/Strings/PathUtils.h>
 #include <Foundation/Strings/StringConversion.h>
 #include <Foundation/Threading/Mutex.h>
@@ -75,6 +80,34 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioClipAssetMetaInfo, 1, plRTTIDefaultAlloca
     PL_MEMBER_PROPERTY("HasLoop", m_bHasLoop),
     PL_MEMBER_PROPERTY("LoopStart", m_fLoopStart),
     PL_MEMBER_PROPERTY("LoopEnd", m_fLoopEnd),
+    PL_MEMBER_PROPERTY("ForceMono", m_bForceMono),
+    PL_ARRAY_MEMBER_PROPERTY("Platforms", m_Platforms),
+    PL_ARRAY_MEMBER_PROPERTY("Languages", m_Languages),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioClipPlatformInfo, 1, plRTTIDefaultAllocator<plAudioClipPlatformInfo>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Profile", m_sProfile),
+    PL_ENUM_MEMBER_PROPERTY("LoadMode", plAudioClipLoadMode, m_eLoadMode),
+    PL_ENUM_MEMBER_PROPERTY("Codec", plAudioClipCodec, m_eCodec),
+    PL_MEMBER_PROPERTY("SampleRate", m_uiSampleRate),
+    PL_MEMBER_PROPERTY("OpusKbps", m_uiOpusKbps),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioClipLanguageInfo, 1, plRTTIDefaultAllocator<plAudioClipLanguageInfo>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Language", m_sLanguage),
+    PL_MEMBER_PROPERTY("Duration", m_fDuration),
   }
   PL_END_PROPERTIES;
 }
@@ -386,7 +419,7 @@ bool plAudioClipAssetUtils::GetClipInfo(plStringView sClipGuid, plAudioClipAsset
   return true;
 }
 
-bool plAudioClipAssetUtils::ReadBuiltHeader(plStringView sClipGuid, plAudioClipHeader& out_header)
+bool plAudioClipAssetUtils::ReadBuiltHeader(plStringView sClipGuid, plAudioClipHeader& out_header, const plPlatformProfile* pProfile)
 {
   if (sClipGuid.IsEmpty())
     return false;
@@ -399,7 +432,7 @@ bool plAudioClipAssetUtils::ReadBuiltHeader(plStringView sClipGuid, plAudioClipH
 
     const plAssetDocumentTypeDescriptor* pTypeDesc = pSubAsset->m_pAssetInfo->m_pDocumentTypeDescriptor;
     const auto* pManager = static_cast<const plAssetDocumentManager*>(pTypeDesc->m_pManager);
-    sOutputFile = pManager->GetAbsoluteOutputFileName(pTypeDesc, pSubAsset->m_pAssetInfo->m_Path.GetAbsolutePath(), "");
+    sOutputFile = pManager->GetAbsoluteOutputFileName(pTypeDesc, pSubAsset->m_pAssetInfo->m_Path.GetAbsolutePath(), "", pProfile);
   }
 
   // the built clip starts with the asset file header and the clip header; the payload after them is not read
@@ -412,6 +445,197 @@ bool plAudioClipAssetUtils::ReadBuiltHeader(plStringView sClipGuid, plAudioClipH
     return false;
 
   return out_header.Read(file).Succeeded();
+}
+
+void plAudioClipAssetUtils::MakeMetaInfo(const plAudioClipAssetProperties& props, plAudioClipAssetMetaInfo& out_info)
+{
+  out_info = plAudioClipAssetMetaInfo();
+
+  plStringBuilder sAbsPath = props.m_sSourceFile;
+  if (!sAbsPath.IsEmpty() && plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
+  {
+    ReadSourceInfo(sAbsPath, out_info).IgnoreResult();
+  }
+
+  out_info.m_sSourceFile = props.m_sSourceFile;
+
+  if (props.m_bOverrideLoop)
+  {
+    out_info.m_bHasLoop = true;
+    out_info.m_fLoopStart = plMath::Max(props.m_fLoopStart, 0.0f);
+    out_info.m_fLoopEnd = props.m_fLoopEnd > props.m_fLoopStart ? static_cast<double>(props.m_fLoopEnd) : out_info.m_fDuration;
+  }
+
+  // what the bank window estimates the clip's memory from on every platform and in every language
+  out_info.m_bForceMono = props.m_bForceMono;
+
+  plAssetCurator* pCurator = plAssetCurator::GetSingleton();
+  for (plUInt32 i = 0; i < pCurator->GetNumAssetProfiles(); ++i)
+  {
+    const plPlatformProfile* pProfile = pCurator->GetAssetProfile(i);
+    const plAudioClipBuildSettings settings = MakeBuildSettings(props, pProfile, out_info.m_uiSampleRate);
+
+    plAudioClipPlatformInfo& platform = out_info.m_Platforms.ExpandAndGetRef();
+    platform.m_sProfile = pProfile->GetConfigName();
+    platform.m_eLoadMode = settings.m_eLoadMode;
+    platform.m_eCodec = settings.m_eCodec;
+    platform.m_uiSampleRate = settings.m_uiTargetSampleRate;
+    platform.m_uiOpusKbps = settings.m_uiOpusBitrateKbps;
+  }
+
+  for (const plAudioClipLanguageVariant& variant : props.m_Languages)
+  {
+    plAudioClipLanguageInfo& language = out_info.m_Languages.ExpandAndGetRef();
+    language.m_sLanguage = variant.m_sLanguage;
+    language.m_fDuration = out_info.m_fDuration;
+
+    plStringBuilder sVariantPath = variant.m_sFile;
+    plAudioClipAssetMetaInfo variantInfo;
+    if (!sVariantPath.IsEmpty() && plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sVariantPath) && ReadSourceInfo(sVariantPath, variantInfo).Succeeded())
+    {
+      language.m_fDuration = variantInfo.m_fDuration;
+    }
+  }
+}
+
+plResult plAudioClipAssetUtils::ReadProperties(plStringView sDocumentPath, plAudioClipAssetProperties& out_props)
+{
+  plOSFile file;
+  PL_SUCCEED_OR_RETURN(file.Open(sDocumentPath, plFileOpenMode::Read));
+
+  plDynamicArray<plUInt8> content;
+  file.ReadAll(content);
+  file.Close();
+
+  plRawMemoryStreamReader reader(content.GetData(), content.GetCount());
+
+  plUniquePtr<plAbstractObjectGraph> pHeader, pObjects, pTypes;
+  PL_SUCCEED_OR_RETURN(plAbstractGraphDdlSerializer::ReadDocument(reader, pHeader, pObjects, pTypes, true));
+
+  const plRTTI* pType = plGetStaticRTTI<plAudioClipAssetProperties>();
+  for (auto it = pObjects->GetAllNodes().GetIterator(); it.IsValid(); ++it)
+  {
+    if (it.Value()->GetType() != pType->GetTypeName())
+      continue;
+
+    plRttiConverterContext context;
+    plRttiConverterReader converter(pObjects.Borrow(), &context);
+    converter.ApplyPropertiesToObject(it.Value(), pType, &out_props);
+    return PL_SUCCESS;
+  }
+
+  return PL_FAILURE;
+}
+
+plAudioClipMemoryEstimate plAudioClipAssetUtils::EstimateMemory(const plAudioClipAssetMetaInfo& info, plStringView sProfile, plStringView sLanguage)
+{
+  plAudioClipMemoryEstimate estimate;
+
+  // the profile's settings; a profile added after the clip was saved gets the first profile's, a clip saved before
+  // they were published the default settings
+  plAudioClipPlatformInfo platform;
+  platform.m_eLoadMode = plAudioClipLoadMode::Default;
+  platform.m_eCodec = plAudioClipCodec::Default;
+  estimate.m_bAssumedSettings = info.m_Platforms.IsEmpty();
+
+  if (!info.m_Platforms.IsEmpty())
+    platform = info.m_Platforms[0];
+
+  for (const plAudioClipPlatformInfo& candidate : info.m_Platforms)
+  {
+    if (candidate.m_sProfile.IsEqual_NoCase(sProfile))
+      platform = candidate;
+  }
+
+  // the builder pads every language to the longest one
+  double fDuration = info.m_fDuration;
+  estimate.m_bLocalized = !info.m_Languages.IsEmpty();
+  estimate.m_bHasLanguage = sLanguage.IsEmpty() || !estimate.m_bLocalized;
+
+  for (const plAudioClipLanguageInfo& language : info.m_Languages)
+  {
+    fDuration = plMath::Max(fDuration, language.m_fDuration);
+    if (language.m_sLanguage.IsEqual_NoCase(sLanguage))
+      estimate.m_bHasLanguage = true;
+  }
+
+  const plAudioClipCodec::Enum codec = platform.m_eCodec;
+  plUInt64 uiChannels = info.m_bForceMono ? 1 : plMath::Max<plUInt64>(info.m_uiChannels, 1);
+  plUInt64 uiRate = platform.m_uiSampleRate != 0 ? platform.m_uiSampleRate : info.m_uiSampleRate;
+
+  if (codec == plAudioClipCodec::Opus)
+  {
+    uiRate = 48000;
+    uiChannels = plMath::Min<plUInt64>(uiChannels, 2);
+  }
+
+  const plUInt64 uiFrames = static_cast<plUInt64>(plMath::Ceil(fDuration * uiRate));
+  const plUInt64 uiPcmBytes = uiFrames * uiChannels * sizeof(plInt16);
+
+  plUInt64 uiPayloadBytes = uiPcmBytes;
+  if (codec == plAudioClipCodec::ImaAdpcm)
+  {
+    uiPayloadBytes = (uiFrames + plImaAdpcmCodec::FramesPerBlock - 1) / plImaAdpcmCodec::FramesPerBlock * plImaAdpcmCodec::GetBlockBytes(static_cast<plUInt32>(uiChannels));
+  }
+  else if (codec == plAudioClipCodec::Opus)
+  {
+    // the bitrate, plus the length prefix of every 20 ms packet
+    const plUInt64 uiPackets = static_cast<plUInt64>(plMath::Ceil(fDuration * 50.0));
+    uiPayloadBytes = static_cast<plUInt64>(fDuration * platform.m_uiOpusKbps * 125.0) + uiPackets * 2;
+  }
+
+  estimate.m_eLoadMode = platform.m_eLoadMode;
+  switch (platform.m_eLoadMode)
+  {
+    case plAudioClipLoadMode::DecompressOnLoad:
+      estimate.m_uiResidentBytes = uiPcmBytes;
+      break;
+    case plAudioClipLoadMode::CompressedInMemory:
+      estimate.m_uiResidentBytes = uiPayloadBytes;
+      break;
+    case plAudioClipLoadMode::Streamed:
+      estimate.m_uiResidentBytes = plMath::Min<plUInt64>(plAudioClipConstants::PrimingBytes, uiPayloadBytes) * (info.m_bHasLoop ? 2 : 1);
+      break;
+  }
+
+  return estimate;
+}
+
+plAudioClipMemoryEstimate plAudioClipAssetUtils::EstimateMemory(const plAudioClipHeader& header, plStringView sLanguage)
+{
+  plAudioClipMemoryEstimate estimate;
+  estimate.m_eLoadMode = header.m_eLoadMode;
+  estimate.m_bLocalized = header.m_Languages.GetCount() > 1;
+  estimate.m_bHasLanguage = sLanguage.IsEmpty() || !estimate.m_bLocalized;
+
+  if (header.m_Languages.IsEmpty())
+    return estimate;
+
+  const plAudioClipLanguageEntry* pLanguage = &header.m_Languages[0];
+  for (const plAudioClipLanguageEntry& language : header.m_Languages)
+  {
+    if (!sLanguage.IsEmpty() && language.m_sLanguage.IsEqual_NoCase(sLanguage))
+    {
+      pLanguage = &language;
+      estimate.m_bHasLanguage = true;
+    }
+  }
+
+  switch (header.m_eLoadMode)
+  {
+    case plAudioClipLoadMode::DecompressOnLoad:
+      // every language is padded to the longest one
+      estimate.m_uiResidentBytes = header.m_uiFrames * header.m_uiChannels * sizeof(plInt16);
+      break;
+    case plAudioClipLoadMode::CompressedInMemory:
+      estimate.m_uiResidentBytes = pLanguage->m_uiPayloadBytes;
+      break;
+    case plAudioClipLoadMode::Streamed:
+      estimate.m_uiResidentBytes = static_cast<plUInt64>(pLanguage->m_uiPrimingBytes) + pLanguage->m_uiLoopPrimingBytes;
+      break;
+  }
+
+  return estimate;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -517,22 +741,7 @@ void plAudioClipAssetDocument::UpdateAssetDocumentInfo(plAssetDocumentInfo* pInf
   }
 
   plAudioClipAssetMetaInfo* pMeta = PL_DEFAULT_NEW(plAudioClipAssetMetaInfo);
-
-  plStringBuilder sAbsPath = pProp->m_sSourceFile;
-  if (!sAbsPath.IsEmpty() && plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
-  {
-    plAudioClipAssetUtils::ReadSourceInfo(sAbsPath, *pMeta).IgnoreResult();
-  }
-
-  pMeta->m_sSourceFile = pProp->m_sSourceFile;
-
-  if (pProp->m_bOverrideLoop)
-  {
-    pMeta->m_bHasLoop = true;
-    pMeta->m_fLoopStart = plMath::Max(pProp->m_fLoopStart, 0.0f);
-    pMeta->m_fLoopEnd = pProp->m_fLoopEnd > pProp->m_fLoopStart ? static_cast<double>(pProp->m_fLoopEnd) : pMeta->m_fDuration;
-  }
-
+  plAudioClipAssetUtils::MakeMetaInfo(*pProp, *pMeta);
   pInfo->m_MetaInfo.PushBack(pMeta);
 }
 

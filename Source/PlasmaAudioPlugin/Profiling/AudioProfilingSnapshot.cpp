@@ -76,6 +76,8 @@ const char* plAudioLogEventType::GetName(Enum type)
       return "event wait";
     case EventDropped:
       return "event dropped";
+    case BudgetExceeded:
+      return "over budget";
     default:
       return "?";
   }
@@ -92,6 +94,7 @@ bool plAudioLogEventType::IsWarning(Enum type)
     case Killed:
     case LimitRejected:
     case EventDropped:
+    case BudgetExceeded:
       return true;
     default:
       return false;

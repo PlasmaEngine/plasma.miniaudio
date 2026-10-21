@@ -10,6 +10,7 @@
 #include <Foundation/Threading/Lock.h>
 #include <Foundation/Threading/Mutex.h>
 #include <Foundation/Utilities/AssetFileHeader.h>
+#include <PlasmaAudioPlugin/Banks/AudioPackedContent.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipDesc.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResourceLoader.h>
 
@@ -110,15 +111,23 @@ plResourceLoadData plAudioClipResourceLoader::OpenDataStream(const plResource* p
 
   plResourceLoadData res;
 
+  // a loaded packed bank that carries the clip has it at an offset of the bank file
+  plAudioPackedContent::Location packed;
+  const bool bPacked = plAudioPackedContent::Find(pResource->GetResourceID(), packed);
+  const plStringView sFile = bPacked ? packed.m_sFile.GetView() : pResource->GetResourceID().GetView();
+
   plFileReader file;
-  if (file.Open(pResource->GetResourceID().GetData()).Failed())
+  if (file.Open(sFile).Failed())
+    return res;
+
+  if (bPacked && file.SkipBytes(packed.m_uiOffset) != packed.m_uiOffset)
     return res;
 
   res.m_sResourceDescription = file.GetFilePathRelative().GetData();
 
 #if PL_ENABLED(PL_SUPPORTS_FILE_STATS)
   plFileStats stat;
-  if (plFileSystem::GetFileStats(pResource->GetResourceID(), stat).Succeeded())
+  if (plFileSystem::GetFileStats(sFile, stat).Succeeded())
   {
     res.m_LoadedFileModificationDate = stat.m_LastModificationTime;
   }
@@ -142,6 +151,13 @@ plResourceLoadData plAudioClipResourceLoader::OpenDataStream(const plResource* p
       plLog::Error("Invalid audio clip header in '{}'", file.GetFilePathRelative().GetView());
       return res;
     }
+  }
+
+  // the stream service reads a streamed payload from the clip's own file; banks do not pack streamed clips
+  if (bPacked && header.m_eLoadMode == plAudioClipLoadMode::Streamed)
+  {
+    plLog::Error("The streamed audio clip '{}' cannot be read from the packed bank '{}'", pResource->GetResourceID(), packed.m_sFile);
+    return res;
   }
 
   plString sRequestedLanguage;

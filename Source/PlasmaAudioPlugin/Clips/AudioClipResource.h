@@ -7,6 +7,7 @@
 #include <Foundation/Strings/String.h>
 #include <Foundation/Threading/AtomicInteger.h>
 #include <Foundation/Threading/Mutex.h>
+#include <PlasmaAudioPlugin/Banks/AudioBankResource.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipDesc.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
 
@@ -107,6 +108,13 @@ public:
 
   /// \brief Replaces out_clipIds with the resource ids of the loaded clips that have more than one language. Any thread.
   static void GatherLoadedLocalizedClips(plDynamicArray<plString>& out_clipIds);
+
+  /// \brief Heap bytes of this clip's sample data (decoded PCM, payload, priming data); 0 until it is loaded.
+  plUInt64 GetResidentBytes() const { return m_uiResidentBytes; }
+
+  /// \brief Sets the decoded, compressed and priming bytes of out_usage from all loaded clips, by load mode. Leaves the
+  /// ring bytes as they are. Any thread.
+  static void GatherMemoryUsage(plAudioMemoryUsage& out_usage);
 
 private:
   /// Replaces this resource's share of s_iResidentBytes with the current size of its sample arrays and adds the clip to

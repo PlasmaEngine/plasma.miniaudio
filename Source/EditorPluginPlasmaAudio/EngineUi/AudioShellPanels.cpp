@@ -4,6 +4,7 @@
 #include <EditorFramework/EngineShell/DocumentFrame.h>
 #include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationAsset.h>
 #include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationView.h>
+#include <EditorPluginPlasmaAudio/BankAsset/AudioBankAsset.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipWaveformView.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
@@ -163,7 +164,8 @@ void plEditorUiAudioShellStack::PlaceParts()
 bool plAudioShellPanels::Matches(const plDocument* pDocument) const
 {
   return plDynamicCast<const plAudioClipAssetDocument*>(pDocument) != nullptr || plDynamicCast<const plAudioEventAssetDocument*>(pDocument) != nullptr ||
-         plDynamicCast<const plAudioMixerAssetDocument*>(pDocument) != nullptr || plDynamicCast<const plAudioAttenuationAssetDocument*>(pDocument) != nullptr;
+         plDynamicCast<const plAudioMixerAssetDocument*>(pDocument) != nullptr || plDynamicCast<const plAudioAttenuationAssetDocument*>(pDocument) != nullptr ||
+         plDynamicCast<const plAudioBankAssetDocument*>(pDocument) != nullptr;
 }
 
 void plAudioShellPanels::CreatePanels(plEditorUiDocumentFrame& ref_frame) const
@@ -177,6 +179,8 @@ void plAudioShellPanels::CreatePanels(plEditorUiDocumentFrame& ref_frame) const
     CreateMixerPanels(ref_frame);
   else if (plDynamicCast<plAudioAttenuationAssetDocument*>(pDocument) != nullptr)
     CreateAttenuationPanels(ref_frame);
+  else if (plDynamicCast<plAudioBankAssetDocument*>(pDocument) != nullptr)
+    CreateBankPanels(ref_frame);
 }
 
 void plAudioShellPanels::Register()
@@ -326,4 +330,17 @@ void plAudioShellPanels::CreateAttenuationPanels(plEditorUiDocumentFrame& ref_fr
   pMain->SetSeparators(true);
   pMain->AddLentPart(ref_frame, pWindow, "AudioAttenuationCurve", 0.0f, 3.0f);
   pMain->AddOwnedPart(PL_DEFAULT_NEW(plEditorUiAssetProperties, pDocument, pWindow), 0.0f, 2.0f);
+}
+
+void plAudioShellPanels::CreateBankPanels(plEditorUiDocumentFrame& ref_frame)
+{
+  QWidget* pWindow = ref_frame.GetContextWindow();
+  plAssetDocument* pDocument = static_cast<plAssetDocument*>(ref_frame.GetDocument());
+
+  // Audio Banks: the dashboard; Bank Properties on the right
+  if (plQtEngineUiContentWidget* pDashboard = FindView(pWindow, "AudioBankDashboard"))
+    ref_frame.AddLentContent({"AudioBankDashboardDockWidget", "Audio Banks"}, *pDashboard);
+
+  ref_frame.AddContent({"AudioBankAssetDockWidget", "Bank Properties"}, PL_DEFAULT_NEW(plEditorUiAssetProperties, pDocument, pWindow));
+  ref_frame.GetPanels().DockPanel("AudioBankAssetDockWidget", "AudioBankDashboardDockWidget", plEditorUiDockSide::Right, 0.22f);
 }

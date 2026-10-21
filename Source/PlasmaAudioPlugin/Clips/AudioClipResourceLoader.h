@@ -7,6 +7,8 @@
 
 /// \brief Loads the language section of a .plBinAudioClip that the resource needs, instead of the whole file.
 ///
+/// The clip is read from its own file, or from a loaded packed bank that carries it (plAudioPackedContent).
+///
 /// Reads the asset header and the clip header, picks the section of GetLanguage() (the default language when the
 /// clip has no such section), skips the other sections and reads the priming data and, unless the clip is
 /// streamed, the payload. The stream handed to plAudioClipResource::UpdateContent is:

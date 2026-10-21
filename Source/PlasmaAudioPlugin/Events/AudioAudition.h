@@ -6,6 +6,7 @@
 #include <Foundation/Threading/Mutex.h>
 #include <Foundation/Time/Time.h>
 #include <Foundation/Types/UniquePtr.h>
+#include <PlasmaAudioPlugin/Banks/AudioBankResource.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
 
 class plMiniAudioBusGraph;
@@ -75,13 +76,33 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioMixerMonitorStatus
   plDynamicArray<float> m_SnapshotIntensities;
 };
 
+/// \brief A bank loaded through the middleware, for the editor's bank window.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioBankMonitorEntry
+{
+  plString m_sBank;            ///< resource id
+  plUInt8 m_uiState = 0;       ///< plAudioBankMemorySnapshotEntry::State
+  plUInt32 m_uiReadyItems = 0; ///< events and clips that finished loading
+  plUInt32 m_uiItems = 0;      ///< events and clips of the bank, 0 until its content list is loaded
+  bool m_bOverBudget = false;  ///< loading it took the content over a category budget
+};
+
+/// \brief The loaded banks and the memory of the loaded audio content, for the editor's bank window.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioBankMonitorStatus
+{
+  plDynamicArray<plAudioBankMonitorEntry> m_Banks;
+  plAudioMemoryUsage m_Usage;
+  plAudioMemoryBudget m_Budget; ///< of the last loaded bank that has one
+  plUInt32 m_uiRefreshCount = 0;
+};
+
 /// \brief Plays events for the editor's audition through the real event manager and mixer.
 ///
 /// Each audition is addressed by a key (the editor document) and plays on its own global entity, so the event is not
 /// panned; with a distance (plAudioAuditionRequest::m_fDistance) it is attenuated as if that far away. The requests are queued and carried out by the next audio update; GetStatus reports what the last
 /// update saw. Any thread.
 ///
-/// While at least one mixer console watches (SetMixerMonitor), every update also refreshes the mixer monitor status.
+/// While at least one mixer console watches (SetMixerMonitor), every update also refreshes the mixer monitor status;
+/// while a bank window watches (SetBankMonitor), the middleware refreshes the bank monitor status.
 class PL_PLASMAAUDIOPLUGIN_DLL plAudioAudition
 {
   PL_DISALLOW_COPY_AND_ASSIGN(plAudioAudition);
@@ -117,6 +138,12 @@ public:
   /// \brief Plays the test signal into the loaded mixer (see plMiniAudioBusGraph::SetTestSignal).
   void SetTestSignal(bool bEnable);
 
+  /// \brief Starts or stops one watcher of the bank monitor; the middleware refreshes it while there is any.
+  void SetBankMonitor(bool bWatch);
+
+  /// \brief The bank monitor status of the last audio update.
+  void GetBankMonitor(plAudioBankMonitorStatus& out_status) const;
+
 private:
   friend class plPlasmaAudioMiddleware;
 
@@ -134,6 +161,12 @@ private:
   /// \brief Refreshes m_MixerMonitor from the graph and the engine's mixer service. Audio thread, under m_Mutex.
   void UpdateMixerMonitor(const plMiniAudioBusGraph& busGraph, const plPlasmaAudioEventManager& events);
 
+  /// \brief Whether anything watches the bank monitor. Any thread.
+  bool IsBankMonitorWatched() const;
+
+  /// \brief Replaces the bank monitor status. Audio thread.
+  void SetBankMonitorStatus(plAudioBankMonitorStatus&& status);
+
   static plAudioAudition* s_pSingleton;
 
   mutable plMutex m_Mutex;
@@ -141,6 +174,8 @@ private:
   plHashTable<plUInt64, plAudioAuditionStatus> m_Status;
   plUInt32 m_uiMixerMonitors = 0;
   plAudioMixerMonitorStatus m_MixerMonitor;
+  plUInt32 m_uiBankMonitors = 0;
+  plAudioBankMonitorStatus m_BankMonitor;
   plInt8 m_iTestSignalRequest = -1; ///< -1 = unchanged, else the requested state
 
   // audio thread only

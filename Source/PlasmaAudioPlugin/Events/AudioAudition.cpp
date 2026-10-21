@@ -137,6 +137,39 @@ void plAudioAudition::SetTestSignal(bool bEnable)
   m_iTestSignalRequest = bEnable ? 1 : 0;
 }
 
+void plAudioAudition::SetBankMonitor(bool bWatch)
+{
+  PL_LOCK(m_Mutex);
+
+  if (bWatch)
+  {
+    ++m_uiBankMonitors;
+  }
+  else if (m_uiBankMonitors > 0)
+  {
+    --m_uiBankMonitors;
+  }
+}
+
+void plAudioAudition::GetBankMonitor(plAudioBankMonitorStatus& out_status) const
+{
+  PL_LOCK(m_Mutex);
+  out_status = m_BankMonitor;
+}
+
+bool plAudioAudition::IsBankMonitorWatched() const
+{
+  PL_LOCK(m_Mutex);
+  return m_uiBankMonitors > 0;
+}
+
+void plAudioAudition::SetBankMonitorStatus(plAudioBankMonitorStatus&& status)
+{
+  PL_LOCK(m_Mutex);
+  status.m_uiRefreshCount = m_BankMonitor.m_uiRefreshCount + 1;
+  m_BankMonitor = std::move(status);
+}
+
 void plAudioAudition::UpdateMixerMonitor(const plMiniAudioBusGraph& busGraph, const plPlasmaAudioEventManager& events)
 {
   plAudioMixerMonitorStatus& status = m_MixerMonitor;

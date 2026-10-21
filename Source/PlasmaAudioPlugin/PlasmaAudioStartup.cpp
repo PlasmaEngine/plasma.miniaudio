@@ -5,13 +5,17 @@
 #include <Core/ResourceManager/ResourceManager.h>
 #include <Foundation/Configuration/Startup.h>
 #include <PlasmaAudioPlugin/Banks/AudioBankResource.h>
+#include <PlasmaAudioPlugin/Banks/AudioPackedContent.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResourceLoader.h>
+#include <PlasmaAudioPlugin/Events/AudioEventResource.h>
 #include <PlasmaAudioPlugin/MiniAudioMiddleware.h>
 #include <PlasmaAudioPlugin/MiniAudioSingleton.h>
 
 static plPlasmaAudioMiddleware* s_pMiniAudioMiddleware = nullptr;
 static plAudioClipResourceLoader s_AudioClipResourceLoader;
+static plAudioEventResourceLoader s_AudioEventResourceLoader;
+static plAudioBankResourceLoader s_AudioBankResourceLoader;
 
 /// The game application the profiling stats are published from; null in processes without one (the editor).
 static plGameApplicationBase* s_pProfilingApplication = nullptr;
@@ -39,6 +43,8 @@ END_SUBSYSTEM_DEPENDENCIES
 ON_CORESYSTEMS_STARTUP
 {
   plResourceManager::SetResourceTypeLoader<plAudioClipResource>(&s_AudioClipResourceLoader);
+  plResourceManager::SetResourceTypeLoader<plAudioEventResource>(&s_AudioEventResourceLoader);
+  plResourceManager::SetResourceTypeLoader<plAudioBankResource>(&s_AudioBankResourceLoader);
   plResourceManager::RegisterResourceForAssetType("Audio Clip", plGetStaticRTTI<plAudioClipResource>());
   plResourceManager::RegisterResourceForAssetType("Audio Bank", plGetStaticRTTI<plAudioBankResource>());
 }
@@ -46,6 +52,8 @@ ON_CORESYSTEMS_STARTUP
 ON_CORESYSTEMS_SHUTDOWN
 {
   plResourceManager::SetResourceTypeLoader<plAudioClipResource>(nullptr);
+  plResourceManager::SetResourceTypeLoader<plAudioEventResource>(nullptr);
+  plResourceManager::SetResourceTypeLoader<plAudioBankResource>(nullptr);
 }
 
 ON_HIGHLEVELSYSTEMS_STARTUP

@@ -8,6 +8,7 @@
 #include <Foundation/Profiling/Profiling.h>
 #include <Foundation/Types/ScopeExit.h>
 #include <Foundation/Utilities/Stats.h>
+#include <PlasmaAudioPlugin/Banks/AudioPackedContent.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResourceLoader.h>
 #include <PlasmaAudioPlugin/MiniAudioAtlData.h>
 #include <PlasmaAudioPlugin/MiniAudioMiddleware.h>
@@ -124,6 +125,7 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
     RetryLanguageReloads();
   }
   UpdatePendingBanks();
+  UpdateBankReadiness();
 
   if (m_pBackend != nullptr)
   {
@@ -354,6 +356,11 @@ plResult plPlasmaAudioMiddleware::Shutdown()
   {
     m_pLanguageCVar->m_CVarEvents.RemoveEventHandler(m_LanguageCVarSubscription);
     m_pLanguageCVar = nullptr;
+  }
+
+  for (auto it = m_Banks.GetIterator(); it.IsValid(); ++it)
+  {
+    plAudioPackedContent::Unregister(it.Key());
   }
 
   m_Banks.Clear();
@@ -813,7 +820,7 @@ plResult plPlasmaAudioMiddleware::LoadBank(plAudioSystemBankData* pBankData)
   bank.m_hBank = plResourceManager::LoadResource<plAudioBankResource>(sBankName);
   plResourceManager::PreloadResource(bank.m_hBank);
 
-  if (!RequestBankContent(bank))
+  if (!RequestBankContent(uiBankId, bank))
   {
     m_PendingBanks.PushBack(uiBankId);
   }
@@ -834,13 +841,15 @@ plResult plPlasmaAudioMiddleware::UnloadBank(plAudioSystemBankData* pBankData)
     m_EventManager.GetEventLog().Add(plAudioLogEventType::BankUnloaded, pBank->m_hBank.GetResourceID());
   }
 
-  // releasing the handles lets the resources be freed once nothing else uses them
+  // releasing the handles lets the resources be freed once nothing else uses them; resources loaded from the bank
+  // file stay loaded and are read from their own files when they load again
   m_Banks.Remove(uiBankId);
   m_PendingBanks.RemoveAndSwap(uiBankId);
+  plAudioPackedContent::Unregister(uiBankId);
   return PL_SUCCESS;
 }
 
-bool plPlasmaAudioMiddleware::RequestBankContent(LoadedBank& ref_bank)
+bool plPlasmaAudioMiddleware::RequestBankContent(plAudioSystemDataID uiBankId, LoadedBank& ref_bank)
 {
   if (ref_bank.m_bContentRequested)
     return true;
@@ -860,6 +869,12 @@ bool plPlasmaAudioMiddleware::RequestBankContent(LoadedBank& ref_bank)
     return false;
 
   const plAudioBankDesc& desc = pBank->GetDescriptor();
+
+  // the loaders read what the bank packs from the bank file; the bank's budget is that of its platform
+  plAudioPackedContent::Register(uiBankId, *pBank.GetPointer());
+
+  if (desc.m_Budget.IsSet())
+    m_MemoryBudget = desc.m_Budget;
 
   ref_bank.m_Events.Reserve(desc.m_Events.GetCount());
   for (const plString& sEvent : desc.m_Events)
@@ -886,6 +901,9 @@ bool plPlasmaAudioMiddleware::RequestBankContent(LoadedBank& ref_bank)
   {
     plStringBuilder sDetail;
     sDetail.SetFormat("{} events, {} clips", ref_bank.m_Events.GetCount(), ref_bank.m_Clips.GetCount());
+    if (!desc.m_Packed.IsEmpty())
+      sDetail.AppendFormat(", {} packed", desc.m_Packed.GetCount());
+
     m_EventManager.GetEventLog().Add(plAudioLogEventType::BankLoaded, ref_bank.m_hBank.GetResourceID(), sDetail);
   }
 
@@ -897,12 +915,90 @@ void plPlasmaAudioMiddleware::UpdatePendingBanks()
 {
   for (plUInt32 i = m_PendingBanks.GetCount(); i > 0; --i)
   {
+    const plAudioSystemDataID uiBankId = m_PendingBanks[i - 1];
+
     LoadedBank* pBank = nullptr;
-    if (!m_Banks.TryGetValue(m_PendingBanks[i - 1], pBank) || RequestBankContent(*pBank))
+    if (!m_Banks.TryGetValue(uiBankId, pBank) || RequestBankContent(uiBankId, *pBank))
     {
       m_PendingBanks.RemoveAtAndSwap(i - 1);
     }
   }
+}
+
+void plPlasmaAudioMiddleware::UpdateBankReadiness()
+{
+  for (auto it = m_Banks.GetIterator(); it.IsValid(); ++it)
+  {
+    LoadedBank& bank = it.Value();
+    if (bank.m_bReady || !bank.m_bContentRequested || !IsBankContentLoaded(bank))
+      continue;
+
+    bank.m_bReady = true;
+    CheckMemoryBudget(bank);
+  }
+
+  // the editor's bank window, ten times a second
+  if (!m_Audition.IsBankMonitorWatched())
+    return;
+
+  const plTime tNow = plTime::Now();
+  if (tNow - m_LastBankMonitorRefresh < plTime::MakeFromMilliseconds(100))
+    return;
+
+  m_LastBankMonitorRefresh = tNow;
+
+  plAudioBankMonitorStatus status;
+  status.m_Usage = GetMemoryUsage();
+  status.m_Budget = m_MemoryBudget;
+
+  for (auto it = m_Banks.GetIterator(); it.IsValid(); ++it)
+  {
+    const LoadedBank& bank = it.Value();
+
+    plAudioBankMonitorEntry& entry = status.m_Banks.ExpandAndGetRef();
+    entry.m_sBank = bank.m_hBank.GetResourceID();
+    entry.m_uiItems = bank.m_Events.GetCount() + bank.m_Clips.GetCount();
+    entry.m_uiReadyItems = bank.m_bReady ? entry.m_uiItems : CountReadyItems(bank);
+    entry.m_bOverBudget = bank.m_bOverBudget;
+    entry.m_uiState = plAudioBankMemorySnapshotEntry::Loading;
+
+    if (bank.m_bContentRequested)
+    {
+      plResourceLock<plAudioBankResource> pBank(bank.m_hBank, plResourceAcquireMode::PointerOnly);
+      entry.m_uiState = pBank->GetLoadingState() == plResourceState::LoadedResourceMissing ? plAudioBankMemorySnapshotEntry::Missing : plAudioBankMemorySnapshotEntry::Loaded;
+    }
+  }
+
+  m_Audition.SetBankMonitorStatus(std::move(status));
+}
+
+void plPlasmaAudioMiddleware::CheckMemoryBudget(LoadedBank& ref_bank)
+{
+  if (!m_MemoryBudget.IsSet())
+    return;
+
+  plStringBuilder sExcess;
+  GetMemoryUsage().DescribeExcess(m_MemoryBudget, sExcess);
+  if (sExcess.IsEmpty())
+    return;
+
+  ref_bank.m_bOverBudget = true;
+  plLog::Warning("PlasmaAudio: with the audio bank '{}' loaded, the audio content is over its memory budget: {}", ref_bank.m_hBank.GetResourceID(), sExcess);
+  m_EventManager.GetEventLog().Add(plAudioLogEventType::BudgetExceeded, ref_bank.m_hBank.GetResourceID(), sExcess);
+}
+
+plAudioMemoryUsage plPlasmaAudioMiddleware::GetMemoryUsage() const
+{
+  plAudioMemoryUsage usage;
+  plAudioClipResource::GatherMemoryUsage(usage);
+  usage.m_uiRingBytes = m_StreamService.GetRingBytesInUse();
+  return usage;
+}
+
+bool plPlasmaAudioMiddleware::IsBankOverBudget(plAudioSystemDataID uiBankId) const
+{
+  const LoadedBank* pBank = nullptr;
+  return m_Banks.TryGetValue(uiBankId, pBank) && pBank->m_bOverBudget;
 }
 
 bool plPlasmaAudioMiddleware::IsBankContentRequested(plAudioSystemDataID uiBankId) const
@@ -917,15 +1013,18 @@ bool plPlasmaAudioMiddleware::IsBankReady(plAudioSystemDataID uiBankId) const
   return m_Banks.TryGetValue(uiBankId, pBank) && pBank->m_bContentRequested && IsBankContentLoaded(*pBank);
 }
 
-bool plPlasmaAudioMiddleware::IsBankContentLoaded(const LoadedBank& bank)
+namespace
 {
-  // a missing resource counts as finished: it will not become playable by waiting
-  auto IsFinished = [](const plResource* pResource)
+  /// A missing resource counts as finished: it will not become playable by waiting.
+  bool IsFinished(const plResource* pResource)
   {
     const plResourceState state = pResource->GetLoadingState();
     return state == plResourceState::Loaded || state == plResourceState::LoadedResourceMissing;
-  };
+  }
+} // namespace
 
+bool plPlasmaAudioMiddleware::IsBankContentLoaded(const LoadedBank& bank)
+{
   for (const plAudioEventResourceHandle& hEvent : bank.m_Events)
   {
     plResourceLock<plAudioEventResource> pEvent(hEvent, plResourceAcquireMode::PointerOnly);
@@ -941,6 +1040,25 @@ bool plPlasmaAudioMiddleware::IsBankContentLoaded(const LoadedBank& bank)
   }
 
   return true;
+}
+
+plUInt32 plPlasmaAudioMiddleware::CountReadyItems(const LoadedBank& bank)
+{
+  plUInt32 uiReady = 0;
+
+  for (const plAudioEventResourceHandle& hEvent : bank.m_Events)
+  {
+    plResourceLock<plAudioEventResource> pEvent(hEvent, plResourceAcquireMode::PointerOnly);
+    uiReady += IsFinished(pEvent.GetPointer()) ? 1 : 0;
+  }
+
+  for (const plAudioClipResourceHandle& hClip : bank.m_Clips)
+  {
+    plResourceLock<plAudioClipResource> pClip(hClip, plResourceAcquireMode::PointerOnly);
+    uiReady += IsFinished(pClip.GetPointer()) ? 1 : 0;
+  }
+
+  return uiReady;
 }
 
 plAudioSystemEntityData* plPlasmaAudioMiddleware::CreateWorldEntity(plAudioSystemDataID uiEntityId)

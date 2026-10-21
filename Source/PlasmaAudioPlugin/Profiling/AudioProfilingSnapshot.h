@@ -113,6 +113,7 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioLogEventType
     LimitRejected,    ///< a start was dropped because the event's max instances were playing and it does not steal
     EventLoadWait,    ///< a start waits for its event to finish loading
     EventDropped,     ///< a waiting start was dropped: the event is missing, or a one-shot did not load in time
+    BudgetExceeded,   ///< a bank finished loading with the loaded content over a memory budget
     Count
   };
 
