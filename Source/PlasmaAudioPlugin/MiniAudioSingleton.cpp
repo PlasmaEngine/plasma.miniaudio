@@ -1,8 +1,13 @@
 #include <PlasmaAudioPlugin/PlasmaAudioPluginPCH.h>
 
+#include <Core/GameApplication/GameApplicationBase.h>
 #include <Foundation/Configuration/CVar.h>
+#include <Foundation/IO/ChunkStream.h>
+#include <Foundation/IO/FileSystem/FileReader.h>
 #include <Foundation/IO/FileSystem/FileSystem.h>
 #include <PlasmaAudioPlugin/MiniAudioSingleton.h>
+#include <PlasmaAudioPlugin/Platform/AudioBackends.h>
+#include <PlasmaAudioPlugin/Platform/AudioPlatformConfig.h>
 
 #if PL_ENABLED(PL_PLATFORM_WINDOWS)
 #  include <Foundation/Basics/Platform/Win/IncludeWindows.h>
@@ -14,6 +19,18 @@ plCVarFloat cvar_MiniAudioMasterVolume("PlasmaAudio.Volume", 1.0f, plCVarFlags::
 plCVarBool cvar_MiniAudioMute("PlasmaAudio.Mute", false, plCVarFlags::Default, "Whether PlasmaAudio output is muted");
 plCVarBool cvar_MiniAudioPause("PlasmaAudio.Pause", false, plCVarFlags::Default, "Whether PlasmaAudio output is paused");
 plCVarString cvar_PlasmaAudioOutputDevice("PlasmaAudio.OutputDevice", "", plCVarFlags::Save, "Playback device name; empty = system default");
+
+// output settings: set from the platform profile's plPlasmaAudioPlatformConfig at startup, changeable while running
+plCVarString cvar_PlasmaAudioBackend("PlasmaAudio.Backend", "", plCVarFlags::Default, "Output backend by name (see plAudioBackendRegistry); empty = the platform's usual order");
+plCVarInt cvar_PlasmaAudioSpeakers("PlasmaAudio.Speakers", 0, plCVarFlags::Default, "Speaker layout: 0 = device, 1 = stereo, 2 = 5.1, 3 = 7.1");
+plCVarInt cvar_PlasmaAudioSampleRate("PlasmaAudio.SampleRate", 0, plCVarFlags::Default, "Output sample rate in Hz; 0 = the device's");
+plCVarInt cvar_PlasmaAudioPeriodMs("PlasmaAudio.PeriodMs", 0, plCVarFlags::Default, "Output update period in milliseconds; 0 = the backend's default");
+plCVarBool cvar_PlasmaAudioFollowDefaultDevice("PlasmaAudio.FollowDefaultDevice", true, plCVarFlags::Default, "Whether the output moves to the new default device when the system default changes");
+
+// suspend: the platform layer (or the editor's Audio Platforms page) sets PlasmaAudio.Suspend while the app is suspended
+plCVarBool cvar_PlasmaAudioSuspend("PlasmaAudio.Suspend", false, plCVarFlags::Default, "Whether the application is suspended; the output follows PlasmaAudio.SuspendPolicy");
+plCVarInt cvar_PlasmaAudioSuspendPolicy("PlasmaAudio.SuspendPolicy", 0, plCVarFlags::Default, "While suspended: 0 = pause and resume where it was, 1 = keep playing, 2 = stop everything");
+plCVarFloat cvar_PlasmaAudioSuspendFadeMs("PlasmaAudio.SuspendFadeMs", 80.0f, plCVarFlags::Default, "Fade out before a suspend and in after the resume, in milliseconds");
 
 PL_IMPLEMENT_SINGLETON(plMiniAudioSingleton);
 
@@ -152,28 +169,22 @@ void plMiniAudioSingleton::Startup()
 
   PL_LOCK(m_pData->m_Mutex);
 
-  EnsureComOnThread();
+  ApplyPlatformConfig();
 
-  ma_context_config contextConfig = ma_context_config_init();
-  contextConfig.allocationCallbacks = m_pData->m_AllocationCallbacks;
-
-  if (ma_context_init(nullptr, 0, &contextConfig, &m_pData->m_Context) != MA_SUCCESS)
-  {
-    plLog::Error("PlasmaAudio: failed to initialize the audio context.");
+  if (InitContext().Failed())
     return;
-  }
-  m_bContextInitialized = true;
-
-#if PL_ENABLED(PL_PLATFORM_WINDOWS)
-  // the context's own reference was taken with the original function and is released only when it succeeded
-  m_pData->m_Context.win32.CoInitializeEx = reinterpret_cast<ma_proc>(&MaCoInitializeEx);
-#endif
 
   {
     PL_LOCK(m_pData->m_OutputDeviceMutex);
     m_pData->m_sRequestedOutputDevice = cvar_PlasmaAudioOutputDevice.GetValue();
   }
   cvar_PlasmaAudioOutputDevice.m_CVarEvents.AddEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputDeviceCVarChanged, this));
+  cvar_PlasmaAudioBackend.m_CVarEvents.AddEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+  cvar_PlasmaAudioSpeakers.m_CVarEvents.AddEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+  cvar_PlasmaAudioSampleRate.m_CVarEvents.AddEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+  cvar_PlasmaAudioPeriodMs.m_CVarEvents.AddEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+  cvar_PlasmaAudioFollowDefaultDevice.m_CVarEvents.AddEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+  m_bCVarHandlersRegistered = true;
 
   if (InitEngine().Failed())
     return;
@@ -199,10 +210,19 @@ void plMiniAudioSingleton::Shutdown()
     m_bReinitFailed = false;
     m_pData->m_SoundGroups.Clear();
 
+    if (m_bCVarHandlersRegistered)
+    {
+      m_bCVarHandlersRegistered = false;
+      cvar_PlasmaAudioOutputDevice.m_CVarEvents.RemoveEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputDeviceCVarChanged, this));
+      cvar_PlasmaAudioBackend.m_CVarEvents.RemoveEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+      cvar_PlasmaAudioSpeakers.m_CVarEvents.RemoveEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+      cvar_PlasmaAudioSampleRate.m_CVarEvents.RemoveEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+      cvar_PlasmaAudioPeriodMs.m_CVarEvents.RemoveEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+      cvar_PlasmaAudioFollowDefaultDevice.m_CVarEvents.RemoveEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputSettingsCVarChanged, this));
+    }
+
     if (m_bContextInitialized)
     {
-      cvar_PlasmaAudioOutputDevice.m_CVarEvents.RemoveEventHandler(plMakeDelegate(&plMiniAudioSingleton::OnOutputDeviceCVarChanged, this));
-
       ma_context_uninit(&m_pData->m_Context);
       m_bContextInitialized = false;
     }
@@ -248,6 +268,20 @@ void plMiniAudioSingleton::TimedDataCallback(ma_device* pDevice, void* pOutput, 
   {
     pThis->RecordMixTime(tEnd - tStart, static_cast<double>(uiFrameCount) / pDevice->sampleRate);
   }
+
+  // the engine mixes in f32; the peak falls off like the bus meters'
+  if (pDevice->playback.format == ma_format_f32)
+  {
+    const float* pSamples = static_cast<const float*>(pOutput);
+    const ma_uint32 uiSamples = uiFrameCount * pDevice->playback.channels;
+
+    float fPeak = 0.0f;
+    for (ma_uint32 i = 0; i < uiSamples; ++i)
+      fPeak = plMath::Max(fPeak, plMath::Abs(pSamples[i]));
+
+    const float fPrevious = pThis->m_fOutputPeak.load(std::memory_order_relaxed);
+    pThis->m_fOutputPeak.store(plMath::Max(fPeak, fPrevious * 0.95f), std::memory_order_relaxed);
+  }
 }
 
 void plMiniAudioSingleton::RecordMixTime(plTime mixTime, double fAudioSeconds)
@@ -273,6 +307,159 @@ void plMiniAudioSingleton::OnOutputDeviceCVarChanged(const plCVarEvent& e)
     }
     m_bDeviceChangeRequested = true;
   }
+}
+
+void plMiniAudioSingleton::OnOutputSettingsCVarChanged(const plCVarEvent& e)
+{
+  if (e.m_EventType != plCVarEvent::ValueChanged)
+    return;
+
+  // another backend needs another context; the audio thread recreates both
+  if (e.m_pCVar == &cvar_PlasmaAudioBackend)
+    m_bContextChangeRequested = true;
+
+  m_bDeviceChangeRequested = true;
+}
+
+void plMiniAudioSingleton::ApplyPlatformConfig()
+{
+  plGameApplicationBase* pApp = plGameApplicationBase::GetGameApplicationBaseInstance();
+  if (pApp == nullptr)
+    return;
+
+  // A plugin package may load after the application read its platform profile; the profile then has no config of this
+  // type, and the config is read from the profile's runtime file instead.
+  plPlasmaAudioPlatformConfig config;
+  if (const plPlasmaAudioPlatformConfig* pConfig = pApp->GetPlatformProfile().GetTypeConfig<plPlasmaAudioPlatformConfig>())
+  {
+    config.m_sBackend = pConfig->m_sBackend;
+    config.m_eSpeakers = pConfig->m_eSpeakers;
+    config.m_uiSampleRate = pConfig->m_uiSampleRate;
+    config.m_uiPeriodMs = pConfig->m_uiPeriodMs;
+    config.m_bFollowDefaultDevice = pConfig->m_bFollowDefaultDevice;
+    config.m_eSuspendPolicy = pConfig->m_eSuspendPolicy;
+    config.m_fSuspendFadeMs = pConfig->m_fSuspendFadeMs;
+  }
+  else
+  {
+    const plStringBuilder sFile(":project/RuntimeConfigs/", pApp->GetPlatformProfile().GetConfigName(), ".plProfile");
+
+    plFileReader file;
+    if (file.Open(sFile).Failed())
+      return;
+
+    plChunkStreamReader chunk(file);
+    chunk.BeginStream();
+    while (chunk.GetCurrentChunk().m_bValid)
+    {
+      config.LoadRuntimeData(chunk);
+      chunk.NextChunk();
+    }
+    chunk.EndStream();
+  }
+
+  cvar_PlasmaAudioBackend = config.m_sBackend;
+  cvar_PlasmaAudioSpeakers = static_cast<int>(config.m_eSpeakers.GetValue());
+  cvar_PlasmaAudioSampleRate = static_cast<int>(config.m_uiSampleRate);
+  cvar_PlasmaAudioPeriodMs = static_cast<int>(config.m_uiPeriodMs);
+  cvar_PlasmaAudioFollowDefaultDevice = config.m_bFollowDefaultDevice;
+  SetSuspendPolicy(config.m_eSuspendPolicy, plTime::MakeFromMilliseconds(config.m_fSuspendFadeMs));
+}
+
+plResult plMiniAudioSingleton::InitContext()
+{
+  EnsureComOnThread();
+
+  m_bContextChangeRequested = false;
+
+  ma_context_config contextConfig = ma_context_config_init();
+  contextConfig.allocationCallbacks = m_pData->m_AllocationCallbacks;
+
+  const plString sBackend = cvar_PlasmaAudioBackend.GetValue();
+  const plAudioBackendRegistry::Choice choice = plAudioBackendRegistry::Resolve(sBackend);
+
+  if (!sBackend.IsEmpty() && !choice.m_bFound)
+  {
+    plLog::Warning("PlasmaAudio: unknown output backend '{0}', trying the usual ones.", sBackend);
+  }
+
+  if (choice.m_pCustom != nullptr)
+  {
+    choice.m_pCustom->GetCallbacks(contextConfig.custom);
+  }
+
+  const ma_backend backends[1] = {choice.m_Backend};
+  bool bContext = ma_context_init(choice.m_bFound ? backends : nullptr, choice.m_bFound ? 1 : 0, &contextConfig, &m_pData->m_Context) == MA_SUCCESS;
+
+  if (!bContext && choice.m_bFound)
+  {
+    plLog::Warning("PlasmaAudio: the output backend '{0}' could not start, trying the usual ones.", sBackend);
+    bContext = ma_context_init(nullptr, 0, &contextConfig, &m_pData->m_Context) == MA_SUCCESS;
+  }
+
+  if (!bContext)
+  {
+    plLog::Error("PlasmaAudio: failed to initialize the audio context.");
+    return PL_FAILURE;
+  }
+
+  m_bContextInitialized = true;
+
+#if PL_ENABLED(PL_PLATFORM_WINDOWS)
+  // the context's own reference was taken with the original function and is released only when it succeeded
+  m_pData->m_Context.win32.CoInitializeEx = reinterpret_cast<ma_proc>(&MaCoInitializeEx);
+#endif
+
+  return PL_SUCCESS;
+}
+
+plString plMiniAudioSingleton::GetOutputDescription() const
+{
+  if (!m_bInitialized)
+    return "no output";
+
+  plStringBuilder sDescription = ma_get_backend_name(m_pData->m_Context.backend);
+
+  if (m_bHeadless)
+  {
+    sDescription.Append(" \xC2\xB7 no playback device (silent)");
+    return sDescription;
+  }
+
+  const ma_device* pDevice = ma_engine_get_device(const_cast<ma_engine*>(&m_pData->m_Engine));
+  if (pDevice == nullptr)
+    return sDescription;
+
+  const double fPeriodMs = pDevice->playback.internalSampleRate > 0 ? 1000.0 * pDevice->playback.internalPeriodSizeInFrames / pDevice->playback.internalSampleRate : 0.0;
+  sDescription.AppendFormat(" \xC2\xB7 {} \xC2\xB7 {} ch \xC2\xB7 {} Hz \xC2\xB7 {} ms", pDevice->playback.name, pDevice->playback.channels, pDevice->sampleRate, plArgF(fPeriodMs, 1));
+  return sDescription;
+}
+
+void plMiniAudioSingleton::SetSuspendPolicy(plAudioSuspendPolicy::Enum policy, plTime fade)
+{
+  cvar_PlasmaAudioSuspendPolicy = static_cast<int>(policy);
+  cvar_PlasmaAudioSuspendFadeMs = static_cast<float>(fade.GetMilliseconds());
+}
+
+bool plMiniAudioSingleton::IsSuspendRequested() const
+{
+  return cvar_PlasmaAudioSuspend;
+}
+
+plAudioSuspendPolicy::Enum plMiniAudioSingleton::GetSuspendPolicy() const
+{
+  return static_cast<plAudioSuspendPolicy::Enum>(plMath::Clamp<int>(cvar_PlasmaAudioSuspendPolicy, 0, plAudioSuspendPolicy::StopAll));
+}
+
+plTime plMiniAudioSingleton::GetSuspendFade() const
+{
+  return plTime::MakeFromMilliseconds(plMath::Max<float>(cvar_PlasmaAudioSuspendFadeMs, 0.0f));
+}
+
+void plMiniAudioSingleton::SetSuspendOutput(float fGain, bool bDeviceRunning)
+{
+  m_fSuspendGain = plMath::Clamp(fGain, 0.0f, 1.0f);
+  m_bSuspendStopped = !bDeviceRunning;
 }
 
 plResult plMiniAudioSingleton::InitEngine()
@@ -316,6 +503,26 @@ plResult plMiniAudioSingleton::InitEngine()
     }
   }
 
+  // miniaudio follows the system's default device only when it opened the default without a device id; naming the
+  // current default by its id keeps the output on it
+  if (!bDeviceFound && !cvar_PlasmaAudioFollowDefaultDevice)
+  {
+    ma_device_info* pPlaybackInfos = nullptr;
+    ma_uint32 uiPlaybackCount = 0;
+    if (ma_context_get_devices(&m_pData->m_Context, &pPlaybackInfos, &uiPlaybackCount, nullptr, nullptr) == MA_SUCCESS)
+    {
+      for (ma_uint32 i = 0; i < uiPlaybackCount; ++i)
+      {
+        if (pPlaybackInfos[i].isDefault)
+        {
+          deviceId = pPlaybackInfos[i].id;
+          bDeviceFound = true;
+          break;
+        }
+      }
+    }
+  }
+
   // What the engine allocates (its node graph, the device through the context, every ma_sound) goes through the
   // "PlasmaAudio/miniaudio" allocator; nodes initialized with null allocation callbacks do not. A voice's ma_sound
   // still allocates its node heap on every start: ma_sound_init_ex() takes no caller-provided heap, so sounds cannot
@@ -326,7 +533,11 @@ plResult plMiniAudioSingleton::InitEngine()
   cfg.pPlaybackDeviceID = bDeviceFound ? &deviceId : nullptr;
   cfg.notificationCallback = &plMiniAudioSingleton::DeviceNotificationCallback;
   cfg.listenerCount = MaxListeners;
-  cfg.channels = 0; // native channel count
+
+  // the output settings; 0 = the device's channel count, sample rate and period
+  cfg.channels = plAudioSpeakerLayout::GetChannelCount(static_cast<plAudioSpeakerLayout::Enum>(plMath::Clamp<int>(cvar_PlasmaAudioSpeakers, 0, plAudioSpeakerLayout::Surround71)));
+  cfg.sampleRate = static_cast<ma_uint32>(plMath::Clamp<int>(cvar_PlasmaAudioSampleRate, 0, 192000));
+  cfg.periodSizeInMilliseconds = static_cast<ma_uint32>(plMath::Clamp<int>(cvar_PlasmaAudioPeriodMs, 0, 100));
 
   // volume changes (automation, snapshot fades, bus faders) are ramped over this many frames instead of stepping once
   // per audio update
@@ -369,8 +580,8 @@ plResult plMiniAudioSingleton::InitEngine()
     // and keep checking for a device (IsDeviceReinitRequired)
     cfg.pPlaybackDeviceID = nullptr;
     cfg.noDevice = MA_TRUE;
-    cfg.channels = 2;
-    cfg.sampleRate = 48000;
+    cfg.channels = cfg.channels != 0 ? cfg.channels : 2;
+    cfg.sampleRate = cfg.sampleRate != 0 ? cfg.sampleRate : 48000;
 
     if (ma_engine_init(&cfg, &m_pData->m_Engine) != MA_SUCCESS)
     {
@@ -461,7 +672,7 @@ bool plMiniAudioSingleton::IsDeviceReinitRequired()
 
 plResult plMiniAudioSingleton::ReinitDevice()
 {
-  if (m_pData == nullptr || !m_bContextInitialized || (!m_bInitialized && !m_bReinitFailed))
+  if (m_pData == nullptr || (!m_bInitialized && !m_bReinitFailed))
     return PL_FAILURE;
 
   PL_LOCK(m_pData->m_Mutex);
@@ -469,6 +680,22 @@ plResult plMiniAudioSingleton::ReinitDevice()
   if (m_bInitialized)
   {
     UninitEngine();
+  }
+
+  // another backend: the context goes with the engine
+  if (m_bContextChangeRequested && m_bContextInitialized)
+  {
+    ma_context_uninit(&m_pData->m_Context);
+    m_bContextInitialized = false;
+  }
+
+  if (!m_bContextInitialized && InitContext().Failed())
+  {
+    // retried by IsDeviceReinitRequired every s_fDeviceRetryIntervalSeconds
+    m_bInitialized = false;
+    m_bReinitFailed = true;
+    m_LastReinitCheck = plTime::Now();
+    return PL_FAILURE;
   }
 
   if (InitEngine().Failed())
@@ -560,7 +787,8 @@ void plMiniAudioSingleton::UpdateSound(plTime delta)
     }
   }
 
-  if (cvar_MiniAudioPause)
+  // a pause and a suspend both stop the device
+  if (cvar_MiniAudioPause || m_bSuspendStopped)
   {
     if (!m_bEnginePaused && !m_bHeadless)
     {
@@ -593,7 +821,7 @@ void plMiniAudioSingleton::UpdateSound(plTime delta)
     }
     else
     {
-      PL_MA_CHECK(ma_engine_set_volume(&m_pData->m_Engine, cvar_MiniAudioMasterVolume));
+      PL_MA_CHECK(ma_engine_set_volume(&m_pData->m_Engine, cvar_MiniAudioMasterVolume * m_fSuspendGain));
     }
 
     // without a device nothing pulls the graph; mixing here keeps the engine clock and voice ends moving

@@ -118,6 +118,7 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioLogEventType
     StreamUnderrun,   ///< streamed voices ran out of data since the last audio update (detail: how often)
     KeyOff,           ///< an event instance released a sustain point
     Marker,           ///< an event instance passed a timeline marker (detail: its name)
+    OutputState,      ///< the output went through a suspend or resume (detail: the new state)
     Count
   };
 

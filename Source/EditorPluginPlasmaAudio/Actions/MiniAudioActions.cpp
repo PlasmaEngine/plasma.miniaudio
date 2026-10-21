@@ -4,6 +4,7 @@
 #include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorPluginPlasmaAudio/Actions/MiniAudioActions.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
+#include <EditorPluginPlasmaAudio/Platform/AudioPlatformsDlg.h>
 #include <EditorPluginPlasmaAudio/Preferences/MiniAudioPreferences.h>
 #include <GuiFoundation/Action/ActionManager.h>
 #include <GuiFoundation/UIServices/UIServices.moc.h>
@@ -19,6 +20,7 @@ plActionDescriptorHandle plPlasmaAudioActions::s_hMute;
 plActionDescriptorHandle plPlasmaAudioActions::s_hVolume;
 plActionDescriptorHandle plPlasmaAudioActions::s_hExtractClips;
 plActionDescriptorHandle plPlasmaAudioActions::s_hMigrateAllEvents;
+plActionDescriptorHandle plPlasmaAudioActions::s_hPlatforms;
 
 void plPlasmaAudioActions::RegisterActions()
 {
@@ -30,6 +32,7 @@ void plPlasmaAudioActions::RegisterActions()
   // Document scope although it acts on the project: it is mapped into every document's Project menu, and a Global
   // proxy would be cached with the first window's document context
   s_hMigrateAllEvents = PL_REGISTER_ACTION_1("PlasmaAudio.MigrateAllEvents", plActionScope::Document, "PlasmaAudio", "", plPlasmaAudioAction, plPlasmaAudioAction::ActionType::MigrateAllEvents);
+  s_hPlatforms = PL_REGISTER_ACTION_1("PlasmaAudio.Platforms", plActionScope::Document, "PlasmaAudio", "", plPlasmaAudioAction, plPlasmaAudioAction::ActionType::Platforms);
   plProjectActions::AddProjectMenuMapper(plMakeDelegate(&plPlasmaAudioActions::MapProjectMenuActions));
 }
 
@@ -42,6 +45,7 @@ void plPlasmaAudioActions::UnregisterActions()
   plActionManager::UnregisterAction(s_hVolume);
   plActionManager::UnregisterAction(s_hExtractClips);
   plActionManager::UnregisterAction(s_hMigrateAllEvents);
+  plActionManager::UnregisterAction(s_hPlatforms);
 }
 
 void plPlasmaAudioActions::MapProjectMenuActions(plStringView sMapping)
@@ -51,6 +55,9 @@ void plPlasmaAudioActions::MapProjectMenuActions(plStringView sMapping)
     return;
 
   pMap->MapAction(s_hMigrateAllEvents, "G.Project.Assets", 6.0f);
+
+  // next to Asset Profiles: the settings are per profile
+  pMap->MapAction(s_hPlatforms, "G.Project.Settings", 6.5f);
 }
 
 void plPlasmaAudioActions::MapEventAssetActions(plStringView sMenuBar, plStringView sToolBar)
@@ -112,6 +119,10 @@ plPlasmaAudioAction::plPlasmaAudioAction(const plActionContext& context, const c
     case ActionType::MigrateAllEvents:
       SetIconPath(":/AssetIcons/AudioClip.svg");
       break;
+
+    case ActionType::Platforms:
+      SetIconPath(":/AssetIcons/AudioMixer.svg");
+      break;
   }
 }
 
@@ -143,6 +154,10 @@ void plPlasmaAudioAction::Execute(const plVariant& value)
   else if (m_Type == ActionType::MigrateAllEvents)
   {
     ExecuteMigrateAllEvents();
+  }
+  else if (m_Type == ActionType::Platforms)
+  {
+    plQtAudioPlatformsDlg::Run(nullptr);
   }
 }
 

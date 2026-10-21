@@ -9,6 +9,7 @@
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
 #include <PlasmaAudioPlugin/Events/MiniAudioAudioEvents.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioBusGraph.h>
+#include <PlasmaAudioPlugin/Platform/AudioSuspend.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
 #include <PlasmaAudioPlugin/Streaming/AudioStreamService.h>
@@ -297,6 +298,16 @@ private:
 
   plCVar* m_pLanguageCVar = nullptr;
   plEventSubscriptionID m_LanguageCVarSubscription = 0;
+
+  /// Takes the output through a suspend and back as PlasmaAudio.Suspend asks (audio thread).
+  void UpdateSuspend(plTime delta);
+
+  /// Publishes the stats PlasmaAudio/Output/Device and PlasmaAudio/Output/State when they change (audio thread).
+  void PublishOutputStats();
+
+  plAudioSuspendController m_SuspendController;
+  plString m_sPublishedDevice;
+  plAudioOutputState::Enum m_PublishedOutputState = static_cast<plAudioOutputState::Enum>(0xFF);
 
   /// Serializes a profiling snapshot when PlasmaAudio.ProfilerSnapshotHz asks for one (audio thread).
   void UpdateProfilingSnapshot();

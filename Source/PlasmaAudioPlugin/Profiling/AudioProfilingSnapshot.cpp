@@ -84,6 +84,8 @@ const char* plAudioLogEventType::GetName(Enum type)
       return "key off";
     case Marker:
       return "marker";
+    case OutputState:
+      return "output";
     default:
       return "?";
   }

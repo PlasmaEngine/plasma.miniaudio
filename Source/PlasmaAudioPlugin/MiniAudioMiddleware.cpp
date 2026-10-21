@@ -143,7 +143,9 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
       RecoverDevice();
     }
 
+    UpdateSuspend(delta);
     m_pBackend->UpdateSound(delta);
+    PublishOutputStats();
 
     // an in-place rebuild of the mixer happens once the output has faded out
     if (m_bRebuildPending && m_pBackend->GetEngine() != nullptr && ma_engine_get_time_in_pcm_frames(m_pBackend->GetEngine()) >= m_uiRebuildFrame)
@@ -164,6 +166,11 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
     float fMasterPeak = 0.0f;
     float fMasterRms = 0.0f;
     GetBusMeter(0, fMasterPeak, fMasterRms);
+
+    // without a mixer the voices play straight to the device: its output is the level
+    if (!m_BusGraph.IsBuilt())
+      fMasterPeak = m_pBackend->GetOutputPeak();
+
     m_Audition.Update(m_EventManager, m_BusGraph, m_pBackend->GetEngine(), fMasterPeak);
 
     plVec3 listenerPositions[plMiniAudioSingleton::MaxListeners];
@@ -179,6 +186,42 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
       m_EventManager.GetDebugSnapshot(snapshot);
       plAudioDebugDraw::Publish(std::move(snapshot));
     }
+  }
+}
+
+void plPlasmaAudioMiddleware::UpdateSuspend(plTime delta)
+{
+  const plAudioSuspendController::Result result = m_SuspendController.Update(m_pBackend->IsSuspendRequested(), delta, m_pBackend->GetSuspendPolicy(), m_pBackend->GetSuspendFade());
+
+  // StopAll: the events end silently, while the output is faded out
+  if (result.m_bStopAllEvents)
+  {
+    m_EventManager.StopAll(true);
+  }
+
+  m_pBackend->SetSuspendOutput(result.m_fGain, result.m_bDeviceRunning);
+
+  if (result.m_bStateChanged)
+  {
+    m_EventManager.GetEventLog().Add(plAudioLogEventType::OutputState, "output", plAudioOutputState::GetName(m_SuspendController.GetState()));
+  }
+}
+
+void plPlasmaAudioMiddleware::PublishOutputStats()
+{
+  // for the editor's Audio Platforms page and the stats: what the output runs on and its state
+  const plString sDevice = m_pBackend->GetOutputDescription();
+  if (sDevice != m_sPublishedDevice)
+  {
+    m_sPublishedDevice = sDevice;
+    plStats::SetStat("PlasmaAudio/Output/Device", sDevice.GetData());
+  }
+
+  const plAudioOutputState::Enum state = m_SuspendController.GetState();
+  if (state != m_PublishedOutputState)
+  {
+    m_PublishedOutputState = state;
+    plStats::SetStat("PlasmaAudio/Output/State", plString(plAudioOutputState::GetName(state)).GetData());
   }
 }
 

@@ -14,8 +14,9 @@ public class MiniAudioModule : ModuleRules
 
         PrivateDefinitions.Add("MA_NO_ENCODING");
         PrivateDefinitions.Add("MA_NO_GENERATION");
-        PrivateDefinitions.Add("MA_NO_CUSTOM");
-        PrivateDefinitions.Add("MA_NO_WINMM");
+
+        // Custom backends stay compiled in: platform plugins bring their own output through plAudioCustomBackend. WinMM
+        // and DirectSound are loaded at run time like WASAPI, so offering them costs no link dependency.
 
         CStandard = CStandard.C17;
         TreatWarningsAsErrors = false;

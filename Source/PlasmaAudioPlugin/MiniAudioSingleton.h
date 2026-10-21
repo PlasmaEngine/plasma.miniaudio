@@ -7,6 +7,7 @@
 #include <Foundation/Types/UniquePtr.h>
 #include <MiniAudio/miniaudio.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioDspNodes.h>
+#include <PlasmaAudioPlugin/Platform/AudioPlatformConfig.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
 
 #include <atomic>
@@ -20,6 +21,11 @@ struct plCVarEvent;
 /// The playback device is chosen by the PlasmaAudio.OutputDevice cvar (empty = system default).
 /// When the device is lost or the cvar changes, IsDeviceReinitRequired() turns true; the middleware then
 /// releases everything attached to the engine and calls ReinitDevice().
+///
+/// At startup the platform profile's plPlasmaAudioPlatformConfig fills the output cvars: PlasmaAudio.Backend (another
+/// backend recreates the context too), PlasmaAudio.Speakers, PlasmaAudio.SampleRate, PlasmaAudio.PeriodMs,
+/// PlasmaAudio.FollowDefaultDevice, and the suspend cvars PlasmaAudio.SuspendPolicy and PlasmaAudio.SuspendFadeMs.
+/// Changing an output cvar re-initializes the device like a device change.
 ///
 /// On Windows, every entry point that creates or queries the context, engine or device first initializes COM on the
 /// calling thread (once per thread, multithreaded apartment unless the thread already has a single-threaded one) and
@@ -61,6 +67,26 @@ public:
 
   /// \brief Names of the playback devices the context currently reports.
   void GetPlaybackDeviceNames(plDynamicArray<plString>& out_names) const;
+
+  /// \brief What the output runs on, e.g. "WASAPI · Speakers · 2 ch · 48000 Hz · 10.0 ms".
+  plString GetOutputDescription() const;
+
+  /// \name Suspend
+  /// The middleware takes the output through a suspend (see plAudioSuspendController) and applies the result here.
+  ///@{
+
+  /// \brief Sets the suspend cvars (PlasmaAudio.SuspendPolicy, PlasmaAudio.SuspendFadeMs).
+  void SetSuspendPolicy(plAudioSuspendPolicy::Enum policy, plTime fade);
+
+  /// \brief Whether PlasmaAudio.Suspend asks for a suspend.
+  bool IsSuspendRequested() const;
+  plAudioSuspendPolicy::Enum GetSuspendPolicy() const;
+  plTime GetSuspendFade() const;
+
+  /// \brief The gain the output plays at on top of the master volume, and whether the device runs.
+  void SetSuspendOutput(float fGain, bool bDeviceRunning);
+
+  ///@}
 
   /// \brief Can be called before startup to load the configuration from a different file.
   /// Otherwise will automatically be loaded at startup with the default path.
@@ -136,6 +162,9 @@ public:
   /// microseconds. Any thread.
   float GetLastMixMicroseconds() const { return m_fLastMixMicroseconds.load(std::memory_order_relaxed); }
 
+  /// \brief Peak of what the device plays (linear, falling off over a few callbacks); 0 without a device. Any thread.
+  float GetOutputPeak() const { return m_fOutputPeak.load(std::memory_order_relaxed); }
+
   /// \brief The allocator the heap memory of the miniaudio context, engine, device and sounds comes from, or nullptr
   /// before Startup(). Named "PlasmaAudio/miniaudio" in the memory tracker.
   plAllocator* GetMiniAudioAllocator() { return m_pData != nullptr ? &m_pData->m_Allocator : nullptr; }
@@ -163,7 +192,13 @@ private:
   void RecordMixTime(plTime mixTime, double fAudioSeconds);
 
   void OnOutputDeviceCVarChanged(const plCVarEvent& e);
+  void OnOutputSettingsCVarChanged(const plCVarEvent& e);
 
+  /// Copies the platform profile's plPlasmaAudioPlatformConfig into the output and suspend cvars.
+  void ApplyPlatformConfig();
+
+  /// Creates the context on the backend PlasmaAudio.Backend names, else the usual ones.
+  plResult InitContext();
   plResult InitEngine();
   void UninitEngine();
   void ApplyListenerSlot(plUInt8 uiSlot);
@@ -175,6 +210,9 @@ private:
   bool m_bEnginePaused = false;
   bool m_bHeadless = false; ///< engine runs without a playback device
   bool m_bReinitFailed = false; ///< ReinitDevice() could not create any engine; retried periodically
+  bool m_bCVarHandlersRegistered = false;
+  bool m_bSuspendStopped = false; ///< a suspend stopped the device
+  float m_fSuspendGain = 1.0f;    ///< the suspend fade, on top of the master volume
   plUInt8 m_uiNumListeners = 1;
   ListenerSlot m_Listeners[MaxListeners];
 
@@ -183,11 +221,13 @@ private:
   std::atomic<bool> m_bDeviceRerouted = false;
   std::atomic<bool> m_bDeviceStopExpected = false;
   std::atomic<bool> m_bDeviceChangeRequested = false;
+  std::atomic<bool> m_bContextChangeRequested = false; ///< PlasmaAudio.Backend changed
   plTime m_LastReinitCheck;
 
   // written by the device thread (or UpdateSound without a device), read anywhere
   std::atomic<float> m_fDspLoad = 0.0f;
   std::atomic<float> m_fLastMixMicroseconds = 0.0f;
+  std::atomic<float> m_fOutputPeak = 0.0f;
 
   /// the engine's device data callback, called by TimedDataCallback; set before the device starts
   ma_device_data_proc m_OriginalDataCallback = nullptr;

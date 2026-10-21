@@ -22,5 +22,7 @@ PlasmaAudio.ExtractClips.Tooltip;Turns playlist entries that embed a sound file 
 PlasmaAudio.MigrateAllEvents;Migrate All Audio Events
 PlasmaAudio.MigrateAllEvents.Tooltip;Runs Extract Clips on every Audio Event of the project that embeds sound files
 Panel.AudioProfiler;Audio Profiler
+PlasmaAudio.Platforms;Audio Platforms...
+PlasmaAudio.Platforms.Tooltip;The PlasmaAudio output of each asset profile: backend, speakers, sample rate, period and what happens on suspend
 
 # Properties

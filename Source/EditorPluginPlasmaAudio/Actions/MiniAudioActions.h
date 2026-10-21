@@ -24,6 +24,7 @@ public:
   static plActionDescriptorHandle s_hVolume;
   static plActionDescriptorHandle s_hExtractClips;
   static plActionDescriptorHandle s_hMigrateAllEvents;
+  static plActionDescriptorHandle s_hPlatforms;
 
 private:
   static void MapProjectMenuActions(plStringView sMapping);
@@ -40,6 +41,7 @@ public:
     Mute,
     ExtractClips,     ///< the context Audio Event: embedded sound files -> Audio Clip references, then save
     MigrateAllEvents, ///< ExtractClips on every Audio Event of the project
+    Platforms,        ///< Project Settings > Audio Platforms
   };
 
   plPlasmaAudioAction(const plActionContext& context, const char* szName, ActionType type);

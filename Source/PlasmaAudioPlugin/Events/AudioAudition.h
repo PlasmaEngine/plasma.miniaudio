@@ -45,7 +45,7 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioAuditionStatus
   bool m_bWaiting = false;  ///< the event or the mixer is still loading
   bool m_bHasMixer = false; ///< a mixer is loaded; without one the event plays straight to the output
   double m_fPosition = 0.0; ///< timeline position in seconds
-  float m_fPeak = 0.0f;     ///< peak of the mixer's master bus (0 without a mixer)
+  float m_fPeak = 0.0f;     ///< peak of the mixer's master bus; without a mixer, of the device output
 
   plDynamicArray<bool> m_InstrumentSounding;
   plDynamicArray<float> m_InstrumentRangeGains;
