@@ -26,6 +26,9 @@ public:
   bool m_bGlobalEntity = false;
   plAudioSystemTransform m_LastTransform;
 
+  /// \brief A global entity of the editor's audition is heard at this distance when it is not negative.
+  float m_fAuditionDistance = -1.0f;
+
   // obstruction/occlusion fed by the ATL (targets) and smoothed on the audio thread (currents)
   float m_fTargetObstruction = 0.0f;
   float m_fTargetOcclusion = 0.0f;

@@ -12,6 +12,7 @@
 #include <PlasmaAudioPlugin/MiniAudioAtlData.h>
 #include <PlasmaAudioPlugin/MiniAudioMiddleware.h>
 #include <PlasmaAudioPlugin/MiniAudioSingleton.h>
+#include <PlasmaAudioPlugin/Profiling/AudioDebugDraw.h>
 #include <PlasmaAudioPlugin/Resources/MiniAudioSoundResource.h>
 
 PL_IMPLEMENT_SINGLETON(plPlasmaAudioMiddleware);
@@ -93,6 +94,7 @@ plResult plPlasmaAudioMiddleware::Startup()
   m_EventManager.SetStreamService(&m_StreamService);
 
   plAudioAudition::s_pSingleton = &m_Audition;
+  plAudioDebugDraw::Startup();
 
   // the engine never calls SetLanguage itself: follow the App.Language cvar of the game application instead
   m_pLanguageCVar = plCVar::FindCVarByName("App.Language");
@@ -158,6 +160,14 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
     m_EventManager.Update(delta, plArrayPtr<const plVec3>(listenerPositions, uiListeners));
 
     UpdateProfilingSnapshot();
+
+    // the Audio view mode draws from this while a view shows it
+    if (plAudioDebugDraw::IsWanted())
+    {
+      plAudioDebugSnapshot snapshot;
+      m_EventManager.GetDebugSnapshot(snapshot);
+      plAudioDebugDraw::Publish(std::move(snapshot));
+    }
   }
 }
 
@@ -351,6 +361,7 @@ plResult plPlasmaAudioMiddleware::Shutdown()
   m_LanguageReloads.Clear();
 
   plAudioAudition::s_pSingleton = nullptr;
+  plAudioDebugDraw::Shutdown();
   m_Audition.StopAll(m_EventManager);
 
   m_EventManager.StopAll(true);

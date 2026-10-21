@@ -223,6 +223,7 @@ void plPlasmaAudioEventInstance::Reset()
   m_Elapsed = plTime::MakeZero();
   m_bStopping = false;
   m_fCurrentVolumeMultiplier = 1.0f;
+  m_fCurrentSpatialGain = 1.0f;
   m_fCurrentPitchMultiplier = 1.0f;
   m_fAudibility = 1.0f;
   m_fDistance = 0.0f;
@@ -297,6 +298,9 @@ plResult plPlasmaAudioEventInstance::Start(const plAudioEventResourceHandle& hEv
   }
 
   ApplyGlobalParameters();
+
+  // the first voices start with the distance gain they will have
+  m_fCurrentSpatialGain = ComputeSpatialGain();
 
   // voices are never relocated after this point: miniaudio nodes reference them by address
   m_Voices.SetCount(desc.m_Instruments.GetCount() * VoiceSlotsPerInstrument);
@@ -455,25 +459,111 @@ ma_uint64 plPlasmaAudioEventInstance::EstimateVoiceEndFrame(const Voice& voice, 
   return EndFrom(uiNow, fLength - fCursor);
 }
 
-float plPlasmaAudioEventInstance::GetDistanceFade() const
+float plPlasmaAudioEventInstance::ComputeSpatialGain() const
+{
+  if (m_pResource == nullptr || m_pEntity == nullptr)
+    return 1.0f;
+
+  const auto& desc = m_pResource->GetDescriptor();
+  float fGain = desc.GetOcclusionGain(m_pEntity->m_fCurrentOcclusion);
+
+  float fDistance = 0.0f;
+  if (GetListenerDistance(fDistance))
+  {
+    fGain *= desc.GetDistanceGain(fDistance);
+  }
+
+  return fGain;
+}
+
+bool plPlasmaAudioEventInstance::GetListenerDistance(float& out_fDistance) const
+{
+  if (m_pEntity == nullptr)
+    return false;
+
+  if (m_pEntity->m_bGlobalEntity)
+  {
+    out_fDistance = m_pEntity->m_fAuditionDistance;
+    return m_pEntity->m_fAuditionDistance >= 0.0f;
+  }
+
+  out_fDistance = (m_pEntity->m_LastTransform.m_vPosition - m_vListenerPos).GetLength();
+  return true;
+}
+
+bool plPlasmaAudioEventInstance::GetDebugEmitter(plAudioDebugEmitter& out_emitter) const
+{
+  if (m_pResource == nullptr || m_pEntity == nullptr || m_pEntity->m_bGlobalEntity)
+    return false;
+
+  const auto& desc = m_pResource->GetDescriptor();
+  if (!desc.m_bSpatialize)
+    return false;
+
+  out_emitter.m_sEvent = GetDisplayName();
+  out_emitter.m_vPosition = m_pEntity->m_LastTransform.m_vPosition;
+  out_emitter.m_vForward = m_pEntity->m_LastTransform.m_vForward;
+  out_emitter.m_vListener = m_vListenerPos;
+  out_emitter.m_fMinDistance = desc.m_fMinDistance;
+  out_emitter.m_fMaxDistance = desc.m_fMaxDistance;
+  out_emitter.m_fConeInnerAngle = desc.m_fConeInnerAngle;
+  out_emitter.m_fConeOuterAngle = desc.m_fConeOuterAngle;
+  out_emitter.m_fDistance = (m_pEntity->m_LastTransform.m_vPosition - m_vListenerPos).GetLength();
+  out_emitter.m_fGain = m_fCurrentSpatialGain * ComputeConeGain();
+  out_emitter.m_fOcclusion = plMath::Clamp(m_pEntity->m_fCurrentOcclusion, 0.0f, 1.0f);
+  out_emitter.m_fAudibility = m_fAudibility;
+  out_emitter.m_bReal = GetRealVoiceCount() > 0;
+
+  out_emitter.m_EnvironmentNames.Clear();
+  out_emitter.m_EnvironmentAmounts.Clear();
+  for (const auto& env : m_pEntity->m_Environments)
+  {
+    if (env.m_fAmount > 0.0001f)
+    {
+      out_emitter.m_EnvironmentNames.PushBack(env.m_sName);
+      out_emitter.m_EnvironmentAmounts.PushBack(env.m_fAmount);
+    }
+  }
+
+  return true;
+}
+
+void plPlasmaAudioEventInstance::UpdateSpatializer(Voice& ref_voice) const
+{
+  if (ref_voice.m_pSpatializerNode == nullptr || m_pEntity == nullptr || m_pResource == nullptr)
+    return;
+
+  plAudioSpatialVoiceState state;
+  state.m_vEmitterPosition = m_pEntity->m_LastTransform.m_vPosition;
+  state.m_vEmitterForward = m_pEntity->m_LastTransform.m_vForward;
+  state.m_vListenerPosition = m_vListenerPos;
+  state.m_fSpread = m_pResource->GetDescriptor().m_fSpread;
+
+  // the listener miniaudio would spatialize against: the closest one
+  const ma_uint32 uiListener = ma_engine_find_closest_listener(m_pEngine, m_vListenerPos.x, m_vListenerPos.y, m_vListenerPos.z);
+  const ma_vec3f vForward = ma_engine_listener_get_direction(m_pEngine, uiListener);
+  const ma_vec3f vUp = ma_engine_listener_get_world_up(m_pEngine, uiListener);
+  state.m_vListenerForward.Set(vForward.x, vForward.y, vForward.z);
+  state.m_vListenerUp.Set(vUp.x, vUp.y, vUp.z);
+
+  ref_voice.m_pSpatializer->UpdateVoice(ref_voice.m_pSpatializerNode, state);
+}
+
+float plPlasmaAudioEventInstance::ComputeConeGain() const
 {
   if (m_pResource == nullptr || m_pEntity == nullptr || m_pEntity->m_bGlobalEntity)
     return 1.0f;
 
   const auto& desc = m_pResource->GetDescriptor();
-  if (!desc.m_bSpatialize || desc.m_fMaxDistance <= desc.m_fMinDistance)
+  if (!desc.m_bSpatialize || (desc.m_fConeInnerAngle >= 360.0f && desc.m_fConeOuterAngle >= 360.0f))
     return 1.0f;
 
-  // the last 15 % of [min, max] fade linearly to silence, which is where the voice manager virtualizes the event
-  constexpr float fFadeShare = 0.15f;
-  const float fDistance = (m_pEntity->m_LastTransform.m_vPosition - m_vListenerPos).GetLength();
-  const float fRange = desc.m_fMaxDistance - desc.m_fMinDistance;
-  const float fFadeStart = desc.m_fMaxDistance - fFadeShare * fRange;
-
-  if (fDistance <= fFadeStart)
+  plVec3 vForward = m_pEntity->m_LastTransform.m_vForward;
+  plVec3 vToListener = m_vListenerPos - m_pEntity->m_LastTransform.m_vPosition;
+  if (vForward.NormalizeIfNotZero(plVec3::MakeZero()).Failed() || vToListener.NormalizeIfNotZero(plVec3::MakeZero()).Failed())
     return 1.0f;
 
-  return plMath::Clamp((desc.m_fMaxDistance - fDistance) / (fFadeShare * fRange), 0.0f, 1.0f);
+  return desc.GetConeGain(plMath::ACos(plMath::Clamp(vForward.Dot(vToListener), -1.0f, 1.0f)).GetDegree());
 }
 
 void plPlasmaAudioEventInstance::SelectListener(plArrayPtr<const plVec3> listeners)
@@ -633,8 +723,10 @@ float plPlasmaAudioEventInstance::GetOcclusionCutoff() const
 {
   const float fOcclusion = (m_pEntity != nullptr) ? plMath::Clamp(m_pEntity->m_fCurrentOcclusion, 0.0f, 1.0f) : 0.0f;
 
-  // exponential sweep from fully open (22 kHz) down to muffled (250 Hz)
-  return 22000.0f * plMath::Pow(250.0f / 22000.0f, fOcclusion);
+  if (m_pResource == nullptr)
+    return 22000.0f;
+
+  return m_pResource->GetDescriptor().GetOcclusionCutoff(fOcclusion);
 }
 
 void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSlot, plRandom& ref_rng, ma_uint64 uiStartFrame)
@@ -954,16 +1046,26 @@ plPlasmaAudioEventInstance::BuildResult plPlasmaAudioEventInstance::BuildVoiceCh
 
   // spatializer
   ma_sound_set_spatialization_enabled(&voice.m_Sound, desc.m_bSpatialize && (m_pEntity == nullptr || !m_pEntity->m_bGlobalEntity));
-  ma_sound_set_min_distance(&voice.m_Sound, desc.m_fMinDistance);
-  ma_sound_set_rolloff(&voice.m_Sound, desc.m_fRolloff);
   ma_sound_set_doppler_factor(&voice.m_Sound, desc.m_fDopplerFactor);
+
+  // the distance gain is the event's attenuation curve (ComputeSpatialGain, in the voice volume), so miniaudio only
+  // pans, applies the Doppler shift and the cone
+  ma_sound_set_attenuation_model(&voice.m_Sound, ma_attenuation_model_none);
+  ma_sound_set_cone(&voice.m_Sound, plAngle::MakeFromDegree(plMath::Clamp(desc.m_fConeInnerAngle, 0.0f, 360.0f)).GetRadian(),
+    plAngle::MakeFromDegree(plMath::Clamp(plMath::Max(desc.m_fConeOuterAngle, desc.m_fConeInnerAngle), 0.0f, 360.0f)).GetRadian(),
+    plMath::Pow(10.0f, desc.m_fConeOuterGainDb / 20.0f));
+
+  // spread: the smallest channel gain of the panning; miniaudio's default 0.2 pans a point, 1 is heard everywhere
+  voice.m_Sound.engineNode.spatializer.minSpatializationChannelGain = plMath::Lerp(0.2f, 1.0f, plMath::Clamp(desc.m_fSpread / 360.0f, 0.0f, 1.0f));
 
   if (m_pEntity != nullptr)
   {
     const plVec3 vPos = m_pEntity->m_LastTransform.m_vPosition;
     const plVec3 vVel = m_pEntity->m_LastTransform.m_vVelocity;
+    const plVec3 vDir = m_pEntity->m_LastTransform.m_vForward;
     ma_sound_set_position(&voice.m_Sound, vPos.x, vPos.y, vPos.z);
     ma_sound_set_velocity(&voice.m_Sound, vVel.x, vVel.y, vVel.z);
+    ma_sound_set_direction(&voice.m_Sound, vDir.x, vDir.y, vDir.z);
   }
 
   // routing target: the event's bus (or the engine endpoint when no mixer graph is built)
@@ -981,6 +1083,21 @@ plPlasmaAudioEventInstance::BuildResult plPlasmaAudioEventInstance::BuildVoiceCh
   // The nodes live inside the voice and allocate their heaps through the engine's allocation callbacks (the
   // "PlasmaAudio/miniaudio" allocator for the backend's engine); the same callbacks uninitialize them.
   ma_node* pCurrent = reinterpret_cast<ma_node*>(&voice.m_Sound);
+
+  // an active spatializer places spatialized voices instead of miniaudio's panning
+  plAudioSpatializer* pSpatializer = plAudioSpatializer::GetActive();
+  if (pSpatializer != nullptr && desc.m_bSpatialize && m_pEntity != nullptr && !m_pEntity->m_bGlobalEntity)
+  {
+    if (ma_node* pNode = pSpatializer->CreateVoiceNode(m_pEngine))
+    {
+      voice.m_pSpatializerNode = pNode;
+      voice.m_pSpatializer = pSpatializer;
+      ma_sound_set_spatialization_enabled(&voice.m_Sound, MA_FALSE);
+      ma_node_attach_output_bus(pCurrent, 0, pNode, 0);
+      pCurrent = pNode;
+      UpdateSpatializer(voice);
+    }
+  }
 
   // the occlusion filter's cutoff follows the occlusion through atomics the device thread applies (plMaFilterNode)
   if (plMiniAudioDsp::InitFilterNode(m_pEngine, &voice.m_OcclusionFilter, plMaFilterNode::Type::LowPass, 2, GetOcclusionCutoff(), 2, 0.0f, 1.0f, &m_pEngine->allocationCallbacks).Succeeded())
@@ -1007,7 +1124,7 @@ plPlasmaAudioEventInstance::BuildResult plPlasmaAudioEventInstance::BuildVoiceCh
   if (bCreateSplitter)
   {
     ma_splitter_node_config splitCfg = ma_splitter_node_config_init(ma_engine_get_channels(m_pEngine));
-    splitCfg.outputBusCount = 2;
+    splitCfg.outputBusCount = 1 + MaxEnvironmentSends;
 
     if (ma_splitter_node_init(ma_engine_get_node_graph(m_pEngine), &splitCfg, &m_pEngine->allocationCallbacks, &voice.m_EnvSplitter) == MA_SUCCESS)
     {
@@ -1015,8 +1132,14 @@ plPlasmaAudioEventInstance::BuildResult plPlasmaAudioEventInstance::BuildVoiceCh
       ma_node* pSplitter = reinterpret_cast<ma_node*>(&voice.m_EnvSplitter);
       ma_node_attach_output_bus(pCurrent, 0, pSplitter, 0);
       ma_node_attach_output_bus(pSplitter, 0, pTarget, 0); // dry
-      ma_node_set_output_bus_volume(pSplitter, 1, 0.0f);   // wet starts silent; Update() routes and levels it
-      pCurrent = nullptr;                                  // chain fully wired through splitter
+
+      // the wet outputs start silent; Update() routes and levels them
+      for (plUInt32 uiSend = 0; uiSend < MaxEnvironmentSends; ++uiSend)
+      {
+        ma_node_set_output_bus_volume(pSplitter, 1 + uiSend, 0.0f);
+      }
+
+      pCurrent = nullptr; // chain fully wired through splitter
     }
   }
 
@@ -1026,7 +1149,7 @@ plPlasmaAudioEventInstance::BuildResult plPlasmaAudioEventInstance::BuildVoiceCh
   }
 
   const float fPitchNow = voice.m_fBasePitch * m_fCurrentPitchMultiplier;
-  ma_sound_set_volume(&voice.m_Sound, GetVoiceVolume(voice) * m_fCurrentVolumeMultiplier);
+  ma_sound_set_volume(&voice.m_Sound, GetVoiceVolume(voice) * m_fCurrentVolumeMultiplier * m_fCurrentSpatialGain);
   ma_sound_set_pitch(&voice.m_Sound, fPitchNow);
 
   // sample-accurate start: the sound runs from the next mixed chunk on and its data source emits silence up to
@@ -1069,29 +1192,11 @@ bool plPlasmaAudioEventInstance::AdmitVoice(plUInt32 uiInstrument, plUInt32 uiSl
 
 float plPlasmaAudioEventInstance::ComputeAudibility(float fBaseVolume) const
 {
-  const auto& desc = m_pResource->GetDescriptor();
-
-  float fAttenuation = 1.0f;
-
-  if (desc.m_bSpatialize && m_pEntity != nullptr && !m_pEntity->m_bGlobalEntity)
-  {
-    const float fDistance = (m_pEntity->m_LastTransform.m_vPosition - m_vListenerPos).GetLength();
-
-    // beyond the max distance the voice counts as inaudible, so it is virtual whatever the budget
-    if (fDistance > desc.m_fMaxDistance)
-      return 0.0f;
-
-    // miniaudio's default inverse distance model
-    const float fMin = plMath::Max(desc.m_fMinDistance, 0.0001f);
-    const float fMax = plMath::Max(desc.m_fMaxDistance, fMin);
-    const float fClamped = plMath::Clamp(fDistance, fMin, fMax);
-    fAttenuation = fMin / (fMin + desc.m_fRolloff * (fClamped - fMin));
-  }
-
-  const float fOcclusion = (m_pEntity != nullptr) ? plMath::Clamp(m_pEntity->m_fCurrentOcclusion, 0.0f, 1.0f) : 0.0f;
+  // the gain the voice is heard with: the distance curve (0 at and beyond the max distance, so the voice is virtual
+  // whatever the budget), occlusion, the cone, the instance's modulation and the mixer
   const float fBusGain = (m_pBusGraph != nullptr) ? m_pBusGraph->GetEffectiveBusGain(m_uiBus) : 1.0f;
 
-  return fAttenuation * m_fCurrentVolumeMultiplier * fBaseVolume * fBusGain * (1.0f - 0.5f * fOcclusion);
+  return ComputeSpatialGain() * ComputeConeGain() * m_fCurrentVolumeMultiplier * fBaseVolume * fBusGain;
 }
 
 bool plPlasmaAudioEventInstance::IsVoiceLooping(plUInt32 uiVoice) const
@@ -1332,7 +1437,18 @@ void plPlasmaAudioEventInstance::ReleaseVoiceChain(Voice& voice)
     ma_splitter_node_uninit(&voice.m_EnvSplitter, &m_pEngine->allocationCallbacks);
     voice.m_bEnvSplitterValid = false;
   }
-  voice.m_pEnvAux = nullptr;
+
+  if (voice.m_pSpatializerNode != nullptr)
+  {
+    voice.m_pSpatializer->DestroyVoiceNode(voice.m_pSpatializerNode);
+    voice.m_pSpatializerNode = nullptr;
+    voice.m_pSpatializer = nullptr;
+  }
+
+  for (ma_sound_group*& pAux : voice.m_EnvAux)
+  {
+    pAux = nullptr;
+  }
 
   if (voice.m_bOcclusionLpfValid)
   {
@@ -1428,6 +1544,9 @@ namespace
     if (ref_voice.m_bOcclusionLpfValid)
       return reinterpret_cast<ma_node*>(&ref_voice.m_OcclusionFilter);
 
+    if (ref_voice.m_pSpatializerNode != nullptr)
+      return ref_voice.m_pSpatializerNode;
+
     if (ref_voice.m_bSoundValid)
       return reinterpret_cast<ma_node*>(&ref_voice.m_Sound);
 
@@ -1447,8 +1566,11 @@ void plPlasmaAudioEventInstance::DetachFromBusGraph()
 
     if (voice.m_bEnvSplitterValid)
     {
-      ma_node_detach_output_bus(pTail, 1);
-      voice.m_pEnvAux = nullptr;
+      for (plUInt32 uiSend = 0; uiSend < MaxEnvironmentSends; ++uiSend)
+      {
+        ma_node_detach_output_bus(pTail, 1 + uiSend);
+        voice.m_EnvAux[uiSend] = nullptr;
+      }
     }
   }
 }
@@ -1586,8 +1708,9 @@ void plPlasmaAudioEventInstance::ApplyModulation()
     fPitch *= plMath::Clamp(m_pEntity->m_fPitchMultiplier, 0.01f, 10.0f);
   }
 
-  // fades to silence toward the max distance, where the audibility reaches 0 and the voice is virtualized
-  fVolume *= GetDistanceFade();
+  // the distance curve fades to silence toward the max distance, where the audibility reaches 0 and the voice is
+  // virtualized; occlusion lowers the volume as configured
+  m_fCurrentSpatialGain = ComputeSpatialGain();
 
   // instruments placed on a parameter range follow that parameter
   for (plUInt32 i = 0; i < m_Instruments.GetCount() && i < desc.m_Instruments.GetCount(); ++i)
@@ -1722,7 +1845,7 @@ void plPlasmaAudioEventInstance::AppendSnapshotVoices(plDynamicArray<plAudioVoic
     entry.m_fAudibility = m_fAudibility;
     entry.m_fDistance = m_fDistance;
     entry.m_fOcclusion = fOcclusion;
-    entry.m_fVolume = m_fCurrentVolumeMultiplier * GetVoiceVolume(voice);
+    entry.m_fVolume = m_fCurrentVolumeMultiplier * m_fCurrentSpatialGain * GetVoiceVolume(voice);
     entry.m_fAge = static_cast<float>(m_Elapsed.GetSeconds());
     entry.m_sBus = sBus;
 
@@ -1781,12 +1904,12 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
   ApplyGlobalParameters();
 
   // built-in Distance parameter
-  if (m_pEntity != nullptr && !m_pEntity->m_bGlobalEntity)
+  float fDistance = 0.0f;
+  if (GetListenerDistance(fDistance))
   {
     const plUInt32 uiDistanceParam = desc.FindParameterByName("Distance");
     if (uiDistanceParam != plInvalidIndex && uiDistanceParam < m_ParameterValues.GetCount())
     {
-      const float fDistance = (m_pEntity->m_LastTransform.m_vPosition - m_vListenerPos).GetLength();
       m_ParameterValues[uiDistanceParam] = plMath::Clamp(fDistance, desc.m_Parameters[uiDistanceParam].m_fMin, desc.m_Parameters[uiDistanceParam].m_fMax);
     }
   }
@@ -1794,7 +1917,44 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
   ApplyModulation();
 
   const float fOcclusionCutoff = GetOcclusionCutoff();
-  const auto* pDominantEnv = (m_pEntity != nullptr) ? m_pEntity->GetDominantEnvironment() : nullptr;
+
+  // the environments with the largest amounts (each zone's falloff), blended: overlapping zones share the send level
+  struct EnvironmentSend
+  {
+    ma_sound_group* m_pAux = nullptr;
+    float m_fLevel = 0.0f;
+  };
+
+  plHybridArray<EnvironmentSend, MaxEnvironmentSends> environmentSends;
+  if (m_pEntity != nullptr && m_pBusGraph != nullptr && m_pBusGraph->IsBuilt())
+  {
+    plHybridArray<EnvironmentSend, 4> candidates;
+    for (const auto& env : m_pEntity->m_Environments)
+    {
+      if (env.m_fAmount <= 0.0001f)
+        continue;
+
+      if (ma_sound_group* pAux = m_pBusGraph->GetEnvironmentAuxBus(env.m_sName))
+      {
+        candidates.PushBack({pAux, plMath::Clamp(env.m_fAmount, 0.0f, 1.0f)});
+      }
+    }
+
+    candidates.Sort([](const EnvironmentSend& a, const EnvironmentSend& b)
+      { return a.m_fLevel > b.m_fLevel; });
+
+    float fTotal = 0.0f;
+    for (plUInt32 i = 0; i < candidates.GetCount() && i < MaxEnvironmentSends; ++i)
+    {
+      environmentSends.PushBack(candidates[i]);
+      fTotal += candidates[i].m_fLevel;
+    }
+
+    for (EnvironmentSend& send : environmentSends)
+    {
+      send.m_fLevel /= plMath::Max(fTotal, 1.0f);
+    }
+  }
 
   bool bAnyActive = false;
   bool bAnyPending = false;
@@ -1885,13 +2045,16 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
         {
           const plVec3 vPos = m_pEntity->m_LastTransform.m_vPosition;
           const plVec3 vVel = m_pEntity->m_LastTransform.m_vVelocity;
+          const plVec3 vDir = m_pEntity->m_LastTransform.m_vForward;
           ma_sound_set_position(&voice.m_Sound, vPos.x, vPos.y, vPos.z);
           ma_sound_set_velocity(&voice.m_Sound, vVel.x, vVel.y, vVel.z);
+          ma_sound_set_direction(&voice.m_Sound, vDir.x, vDir.y, vDir.z);
+          UpdateSpatializer(voice);
         }
 
         if (!m_bStopping)
         {
-          ma_sound_set_volume(&voice.m_Sound, GetVoiceVolume(voice) * m_fCurrentVolumeMultiplier);
+          ma_sound_set_volume(&voice.m_Sound, GetVoiceVolume(voice) * m_fCurrentVolumeMultiplier * m_fCurrentSpatialGain);
           ma_sound_set_pitch(&voice.m_Sound, voice.m_fBasePitch * m_fCurrentPitchMultiplier);
         }
 
@@ -1901,27 +2064,28 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
           plMiniAudioDsp::SetFilter(&voice.m_OcclusionFilter, fOcclusionCutoff, 2, 0.0f, 1.0f);
         }
 
-        // environment send
+        // environment sends
         if (voice.m_bEnvSplitterValid && m_pBusGraph != nullptr)
         {
           ma_node* pSplitter = reinterpret_cast<ma_node*>(&voice.m_EnvSplitter);
 
-          if (pDominantEnv != nullptr)
+          for (plUInt32 uiSend = 0; uiSend < MaxEnvironmentSends; ++uiSend)
           {
-            if (ma_sound_group* pAux = m_pBusGraph->GetEnvironmentAuxBus(pDominantEnv->m_sName))
+            if (uiSend >= environmentSends.GetCount())
             {
-              // re-attaching is only needed when the dominant environment changed
-              if (voice.m_pEnvAux != pAux)
-              {
-                ma_node_attach_output_bus(pSplitter, 1, reinterpret_cast<ma_node*>(pAux), 0);
-                voice.m_pEnvAux = pAux;
-              }
-              ma_node_set_output_bus_volume(pSplitter, 1, plMath::Clamp(pDominantEnv->m_fAmount, 0.0f, 1.0f));
+              ma_node_set_output_bus_volume(pSplitter, 1 + uiSend, 0.0f);
+              continue;
             }
-          }
-          else
-          {
-            ma_node_set_output_bus_volume(pSplitter, 1, 0.0f);
+
+            // re-attaching is only needed when the environment of this send changed
+            ma_sound_group* pAux = environmentSends[uiSend].m_pAux;
+            if (voice.m_EnvAux[uiSend] != pAux)
+            {
+              ma_node_attach_output_bus(pSplitter, 1 + uiSend, reinterpret_cast<ma_node*>(pAux), 0);
+              voice.m_EnvAux[uiSend] = pAux;
+            }
+
+            ma_node_set_output_bus_volume(pSplitter, 1 + uiSend, environmentSends[uiSend].m_fLevel);
           }
         }
       }
@@ -2697,6 +2861,26 @@ void plPlasmaAudioEventManager::StopAllOnEntity(const plPlasmaAudioEntityData* p
         // the entity data is about to be destroyed — sever the link
         pInstance->m_pEntity = nullptr;
       }
+    }
+  }
+}
+
+void plPlasmaAudioEventManager::GetDebugSnapshot(plAudioDebugSnapshot& out_snapshot) const
+{
+  PL_LOCK(m_Mutex);
+
+  out_snapshot.m_Listeners = m_Listeners;
+  out_snapshot.m_uiRealVoices = GetRealVoiceCount();
+  out_snapshot.m_uiVirtualVoices = GetVirtualVoiceCount();
+  out_snapshot.m_uiMaxRealVoices = plAudioVoiceManager::GetMaxRealVoices();
+  out_snapshot.m_Emitters.Clear();
+
+  for (const auto& pInstance : m_Instances)
+  {
+    plAudioDebugEmitter emitter;
+    if (pInstance->GetDebugEmitter(emitter))
+    {
+      out_snapshot.m_Emitters.PushBack(std::move(emitter));
     }
   }
 }

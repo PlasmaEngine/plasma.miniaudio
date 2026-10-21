@@ -5,6 +5,7 @@
 #include <EditorFramework/Assets/AssetCurator.h>
 #include <GuiFoundation/UIServices/DynamicStringEnum.h>
 #include <EditorPluginPlasmaAudio/Actions/MiniAudioActions.h>
+#include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationAsset.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioShellPanels.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
@@ -155,6 +156,7 @@ void OnLoadPlugin()
   plPropertyMetaState::GetSingleton()->m_Events.AddEventHandler(plAudioEventAssetProperties::PropertyMetaStateEventHandler);
   plPropertyMetaState::GetSingleton()->m_Events.AddEventHandler(plAudioMixerAssetProperties::PropertyMetaStateEventHandler);
   plPropertyMetaState::GetSingleton()->m_Events.AddEventHandler(plAudioClipAssetProperties::PropertyMetaStateEventHandler);
+  plPropertyMetaState::GetSingleton()->m_Events.AddEventHandler(plAudioAttenuationAssetProperties::PropertyMetaStateEventHandler);
 
   // Mesh
   {
@@ -201,8 +203,8 @@ void OnLoadPlugin()
     plAssetActions::MapToolBarActions(szToolBar, true);
   }
 
-  // Audio Clip and Audio Bank assets
-  for (const char* szAsset : {"AudioClipAsset", "AudioBankAsset"})
+  // Audio Clip, Audio Bank and Audio Attenuation assets
+  for (const char* szAsset : {"AudioClipAsset", "AudioBankAsset", "AudioAttenuationAsset"})
   {
     plStringBuilder szMenuBar(szAsset, "MenuBar");
     plActionMapManager::RegisterActionMap(szMenuBar).IgnoreResult();
@@ -262,6 +264,7 @@ void OnUnloadPlugin()
   plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(plAudioEventAssetProperties::PropertyMetaStateEventHandler);
   plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(plAudioMixerAssetProperties::PropertyMetaStateEventHandler);
   plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(plAudioClipAssetProperties::PropertyMetaStateEventHandler);
+  plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(plAudioAttenuationAssetProperties::PropertyMetaStateEventHandler);
 }
 
 static void ToolsProjectEventHandler(const plToolsProjectEvent& e)

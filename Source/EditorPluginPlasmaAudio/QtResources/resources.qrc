@@ -1,5 +1,6 @@
 <RCC>
   <qresource prefix="AssetIcons">
+    <file>AudioAttenuation.svg</file>
     <file>AudioBank.svg</file>
     <file>AudioClip.svg</file>
     <file>AudioEvent.svg</file>
@@ -15,6 +16,7 @@
     <file>SoundOff.svg</file>
   </qresource>
   <qresource prefix="PlasmaAudioIcons">
+    <file>AudioAttenuation.svg</file>
     <file>AudioBank.svg</file>
     <file>AudioClip.svg</file>
     <file>AudioEvent.svg</file>

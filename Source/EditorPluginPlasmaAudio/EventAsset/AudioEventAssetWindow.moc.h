@@ -9,6 +9,7 @@
 
 class QTimer;
 class QVBoxLayout;
+class plEditorUiAudioAttenuation;
 class plEditorUiAudioEventAutomation;
 class plEditorUiAudioEventDeck;
 class plEditorUiAudioEventTimeline;
@@ -118,5 +119,7 @@ private:
   plEditorUiAudioEventDeck* m_pDeckView = nullptr;
   plQtEngineUiContentWidget* m_pDeckWidget = nullptr; ///< takes the height the deck's playlist needs
   plEditorUiAudioEventAutomation* m_pAutomationView = nullptr;
+  plEditorUiAudioAttenuation* m_pAttenuationView = nullptr;
+  plQtEngineUiContentWidget* m_pAttenuationWidget = nullptr; ///< under the event macros; hidden for a 2D event
   plEditorUiAudioStatusRow* m_pStatusView = nullptr;
 };

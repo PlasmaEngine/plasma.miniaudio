@@ -16,12 +16,17 @@
 // version 5: playlist entry clip reference
 // version 6: voice priority + virtual mode
 // version 7: instrument parameter range
-static constexpr plTypeVersion kAudioEventDescVersion = 7;
+// version 8: attenuation curve, cone, spread, occlusion settings
+static constexpr plTypeVersion kAudioEventDescVersion = 8;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventResource, 1, plRTTIDefaultAllocator<plAudioEventResource>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
 // clang-format off
+PL_BEGIN_STATIC_REFLECTED_ENUM(plAudioAttenuationCurve, 1)
+  PL_ENUM_CONSTANTS(plAudioAttenuationCurve::Inverse, plAudioAttenuationCurve::Linear, plAudioAttenuationCurve::Logarithmic, plAudioAttenuationCurve::Custom, plAudioAttenuationCurve::None)
+PL_END_STATIC_REFLECTED_ENUM;
+
 PL_BEGIN_STATIC_REFLECTED_ENUM(plAudioEventPlaylistMode, 1)
   PL_ENUM_CONSTANTS(plAudioEventPlaylistMode::Random, plAudioEventPlaylistMode::Shuffle, plAudioEventPlaylistMode::Sequential)
 PL_END_STATIC_REFLECTED_ENUM;
@@ -197,6 +202,17 @@ plResult plAudioEventDesc::Save(plStreamWriter& inout_stream) const
   inout_stream << m_fRolloff;
   inout_stream << m_fDopplerFactor;
 
+  inout_stream << static_cast<plUInt8>(m_eAttenuationCurve);
+  inout_stream << m_AttenuationPoints.GetCount();
+  for (const plVec2& point : m_AttenuationPoints)
+    inout_stream << point;
+  inout_stream << m_fConeInnerAngle;
+  inout_stream << m_fConeOuterAngle;
+  inout_stream << m_fConeOuterGainDb;
+  inout_stream << m_fSpread;
+  inout_stream << m_fOcclusionCutoffHz;
+  inout_stream << m_fOcclusionVolumeDb;
+
   inout_stream << m_Instruments.GetCount();
   for (const auto& instrument : m_Instruments)
     instrument.Save(inout_stream);
@@ -253,6 +269,35 @@ plResult plAudioEventDesc::Load(plStreamReader& inout_stream)
 
   plUInt32 uiCount = 0;
 
+  // older events keep the inverse curve, which is what they played with, and get no cone, spread or occlusion volume
+  m_eAttenuationCurve = plAudioAttenuationCurve::Inverse;
+  m_AttenuationPoints.Clear();
+  m_fConeInnerAngle = 360.0f;
+  m_fConeOuterAngle = 360.0f;
+  m_fConeOuterGainDb = -12.0f;
+  m_fSpread = 0.0f;
+  m_fOcclusionCutoffHz = 250.0f;
+  m_fOcclusionVolumeDb = 0.0f;
+
+  if (uiVersion >= 8)
+  {
+    plUInt8 uiCurve = 0;
+    inout_stream >> uiCurve;
+    m_eAttenuationCurve = static_cast<plAudioAttenuationCurve::Enum>(uiCurve);
+
+    inout_stream >> uiCount;
+    m_AttenuationPoints.SetCount(uiCount);
+    for (plVec2& point : m_AttenuationPoints)
+      inout_stream >> point;
+
+    inout_stream >> m_fConeInnerAngle;
+    inout_stream >> m_fConeOuterAngle;
+    inout_stream >> m_fConeOuterGainDb;
+    inout_stream >> m_fSpread;
+    inout_stream >> m_fOcclusionCutoffHz;
+    inout_stream >> m_fOcclusionVolumeDb;
+  }
+
   inout_stream >> uiCount;
   m_Instruments.SetCount(uiCount);
   for (auto& instrument : m_Instruments)
@@ -274,6 +319,96 @@ plResult plAudioEventDesc::Load(plStreamReader& inout_stream)
     inout_stream >> sName;
 
   return PL_SUCCESS;
+}
+
+float plAudioEventDesc::GetDistanceGain(float fDistance) const
+{
+  if (!m_bSpatialize)
+    return 1.0f;
+
+  const float fMin = plMath::Max(m_fMinDistance, 0.0001f);
+  const float fMax = plMath::Max(m_fMaxDistance, fMin + 0.0001f);
+
+  if (fDistance <= fMin)
+    return 1.0f;
+
+  if (fDistance >= fMax)
+    return 0.0f;
+
+  const float fNormalized = (fDistance - fMin) / (fMax - fMin);
+
+  float fGain = 1.0f;
+  switch (m_eAttenuationCurve)
+  {
+    case plAudioAttenuationCurve::Inverse:
+      fGain = fMin / (fMin + plMath::Max(m_fRolloff, 0.0f) * (fDistance - fMin));
+      break;
+
+    case plAudioAttenuationCurve::Linear:
+      fGain = 1.0f - fNormalized;
+      break;
+
+    case plAudioAttenuationCurve::Logarithmic:
+      fGain = 1.0f - plMath::Ln(fDistance / fMin) / plMath::Ln(fMax / fMin);
+      break;
+
+    case plAudioAttenuationCurve::Custom:
+    {
+      // straight lines from (0, 1) through the points; the last point's gain holds to the max distance
+      plVec2 prev(0.0f, 1.0f);
+      fGain = m_AttenuationPoints.IsEmpty() ? 1.0f - fNormalized : m_AttenuationPoints.PeekBack().y;
+
+      for (const plVec2& point : m_AttenuationPoints)
+      {
+        if (fNormalized <= point.x)
+        {
+          const float fT = point.x > prev.x ? (fNormalized - prev.x) / (point.x - prev.x) : 1.0f;
+          fGain = plMath::Lerp(prev.y, point.y, plMath::Clamp(fT, 0.0f, 1.0f));
+          break;
+        }
+
+        prev = point;
+      }
+      break;
+    }
+
+    case plAudioAttenuationCurve::None:
+      break;
+  }
+
+  // the last 15 % of [min, max] fade to silence, which is where the voice manager virtualizes the event
+  constexpr float fFadeShare = 0.15f;
+  const float fFade = plMath::Clamp((1.0f - fNormalized) / fFadeShare, 0.0f, 1.0f);
+
+  return plMath::Clamp(fGain, 0.0f, 1.0f) * fFade;
+}
+
+float plAudioEventDesc::GetConeGain(float fAngleDegrees) const
+{
+  const float fInner = plMath::Clamp(m_fConeInnerAngle, 0.0f, 360.0f) * 0.5f;
+  const float fOuter = plMath::Clamp(plMath::Max(m_fConeOuterAngle, m_fConeInnerAngle), 0.0f, 360.0f) * 0.5f;
+  const float fAngle = plMath::Abs(fAngleDegrees);
+
+  if (fAngle <= fInner)
+    return 1.0f;
+
+  const float fOuterGain = plMath::Pow(10.0f, m_fConeOuterGainDb / 20.0f);
+  if (fAngle >= fOuter)
+    return fOuterGain;
+
+  return plMath::Lerp(1.0f, fOuterGain, (fAngle - fInner) / plMath::Max(fOuter - fInner, 0.0001f));
+}
+
+float plAudioEventDesc::GetOcclusionCutoff(float fOcclusion) const
+{
+  // exponential sweep from fully open (22 kHz) down to the event's cutoff
+  const float fCutoff = plMath::Clamp(m_fOcclusionCutoffHz, 20.0f, 22000.0f);
+  return 22000.0f * plMath::Pow(fCutoff / 22000.0f, plMath::Clamp(fOcclusion, 0.0f, 1.0f));
+}
+
+float plAudioEventDesc::GetOcclusionGain(float fOcclusion) const
+{
+  return plMath::Pow(10.0f, m_fOcclusionVolumeDb * plMath::Clamp(fOcclusion, 0.0f, 1.0f) / 20.0f);
 }
 
 plUInt32 plAudioEventDesc::FindParameterByName(plStringView sName) const

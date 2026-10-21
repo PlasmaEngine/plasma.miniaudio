@@ -1,6 +1,8 @@
 #pragma once
 
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
+#include <PlasmaAudioPlugin/Events/AudioSpatializer.h>
+#include <PlasmaAudioPlugin/Profiling/AudioDebugSnapshot.h>
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/Containers/HashTable.h>
 #include <Foundation/Math/Random.h>
@@ -129,6 +131,9 @@ public:
   /// \brief Duration of the fades that hide a voice's changes between real and virtual.
   static constexpr plTime VirtualFadeDuration = plTime::MakeFromMilliseconds(10);
 
+  /// \brief How many environments a voice sends to at once: the ones with the largest amounts, blended by amount.
+  static constexpr plUInt32 MaxEnvironmentSends = 3;
+
   /// \brief Stops every voice, releases the event resource and unbinds the event data, then returns all members to
   /// their defaults. Array capacities and allocated clip sources are kept for the next Start().
   void Reset();
@@ -164,7 +169,14 @@ public:
   PL_NODISCARD plUInt32 GetActiveVoiceCount() const;
   PL_NODISCARD plUInt32 GetRealVoiceCount() const;
   PL_NODISCARD plUInt32 GetVirtualVoiceCount() const;
-  PL_NODISCARD float GetEffectiveVolume() const { return m_fCurrentVolumeMultiplier; }
+  PL_NODISCARD float GetEffectiveVolume() const { return m_fCurrentVolumeMultiplier * m_fCurrentSpatialGain; }
+
+  /// \brief The distance and occlusion gain of the last update (see ComputeSpatialGain).
+  PL_NODISCARD float GetSpatialGain() const { return m_fCurrentSpatialGain; }
+
+  /// \brief Fills the emitter the Audio view mode draws for this instance. Returns false for an event without a place
+  /// (global entity, 2D event, unloaded resource).
+  bool GetDebugEmitter(plAudioDebugEmitter& out_emitter) const;
   PL_NODISCARD plTime GetAge() const { return m_Elapsed; }
 
   /// \brief Position on the event's timeline in seconds: time since the start (plus the start offset), restarting at
@@ -277,7 +289,9 @@ private:
     ma_sound m_Sound = {};
     plMaFilterNode m_OcclusionFilter;        ///< low pass, initialized with the engine's allocation callbacks while m_bOcclusionLpfValid
     ma_splitter_node m_EnvSplitter = {};     ///< initialized with the engine's allocation callbacks while m_bEnvSplitterValid
-    ma_sound_group* m_pEnvAux = nullptr;     ///< aux bus the splitter's wet output is attached to; null while unattached
+    ma_sound_group* m_EnvAux[MaxEnvironmentSends] = {}; ///< aux bus each wet output (splitter output 1 + i) is attached to; null while unattached
+    ma_node* m_pSpatializerNode = nullptr;              ///< the active spatializer's node after the sound, or null (miniaudio pans)
+    plAudioSpatializer* m_pSpatializer = nullptr;       ///< the spatializer that created m_pSpatializerNode
     double m_fVirtualCursor = 0.0;         ///< virtual voices: timeline position in source frames at m_uiVirtualCursorFrame
     ma_uint64 m_uiVirtualCursorFrame = 0;  ///< virtual voices: engine frame m_fVirtualCursor belongs to
     ma_uint64 m_uiStartFrame = 0;          ///< absolute engine frame at which the voice's timeline starts
@@ -402,9 +416,20 @@ private:
   /// \brief Virtual voices: advances m_fVirtualCursor to uiNow at the current pitch.
   void AdvanceVirtualCursor(Voice& voice, ma_uint64 uiNow) const;
 
-  /// \brief Volume factor that fades a spatialized event to silence over the last part of its range up to the max
-  /// distance, so it does not cut out when it is virtualized there. 1 for non-spatialized events.
-  float GetDistanceFade() const;
+  /// \brief The distance to the closest listener, or the audition's distance for a global entity of the editor's
+  /// audition. False for other global entities.
+  bool GetListenerDistance(float& out_fDistance) const;
+
+  /// \brief The gain of the distance curve (including its fade before the max distance) and the occlusion volume, for
+  /// the closest listener. The distance part is 1 for a global entity without an audition distance or a 2D event.
+  float ComputeSpatialGain() const;
+
+  /// \brief The cone gain for the closest listener; 1 without a cone. miniaudio applies the cone to the sound itself,
+  /// so this only feeds the audibility.
+  float ComputeConeGain() const;
+
+  /// \brief Hands the voice's placement to its spatializer node, if it has one.
+  void UpdateSpatializer(Voice& ref_voice) const;
 
   plAudioEventResourceHandle m_hResource;            ///< keeps the event resource alive while m_pResource is set
   const plAudioEventResource* m_pResource = nullptr; ///< acquired until destruction or OnEventUnloading()
@@ -434,6 +459,7 @@ private:
   plTime m_Elapsed;
   bool m_bStopping = false;
   float m_fCurrentVolumeMultiplier = 1.0f;
+  float m_fCurrentSpatialGain = 1.0f; ///< ComputeSpatialGain of the last update
   float m_fCurrentPitchMultiplier = 1.0f;
   float m_fAudibility = 1.0f;
   float m_fDistance = 0.0f;                   ///< entity to listener distance at the last audibility computation
@@ -493,6 +519,9 @@ public:
 
   void StopAllOnEntity(const plPlasmaAudioEntityData* pEntity, bool bImmediate);
   void StopAll(bool bImmediate);
+
+  /// \brief Fills the emitters, listeners and voice counts the Audio view mode draws.
+  void GetDebugSnapshot(plAudioDebugSnapshot& out_snapshot) const;
 
   /// \brief Detaches every instance playing on the bus graph from its buses, before the graph is rebuilt in place.
   void DetachFromBusGraph(const plMiniAudioBusGraph* pBusGraph);

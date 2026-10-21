@@ -26,6 +26,15 @@ namespace
     desc.m_fMaxDistance = 40.0f;
     desc.m_fRolloff = 1.75f;
     desc.m_fDopplerFactor = 0.5f;
+    desc.m_eAttenuationCurve = plAudioAttenuationCurve::Custom;
+    desc.m_AttenuationPoints.PushBack(plVec2(0.25f, 0.6f));
+    desc.m_AttenuationPoints.PushBack(plVec2(0.75f, 0.1f));
+    desc.m_fConeInnerAngle = 60.0f;
+    desc.m_fConeOuterAngle = 150.0f;
+    desc.m_fConeOuterGainDb = -18.0f;
+    desc.m_fSpread = 90.0f;
+    desc.m_fOcclusionCutoffHz = 800.0f;
+    desc.m_fOcclusionVolumeDb = -9.0f;
 
     {
       plAudioEventInstrumentDesc& instrument = desc.m_Instruments.ExpandAndGetRef();
@@ -167,6 +176,29 @@ namespace
     PL_TEST_FLOAT(loaded.m_fMaxDistance, reference.m_fMaxDistance, 0.0f);
     PL_TEST_FLOAT(loaded.m_fRolloff, reference.m_fRolloff, 0.0f);
     PL_TEST_FLOAT(loaded.m_fDopplerFactor, reference.m_fDopplerFactor, 0.0f);
+
+    // version 8: the attenuation curve, cone, spread and occlusion filter; older events keep their inverse rolloff and
+    // the occlusion volume they had (none)
+    {
+      plAudioEventDesc v8 = defaults;
+      v8.m_fOcclusionVolumeDb = 0.0f;
+      if (uiVersion >= 8)
+        v8 = reference;
+
+      PL_TEST_INT(loaded.m_eAttenuationCurve, v8.m_eAttenuationCurve);
+      if (PL_TEST_INT(loaded.m_AttenuationPoints.GetCount(), v8.m_AttenuationPoints.GetCount()))
+      {
+        for (plUInt32 i = 0; i < loaded.m_AttenuationPoints.GetCount(); ++i)
+          PL_TEST_VEC2(loaded.m_AttenuationPoints[i], v8.m_AttenuationPoints[i], 0.0f);
+      }
+
+      PL_TEST_FLOAT(loaded.m_fConeInnerAngle, v8.m_fConeInnerAngle, 0.0f);
+      PL_TEST_FLOAT(loaded.m_fConeOuterAngle, v8.m_fConeOuterAngle, 0.0f);
+      PL_TEST_FLOAT(loaded.m_fConeOuterGainDb, v8.m_fConeOuterGainDb, 0.0f);
+      PL_TEST_FLOAT(loaded.m_fSpread, v8.m_fSpread, 0.0f);
+      PL_TEST_FLOAT(loaded.m_fOcclusionCutoffHz, v8.m_fOcclusionCutoffHz, 0.0f);
+      PL_TEST_FLOAT(loaded.m_fOcclusionVolumeDb, v8.m_fOcclusionVolumeDb, 0.0f);
+    }
 
     if (PL_TEST_INT(loaded.m_Instruments.GetCount(), reference.m_Instruments.GetCount()))
     {
@@ -416,7 +448,7 @@ PL_CREATE_SIMPLE_TEST(Desc, EventRoundTrip)
     plAudioEventDesc loaded;
     PL_TEST_RESULT(loaded.Load(reader));
 
-    CompareEventDesc(loaded, reference, 7);
+    CompareEventDesc(loaded, reference, 8);
 
     // the whole stream was consumed
     plUInt8 uiExtra = 0;

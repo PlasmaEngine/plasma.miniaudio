@@ -2,6 +2,7 @@
 
 #include <EditorFramework/Assets/EngineAssetPicker.h>
 #include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
+#include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationView.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineViews.h>
@@ -113,6 +114,14 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
     pWidget->layout()->setContentsMargins(0, 0, 0, 0);
     pWidget->layout()->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
     pWidget->layout()->addWidget(pPropertyGrid);
+
+    // the attenuation curve under the macros; its listener marker is the Distance the audition plays at
+    m_pAttenuationView = plQtEngineUiContentWidget::Create<plEditorUiAudioAttenuation>(pWidget, "AudioEventAttenuation", &m_pAttenuationWidget, pDocument);
+    m_pAttenuationWidget->SetFixedLogicalHeight(plEditorUiAudioAttenuation::GetMinimumHeight() + 20.0f);
+    m_pAttenuationView->SetListenerDistance(m_pTimelineView->GetAuditionValue("Distance", 0.0f));
+    m_pAttenuationView->m_OnListenerDistanceChanged = [this](float fDistance)
+    { m_pTimelineView->SetAuditionValue("Distance", fDistance); };
+    pWidget->layout()->addWidget(m_pAttenuationWidget);
 
     pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
 
@@ -230,7 +239,12 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
     m_pTimelineView->m_OnTogglePlay = [this]()
     { OnTogglePlay(); };
     m_pTimelineView->m_OnAuditionValueChanged = [this](const plString& sName, float fValue)
-    { OnAuditionParameterChanged(sName, fValue); };
+    {
+      if (sName.IsEqual_NoCase("Distance") && m_pAttenuationView != nullptr)
+        m_pAttenuationView->SetListenerDistance(fValue);
+
+      OnAuditionParameterChanged(sName, fValue);
+    };
     pSplitter->addWidget(pTimelineWidget);
   }
 
@@ -446,6 +460,10 @@ void plAudioEventAssetDocumentWindow::QueueRefresh()
         m_pDeckView->SetInstrument(pInstrument != nullptr ? pInstrument->GetGuid() : plUuid());
         m_pDeckWidget->SetFixedLogicalHeight(m_pDeckView->GetContentHeight());
         m_pAutomationView->SetAutomation(pAutomation != nullptr ? pAutomation->GetGuid() : plUuid());
+
+        // the attenuation panel only matters for a spatialized event
+        const bool bSpatialize = GetPropertiesObject()->GetTypeAccessor().GetValue("Spatialize").ConvertTo<bool>();
+        m_pAttenuationWidget->setVisible(bSpatialize);
       }
 
       plHybridArray<const plDocumentObject*, 8> instruments, parameters, automations;
@@ -833,6 +851,10 @@ void plAudioEventAssetDocumentWindow::StartAudition(const plUuid& entryGuid, dou
   msg.m_fStartOffset = fStartOffset;
   msg.m_bSeeded = true;
   msg.m_uiSeed = m_uiSeed;
+
+  // a spatialized event plays at the Distance tab's distance
+  if (desc.m_bSpatialize && m_pTimelineView != nullptr)
+    msg.m_fDistance = m_pTimelineView->GetAuditionValue("Distance", 0.0f);
 
   if (plPlasmaAudioProjectPreferences* pPreferences = plPreferences::QueryPreferences<plPlasmaAudioProjectPreferences>())
   {

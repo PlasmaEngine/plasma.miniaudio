@@ -57,6 +57,9 @@ public:
   /// The value a parameter is auditioned with: the scrubbed value, else fDefault.
   float GetAuditionValue(plStringView sParameter, float fDefault) const;
 
+  /// Scrubs a parameter's audition value, as dragging in its tab does (raises m_OnAuditionValueChanged).
+  void SetAuditionValue(const plString& sName, float fValue);
+
   /// The audition's state: whether it plays, its timeline position and which instruments sound (one byte each).
   void SetPlayback(bool bPlaying, double fPosition, plArrayPtr<const plUInt8> sounding);
 
@@ -108,14 +111,23 @@ private:
   /// from an embedded sound file. Empty when unknown.
   const plDynamicArray<float>& GetEntryPeaks(const plDocumentObject* pEntry) const;
 
+  /// The parameter a tab shows: an entry of Parameters, or the built-in Distance (0 to MaxDistance) of a spatialized
+  /// event that has no parameter of that name.
+  struct TabParameter
+  {
+    plString m_sName;
+    float m_fMin = 0.0f;
+    float m_fMax = 1.0f; ///< greater than m_fMin
+    float m_fDefault = 0.0f;
+  };
+
   // parameter tabs
-  const plDocumentObject* GetCurrentParameter() const;
-  void GetParameterRange(const plDocumentObject* pParameter, float& out_fMin, float& out_fMax) const;
-  float ValueToX(const plDocumentObject* pParameter, float fValue) const;
-  float XToValue(const plDocumentObject* pParameter, float x) const;
-  void SetAuditionValue(const plDocumentObject* pParameter, float fValue);
-  void DrawParameterRuler(const plRectFloat& canvas, const plDocumentObject* pParameter);
-  void DrawParameterTrack(const plDocumentObject* pInstrument, plUInt32 uiIndex, const plDocumentObject* pParameter, bool bAnySolo, const plUuid& selected);
+  bool GetCurrentParameter(TabParameter& out_parameter) const;
+  bool IsParameterTab() const;
+  float ValueToX(const TabParameter& parameter, float fValue) const;
+  float XToValue(const TabParameter& parameter, float x) const;
+  void DrawParameterRuler(const plRectFloat& canvas, const TabParameter& parameter);
+  void DrawParameterTrack(const plDocumentObject* pInstrument, plUInt32 uiIndex, const TabParameter& parameter, bool bAnySolo, const plUuid& selected);
   DragHandle PickRangeHandle(const plVec2& vPos, plUuid& out_instrumentGuid) const;
   void ApplyRangeDrag(float x, bool bFinal);
   double GetInstrumentDelay(const plDocumentObject* pInstrument) const;
@@ -173,7 +185,8 @@ private:
   // tabs: Timeline and one per parameter
   plUniquePtr<plEditorUiTabs> m_pTabs;
   plHybridArray<plString, 8> m_TabLabels;
-  plHybridArray<plUuid, 8> m_TabParameters; ///< invalid for the Timeline tab
+  plHybridArray<plUuid, 8> m_TabParameters; ///< invalid for the Timeline tab and the built-in Distance tab
+  plUInt32 m_uiBuiltInDistanceTab = plInvalidIndex;
   plUInt32 m_uiCurrentTab = 0;
   float m_fAddTabX = 0.0f;
 

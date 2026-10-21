@@ -5,7 +5,6 @@
 #include <EnginePluginPlasmaAudio/Audition/AudioAuditionMessages.h>
 #include <EditorFramework/Assets/SimpleAssetDocument.h>
 #include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
-#include <EditorPluginPlasmaAudio/EventAsset/AudioRolloffAttribute.h>
 
 /// \brief One entry of an instrument playlist.
 ///
@@ -117,10 +116,21 @@ public:
 
   // spatializer
   bool m_bSpatialize = true;
+  plString m_sAttenuation; ///< a shared Audio Attenuation asset; replaces the curve and distances below
+  plEnum<plAudioAttenuationCurve> m_eCurve;
   float m_fMinDistance = 1.0f;
   float m_fMaxDistance = 100.0f;
   float m_fRolloff = 1.0f;
+  plDynamicArray<plAudioEventCurvePoint> m_CurvePoints; ///< Custom curve: x = 0..1 between min and max, y = gain
+  float m_fConeInnerAngle = 360.0f;
+  float m_fConeOuterAngle = 360.0f;
+  float m_fConeOuterVolumeDb = -12.0f;
+  float m_fSpread = 0.0f;
   float m_fDopplerFactor = 0.0f;
+
+  // occlusion
+  float m_fOcclusionCutoff = 250.0f; ///< Hz at full occlusion
+  float m_fOcclusionVolumeDb = -6.0f;
 
   plDynamicArray<plAudioEventInstrument> m_Instruments;
   plDynamicArray<plAudioEventParameter> m_Parameters;
@@ -143,6 +153,10 @@ public:
 
   /// \brief The runtime description of the event as it is edited now (not as it was saved).
   plStatus BuildEventDesc(plAudioEventDesc& out_desc) const;
+
+  /// \brief Writes the distance curve into the description: the event's own, or the saved one of its shared Audio
+  /// Attenuation.
+  plStatus BuildAttenuation(plAudioEventDesc& ref_desc) const;
 
   /// \brief The description followed by the embedded sound files: the data of an event resource.
   plStatus WriteEventData(plStreamWriter& inout_stream, const plAudioEventDesc& desc) const;

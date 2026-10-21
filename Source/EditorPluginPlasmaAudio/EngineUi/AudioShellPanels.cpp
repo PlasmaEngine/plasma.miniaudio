@@ -2,6 +2,8 @@
 
 #include <EditorFramework/EngineShell/AssetDocumentContent.h>
 #include <EditorFramework/EngineShell/DocumentFrame.h>
+#include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationAsset.h>
+#include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationView.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipWaveformView.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
@@ -161,7 +163,7 @@ void plEditorUiAudioShellStack::PlaceParts()
 bool plAudioShellPanels::Matches(const plDocument* pDocument) const
 {
   return plDynamicCast<const plAudioClipAssetDocument*>(pDocument) != nullptr || plDynamicCast<const plAudioEventAssetDocument*>(pDocument) != nullptr ||
-         plDynamicCast<const plAudioMixerAssetDocument*>(pDocument) != nullptr;
+         plDynamicCast<const plAudioMixerAssetDocument*>(pDocument) != nullptr || plDynamicCast<const plAudioAttenuationAssetDocument*>(pDocument) != nullptr;
 }
 
 void plAudioShellPanels::CreatePanels(plEditorUiDocumentFrame& ref_frame) const
@@ -173,6 +175,8 @@ void plAudioShellPanels::CreatePanels(plEditorUiDocumentFrame& ref_frame) const
     CreateEventPanels(ref_frame);
   else if (plDynamicCast<plAudioMixerAssetDocument*>(pDocument) != nullptr)
     CreateMixerPanels(ref_frame);
+  else if (plDynamicCast<plAudioAttenuationAssetDocument*>(pDocument) != nullptr)
+    CreateAttenuationPanels(ref_frame);
 }
 
 void plAudioShellPanels::Register()
@@ -260,13 +264,25 @@ void plAudioShellPanels::CreateEventPanels(plEditorUiDocumentFrame& ref_frame)
 
   pMain->AddLentPart(ref_frame, pWindow, "AudioEventStatus", plEditorUiAudioStatusRow::GetHeight());
 
-  // Event Macros: the asset's status and the event's own properties, whatever is selected
-  auto* pMacros = static_cast<plEditorUiAssetProperties*>(ref_frame.AddContent({"AudioEventAssetDockWidget", "Event Macros"}, PL_DEFAULT_NEW(plEditorUiAssetProperties, pDocument, pWindow)));
+  // Event Macros: the asset's status and the event's own properties, whatever is selected, over the attenuation curve
+  auto* pMacrosStack = static_cast<plEditorUiAudioShellStack*>(ref_frame.AddContent({"AudioEventAssetDockWidget", "Event Macros"}, PL_DEFAULT_NEW(plEditorUiAudioShellStack)));
+  pMacrosStack->SetSeparators(true);
+  auto* pMacros = static_cast<plEditorUiAssetProperties*>(pMacrosStack->AddOwnedPart(PL_DEFAULT_NEW(plEditorUiAssetProperties, pDocument, pWindow), 0.0f));
   plDeque<const plDocumentObject*> properties;
   properties.PushBack(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
   pMacros->GetGrid().FollowSelection(nullptr);
   pMacros->GetGrid().SetSourceDocument(pDocument);
   pMacros->GetGrid().SetSelection(properties);
+
+  // the window hides the curve for a 2D event; it then takes no room
+  if (plQtEngineUiContentWidget* pAttenuationWidget = FindView(pWindow, "AudioEventAttenuation"))
+  {
+    if (plEditorUiContent* pAttenuation = pMacrosStack->AddLentPart(ref_frame, pWindow, "AudioEventAttenuation", 0.0f, 0.0f))
+    {
+      pMacrosStack->SetExtentSource(pAttenuation, [pAttenuationWidget](float)
+        { return pAttenuationWidget->isHidden() ? 0.0f : plEditorUiAudioAttenuation::GetMinimumHeight() + 20.0f; });
+    }
+  }
 
   ref_frame.GetPanels().DockPanel("AudioEventAssetDockWidget", "AudioEventTimelineDockWidget", plEditorUiDockSide::Right, 0.24f);
 }
@@ -298,4 +314,16 @@ void plAudioShellPanels::CreateMixerPanels(plEditorUiDocumentFrame& ref_frame)
   panels.DockPanel("AudioMixerInsertDockWidget", "AudioMixerConsoleDockWidget", plEditorUiDockSide::Right, 0.24f);
   panels.DockPanel("AudioMixerAssetDockWidget", "AudioMixerInsertDockWidget", plEditorUiDockSide::Tab);
   panels.SetCurrentPanel("AudioMixerInsertDockWidget");
+}
+
+void plAudioShellPanels::CreateAttenuationPanels(plEditorUiDocumentFrame& ref_frame)
+{
+  QWidget* pWindow = ref_frame.GetContextWindow();
+  plAssetDocument* pDocument = static_cast<plAssetDocument*>(ref_frame.GetDocument());
+
+  // Attenuation: the curve over the asset's status and grid
+  auto* pMain = static_cast<plEditorUiAudioShellStack*>(ref_frame.AddContent({"AudioAttenuationAssetDockWidget", "Attenuation"}, PL_DEFAULT_NEW(plEditorUiAudioShellStack)));
+  pMain->SetSeparators(true);
+  pMain->AddLentPart(ref_frame, pWindow, "AudioAttenuationCurve", 0.0f, 3.0f);
+  pMain->AddOwnedPart(PL_DEFAULT_NEW(plEditorUiAssetProperties, pDocument, pWindow), 0.0f, 2.0f);
 }

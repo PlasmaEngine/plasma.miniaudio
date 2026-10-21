@@ -31,6 +31,10 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioAuditionRequest
 
   /// \brief Switch states as "Group/State".
   plDynamicArray<plString> m_SwitchStates;
+
+  /// \brief The event is heard at this distance from the listener, with its attenuation curve and the built-in Distance
+  /// parameter. Negative: unspatialized. SetParameters with "Distance" changes it while the event plays.
+  float m_fDistance = -1.0f;
 };
 
 /// \brief State of an audition, refreshed by every audio update.
@@ -74,7 +78,7 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioMixerMonitorStatus
 /// \brief Plays events for the editor's audition through the real event manager and mixer.
 ///
 /// Each audition is addressed by a key (the editor document) and plays on its own global entity, so the event is not
-/// spatialized. The requests are queued and carried out by the next audio update; GetStatus reports what the last
+/// panned; with a distance (plAudioAuditionRequest::m_fDistance) it is attenuated as if that far away. The requests are queued and carried out by the next audio update; GetStatus reports what the last
 /// update saw. Any thread.
 ///
 /// While at least one mixer console watches (SetMixerMonitor), every update also refreshes the mixer monitor status.

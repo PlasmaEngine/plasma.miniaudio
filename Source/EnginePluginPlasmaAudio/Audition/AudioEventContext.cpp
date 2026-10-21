@@ -77,6 +77,7 @@ void plAudioEventContext::HandleMessage(const plEditorEngineDocumentMsg* pMsg)
       request.m_bSeeded = pAuditionMsg->m_bSeeded;
       request.m_uiSeed = pAuditionMsg->m_uiSeed;
       request.m_SwitchStates = pAuditionMsg->m_SwitchStates;
+      request.m_fDistance = pAuditionMsg->m_fDistance;
       pAudition->Play(m_uiKey, request);
       break;
     }

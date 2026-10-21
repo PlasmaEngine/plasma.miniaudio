@@ -5,6 +5,7 @@
 #include <Core/ResourceManager/Resource.h>
 #include <Foundation/Containers/DynamicArray.h>
 #include <Foundation/Containers/HybridArray.h>
+#include <Foundation/Math/Vec2.h>
 #include <Foundation/Reflection/Reflection.h>
 #include <Foundation/Strings/String.h>
 #include <Foundation/Time/Time.h>
@@ -13,6 +14,25 @@
 
 using plAudioEventResourceHandle = plTypedResourceHandle<class plAudioEventResource>;
 using plDataBuffer = plDynamicArray<plUInt8>;
+
+/// \brief How a spatialized event's gain falls between its min and max distance.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioAttenuationCurve
+{
+  using StorageType = plUInt8;
+
+  enum Enum : StorageType
+  {
+    Inverse,     ///< min / (min + rolloff * (d - min)), the physical falloff
+    Linear,      ///< straight from 1 at min to 0 at max
+    Logarithmic, ///< 1 - log(d / min) / log(max / min): loud for longer, then quickly quiet
+    Custom,      ///< the event's attenuation points
+    None,        ///< no distance gain; only the fade before the max distance
+
+    Default = Inverse
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PLASMAAUDIOPLUGIN_DLL, plAudioAttenuationCurve);
 
 /// \brief How a multi-sound instrument advances through its playlist.
 struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventPlaylistMode
@@ -198,8 +218,39 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventDesc
   bool m_bSpatialize = true;
   float m_fMinDistance = 1.0f;
   float m_fMaxDistance = 100.0f;
-  float m_fRolloff = 1.0f;
+  float m_fRolloff = 1.0f; ///< Inverse curve only: how fast the gain falls past the min distance
   float m_fDopplerFactor = 0.0f;
+
+  /// \brief The gain over distance between the min and max distance (see GetDistanceGain).
+  plAudioAttenuationCurve::Enum m_eAttenuationCurve = plAudioAttenuationCurve::Default;
+
+  /// \brief Custom curve: (distance between min and max as 0..1, gain 0..1) points with increasing x. The gain is 1 at
+  /// x = 0 and follows straight lines between the points; past the last point it keeps the last gain.
+  plHybridArray<plVec2, 6> m_AttenuationPoints;
+
+  /// \brief Sound cone around the emitter's forward direction, in degrees: full volume inside the inner angle, the outer
+  /// gain outside the outer angle, blended between. 360 for both means no cone.
+  float m_fConeInnerAngle = 360.0f;
+  float m_fConeOuterAngle = 360.0f;
+  float m_fConeOuterGainDb = -12.0f;
+
+  /// \brief How wide the source sounds, in degrees: 0 pans as a point, 360 is heard from all around.
+  float m_fSpread = 0.0f;
+
+  /// \brief What full occlusion does: the low-pass cutoff it sweeps down to and the volume change.
+  float m_fOcclusionCutoffHz = 250.0f;
+  float m_fOcclusionVolumeDb = -6.0f;
+
+  /// \brief The distance gain of a spatialized event (1 for a 2D one): 1 up to the min distance, then the attenuation
+  /// curve, which also fades to silence over the last 15 % before the max distance (no hard cut).
+  PL_NODISCARD float GetDistanceGain(float fDistance) const;
+
+  /// \brief The cone gain for a listener at the angle (degrees) from the emitter's forward direction.
+  PL_NODISCARD float GetConeGain(float fAngleDegrees) const;
+
+  /// \brief The occlusion low-pass cutoff and the volume factor at an occlusion amount (0..1).
+  PL_NODISCARD float GetOcclusionCutoff(float fOcclusion) const;
+  PL_NODISCARD float GetOcclusionGain(float fOcclusion) const;
 
   plDynamicArray<plAudioEventInstrumentDesc> m_Instruments;
   plDynamicArray<plAudioEventParameterDesc> m_Parameters;

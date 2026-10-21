@@ -417,19 +417,25 @@ void plEditorUiAudioEventTimeline::UpdateTabs()
   plHybridArray<plUuid, 8> guids;
 
   // selecting a parameter shows its tab and selecting the event the timeline; other selections (an instrument clicked
-  // in a parameter tab) keep the tab
-  plUInt32 uiCurrent = (pSelected == nullptr || pSelected == GetPropertiesObject()) ? 0 : m_uiCurrentTab;
+  // in a parameter tab) keep the tab. The built-in Distance tab has no object of its own and stays while the event is
+  // selected.
+  const bool bOnBuiltIn = m_uiCurrentTab == m_uiBuiltInDistanceTab;
+  plUInt32 uiCurrent = ((pSelected == nullptr || pSelected == GetPropertiesObject()) && !bOnBuiltIn) ? 0 : m_uiCurrentTab;
 
   labels.PushBack("Timeline");
   guids.PushBack(plUuid());
 
+  bool bHasDistance = false;
   for (const plDocumentObject* pParameter : parameters)
   {
     plStringBuilder sName = pParameter->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
     if (sName.IsEmpty())
       sName = "<unnamed>";
     else if (sName.IsEqual_NoCase("Distance"))
+    {
       sName.Append(" (built-in)");
+      bHasDistance = true;
+    }
 
     if (pSelected != nullptr && pSelected->GetGuid() == pParameter->GetGuid())
       uiCurrent = labels.GetCount();
@@ -437,6 +443,19 @@ void plEditorUiAudioEventTimeline::UpdateTabs()
     labels.PushBack(sName);
     guids.PushBack(pParameter->GetGuid());
   }
+
+  // a spatialized event always has the Distance tab: it auditions the event at a distance
+  m_uiBuiltInDistanceTab = plInvalidIndex;
+  const plDocumentObject* pProps = GetPropertiesObject();
+  if (!bHasDistance && pProps != nullptr && pProps->GetTypeAccessor().GetValue("Spatialize").ConvertTo<bool>())
+  {
+    m_uiBuiltInDistanceTab = labels.GetCount();
+    labels.PushBack("Distance (built-in)");
+    guids.PushBack(plUuid());
+  }
+
+  if (uiCurrent >= labels.GetCount())
+    uiCurrent = 0;
 
   const bool bLabelsChanged = labels != m_TabLabels;
 
@@ -552,6 +571,13 @@ void plEditorUiAudioEventTimeline::OnTabChanged(plUInt32 uiTab)
   if (uiTab >= m_TabParameters.GetCount())
     return;
 
+  // the built-in Distance tab keeps the selection
+  if (uiTab == m_uiBuiltInDistanceTab)
+  {
+    m_bDrawDirty = true;
+    return;
+  }
+
   const plDocumentObject* pObject = m_TabParameters[uiTab].IsValid() ? m_pDocument->GetObjectManager()->GetObject(m_TabParameters[uiTab]) : GetPropertiesObject();
   if (pObject != nullptr)
     m_pDocument->GetSelectionManager()->SetSelection(pObject);
@@ -598,16 +624,16 @@ void plEditorUiAudioEventTimeline::Draw()
   const plUuid selected = m_pDocument->GetSelectionManager()->GetCurrentObject() != nullptr ? m_pDocument->GetSelectionManager()->GetCurrentObject()->GetGuid() : plUuid();
 
   // a parameter tab: the x-axis is the parameter
-  if (const plDocumentObject* pParameter = GetCurrentParameter())
+  if (TabParameter parameter; GetCurrentParameter(parameter))
   {
     const float fRulerBottom = canvas.y + s_fRuler;
     m_Writer.Rect(plRectFloat(0.0f, fRulerBottom, s_fHead, plMath::Max(size.y - fRulerBottom, 1.0f)), Surface());
 
     const bool bAnySolo = !m_SoloTracks.IsEmpty();
     for (plUInt32 i = 0; i < instruments.GetCount(); ++i)
-      DrawParameterTrack(instruments[i], i, pParameter, bAnySolo, selected);
+      DrawParameterTrack(instruments[i], i, parameter, bAnySolo, selected);
 
-    DrawParameterRuler(canvas, pParameter);
+    DrawParameterRuler(canvas, parameter);
 
     m_Writer.Publish(GetSurface()->GetBlackboard(), s_sCanvasEntry);
     return;
@@ -700,65 +726,90 @@ void plEditorUiAudioEventTimeline::Draw()
 //////////////////////////////////////////////////////////////////////////
 // Parameter tabs
 
-const plDocumentObject* plEditorUiAudioEventTimeline::GetCurrentParameter() const
+bool plEditorUiAudioEventTimeline::GetCurrentParameter(TabParameter& out_parameter) const
 {
-  if (m_uiCurrentTab >= m_TabParameters.GetCount() || !m_TabParameters[m_uiCurrentTab].IsValid())
-    return nullptr;
+  if (m_uiCurrentTab >= m_TabParameters.GetCount())
+    return false;
 
-  return m_pDocument->GetObjectManager()->GetObject(m_TabParameters[m_uiCurrentTab]);
+  float fA = 0.0f;
+  float fB = 1.0f;
+
+  if (m_uiCurrentTab == m_uiBuiltInDistanceTab)
+  {
+    const plDocumentObject* pProps = GetPropertiesObject();
+    if (pProps == nullptr)
+      return false;
+
+    out_parameter.m_sName = "Distance";
+    fA = 0.0f;
+    fB = pProps->GetTypeAccessor().GetValue("MaxDistance").ConvertTo<float>();
+    out_parameter.m_fDefault = 0.0f;
+  }
+  else
+  {
+    if (!m_TabParameters[m_uiCurrentTab].IsValid())
+      return false;
+
+    const plDocumentObject* pParameter = m_pDocument->GetObjectManager()->GetObject(m_TabParameters[m_uiCurrentTab]);
+    if (pParameter == nullptr)
+      return false;
+
+    const auto& accessor = pParameter->GetTypeAccessor();
+    out_parameter.m_sName = accessor.GetValue("Name").ConvertTo<plString>();
+    fA = accessor.GetValue("Min").ConvertTo<float>();
+    fB = accessor.GetValue("Max").ConvertTo<float>();
+    out_parameter.m_fDefault = accessor.GetValue("Default").ConvertTo<float>();
+  }
+
+  out_parameter.m_fMin = plMath::Min(fA, fB);
+  out_parameter.m_fMax = plMath::Max(fA, fB);
+
+  if (out_parameter.m_fMax - out_parameter.m_fMin < 0.0001f)
+    out_parameter.m_fMax = out_parameter.m_fMin + 1.0f;
+
+  return true;
 }
 
-void plEditorUiAudioEventTimeline::GetParameterRange(const plDocumentObject* pParameter, float& out_fMin, float& out_fMax) const
+bool plEditorUiAudioEventTimeline::IsParameterTab() const
 {
-  const float fA = pParameter->GetTypeAccessor().GetValue("Min").ConvertTo<float>();
-  const float fB = pParameter->GetTypeAccessor().GetValue("Max").ConvertTo<float>();
-  out_fMin = plMath::Min(fA, fB);
-  out_fMax = plMath::Max(fA, fB);
-
-  if (out_fMax - out_fMin < 0.0001f)
-    out_fMax = out_fMin + 1.0f;
+  TabParameter parameter;
+  return GetCurrentParameter(parameter);
 }
 
-float plEditorUiAudioEventTimeline::ValueToX(const plDocumentObject* pParameter, float fValue) const
+float plEditorUiAudioEventTimeline::ValueToX(const TabParameter& parameter, float fValue) const
 {
-  float fMin, fMax;
-  GetParameterRange(pParameter, fMin, fMax);
-
   const float fWidth = GetSurface()->GetLogicalSize().x - s_fHead - 2.0f * s_fTimeInset;
-  return s_fHead + s_fTimeInset + (fValue - fMin) / (fMax - fMin) * plMath::Max(fWidth, 1.0f);
+  return s_fHead + s_fTimeInset + (fValue - parameter.m_fMin) / (parameter.m_fMax - parameter.m_fMin) * plMath::Max(fWidth, 1.0f);
 }
 
-float plEditorUiAudioEventTimeline::XToValue(const plDocumentObject* pParameter, float x) const
+float plEditorUiAudioEventTimeline::XToValue(const TabParameter& parameter, float x) const
 {
-  float fMin, fMax;
-  GetParameterRange(pParameter, fMin, fMax);
-
   const float fWidth = plMath::Max(GetSurface()->GetLogicalSize().x - s_fHead - 2.0f * s_fTimeInset, 1.0f);
-  return plMath::Clamp(fMin + (x - s_fHead - s_fTimeInset) / fWidth * (fMax - fMin), fMin, fMax);
+  return plMath::Clamp(parameter.m_fMin + (x - s_fHead - s_fTimeInset) / fWidth * (parameter.m_fMax - parameter.m_fMin), parameter.m_fMin, parameter.m_fMax);
 }
 
-void plEditorUiAudioEventTimeline::SetAuditionValue(const plDocumentObject* pParameter, float fValue)
+void plEditorUiAudioEventTimeline::SetAuditionValue(const plString& sName, float fValue)
 {
-  const plString sName = pParameter->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
   m_AuditionValues[sName] = fValue;
   m_bDrawDirty = true;
+  RequestRedraw();
 
   if (m_OnAuditionValueChanged.IsValid())
     m_OnAuditionValueChanged(sName, fValue);
 }
 
-void plEditorUiAudioEventTimeline::DrawParameterRuler(const plRectFloat& canvas, const plDocumentObject* pParameter)
+void plEditorUiAudioEventTimeline::DrawParameterRuler(const plRectFloat& canvas, const TabParameter& parameter)
 {
   using namespace plEditorUi;
 
-  float fMin, fMax;
-  GetParameterRange(pParameter, fMin, fMax);
+  const float fMin = parameter.m_fMin;
+  const float fMax = parameter.m_fMax;
 
   const plRectFloat ruler(0.0f, canvas.y, canvas.width, s_fRuler);
   m_Writer.Rect(ruler, Surface());
   m_Writer.Rect(plRectFloat(0.0f, ruler.y + ruler.height - 1.0f, ruler.width, 1.0f), Line());
 
-  const plString sName = pParameter->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
+  const plString& sName = parameter.m_sName;
   plStringBuilder sCorner;
   sCorner.SetFormat("Instruments by {}", sName);
   m_Writer.Text(plRectFloat(10.0f, ruler.y, s_fHead - 14.0f, ruler.height), sCorner, Muted(), FontSize - 2);
@@ -767,7 +818,7 @@ void plEditorUiAudioEventTimeline::DrawParameterRuler(const plRectFloat& canvas,
   for (plUInt32 i = 0; i <= 12; ++i)
   {
     const float fValue = fMin + (fMax - fMin) * i / 12.0f;
-    const float x = plMath::Round(ValueToX(pParameter, fValue)) + 0.5f;
+    const float x = plMath::Round(ValueToX(parameter, fValue)) + 0.5f;
     m_Writer.Rect(plRectFloat(x - 0.5f, ruler.y + ruler.height - 8.0f, 1.0f, 8.0f), Border());
 
     plStringBuilder sLabel;
@@ -776,8 +827,8 @@ void plEditorUiAudioEventTimeline::DrawParameterRuler(const plRectFloat& canvas,
   }
 
   // the scrub line: the value the audition plays with
-  const float fValue = GetAuditionValue(sName, pParameter->GetTypeAccessor().GetValue("Default").ConvertTo<float>());
-  const float fLineX = ValueToX(pParameter, fValue);
+  const float fValue = GetAuditionValue(sName, parameter.m_fDefault);
+  const float fLineX = ValueToX(parameter, fValue);
 
   m_Writer.PushClip(plRectFloat(s_fHead, canvas.y, plMath::Max(canvas.width - s_fHead, 1.0f), canvas.height));
   {
@@ -800,7 +851,7 @@ void plEditorUiAudioEventTimeline::DrawParameterRuler(const plRectFloat& canvas,
   m_Writer.PopClip();
 }
 
-void plEditorUiAudioEventTimeline::DrawParameterTrack(const plDocumentObject* pInstrument, plUInt32 uiIndex, const plDocumentObject* pParameter, bool bAnySolo, const plUuid& selected)
+void plEditorUiAudioEventTimeline::DrawParameterTrack(const plDocumentObject* pInstrument, plUInt32 uiIndex, const TabParameter& parameter, bool bAnySolo, const plUuid& selected)
 {
   using namespace plEditorUi;
 
@@ -817,7 +868,7 @@ void plEditorUiAudioEventTimeline::DrawParameterTrack(const plDocumentObject* pI
   const plColorGammaUB trackColor = TrackColor(uiIndex);
   const plColorGammaUB background = Background();
 
-  const plString sParameter = pParameter->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
+  const plString& sParameter = parameter.m_sName;
   const bool bOnParameter = !sParameter.IsEmpty() && accessor.GetValue("RangeParameter").ConvertTo<plString>() == sParameter;
 
   // the range, with a range edge being dragged shown where it is now
@@ -833,7 +884,7 @@ void plEditorUiAudioEventTimeline::DrawParameterTrack(const plDocumentObject* pI
   const float fFade = plMath::Max(accessor.GetValue("RangeFade").ConvertTo<float>(), 0.0f);
 
   // the volume of the range at the auditioned value
-  const float fValue = GetAuditionValue(sParameter, pParameter->GetTypeAccessor().GetValue("Default").ConvertTo<float>());
+  const float fValue = GetAuditionValue(sParameter, parameter.m_fDefault);
   float fGain = 1.0f;
   if (bOnParameter && (fValue < fLow || fValue > fHigh))
   {
@@ -863,10 +914,10 @@ void plEditorUiAudioEventTimeline::DrawParameterTrack(const plDocumentObject* pI
       // the range with its fade ramps: a trapezoid
       const float fTop = y + 10.0f;
       const float fBottom = y + s_fRow - 8.0f;
-      const float x0 = ValueToX(pParameter, fLow - fFade);
-      const float x1 = ValueToX(pParameter, fLow);
-      const float x2 = ValueToX(pParameter, fHigh);
-      const float x3 = ValueToX(pParameter, fHigh + fFade);
+      const float x0 = ValueToX(parameter, fLow - fFade);
+      const float x1 = ValueToX(parameter, fLow);
+      const float x2 = ValueToX(parameter, fHigh);
+      const float x3 = ValueToX(parameter, fHigh + fFade);
 
       plDynamicArray<plVec2> shape;
       shape.PushBack(plVec2(x0, fBottom));
@@ -907,11 +958,11 @@ void plEditorUiAudioEventTimeline::DrawParameterTrack(const plDocumentObject* pI
 
 plEditorUiAudioEventTimeline::DragHandle plEditorUiAudioEventTimeline::PickRangeHandle(const plVec2& vPos, plUuid& out_instrumentGuid) const
 {
-  const plDocumentObject* pParameter = GetCurrentParameter();
-  if (pParameter == nullptr || vPos.x < s_fHead)
+  TabParameter parameter;
+  if (!GetCurrentParameter(parameter) || vPos.x < s_fHead)
     return DragHandle::None;
 
-  const plString sParameter = pParameter->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
+  const plString& sParameter = parameter.m_sName;
 
   plHybridArray<const plDocumentObject*, 8> instruments;
   GatherInstruments(instruments);
@@ -934,9 +985,9 @@ plEditorUiAudioEventTimeline::DragHandle plEditorUiAudioEventTimeline::PickRange
       return DragHandle::None;
 
     out_instrumentGuid = instruments[i]->GetGuid();
-    if (plMath::Abs(vPos.x - ValueToX(pParameter, plMath::Min(fA, fB))) <= s_fHandleGrab + 1.0f)
+    if (plMath::Abs(vPos.x - ValueToX(parameter, plMath::Min(fA, fB))) <= s_fHandleGrab + 1.0f)
       return DragHandle::RangeMin;
-    if (plMath::Abs(vPos.x - ValueToX(pParameter, plMath::Max(fA, fB))) <= s_fHandleGrab + 1.0f)
+    if (plMath::Abs(vPos.x - ValueToX(parameter, plMath::Max(fA, fB))) <= s_fHandleGrab + 1.0f)
       return DragHandle::RangeMax;
 
     return DragHandle::None;
@@ -947,16 +998,14 @@ plEditorUiAudioEventTimeline::DragHandle plEditorUiAudioEventTimeline::PickRange
 
 void plEditorUiAudioEventTimeline::ApplyRangeDrag(float x, bool bFinal)
 {
-  const plDocumentObject* pParameter = GetCurrentParameter();
+  TabParameter parameter;
   const plDocumentObject* pInstrument = m_pDocument->GetObjectManager()->GetObject(m_RangeDragGuid);
-  if (pParameter == nullptr || pInstrument == nullptr)
+  if (!GetCurrentParameter(parameter) || pInstrument == nullptr)
     return;
 
-  float fMin, fMax;
-  GetParameterRange(pParameter, fMin, fMax);
-  const float fStep = (fMax - fMin) / 200.0f;
+  const float fStep = (parameter.m_fMax - parameter.m_fMin) / 200.0f;
 
-  m_fRangeDragValue = plMath::RoundToMultiple(XToValue(pParameter, x), fStep);
+  m_fRangeDragValue = plMath::RoundToMultiple(XToValue(parameter, x), fStep);
   m_bDrawDirty = true;
 
   if (!bFinal)
@@ -1499,7 +1548,7 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
       CommitRename();
 
       // Ctrl+wheel zooms the time axis around the pointer
-      if (e.HasModifier(plEditorUiPointerEvent::Control) && GetCurrentParameter() == nullptr)
+      if (e.HasModifier(plEditorUiPointerEvent::Control) && !IsParameterTab())
       {
         const double fTimeAtPointer = XToTime(e.m_vPosition.x);
         m_fPixelsPerSecond = plMath::Clamp(m_fPixelsPerSecond * plMath::Pow(s_fZoomStep, static_cast<double>(e.m_fWheel)), s_fMinPixelsPerSecond, s_fMaxPixelsPerSecond);
@@ -1553,10 +1602,11 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
 
       CommitRename();
 
-      const plDocumentObject* pParameter = GetCurrentParameter();
+      TabParameter parameter;
+      const bool bParameterTab = GetCurrentParameter(parameter);
 
       // parameter tab: the range edges, then scrubbing anywhere in the lanes
-      if (pParameter != nullptr)
+      if (bParameterTab)
       {
         plUuid rangeGuid;
         if (const DragHandle handle = PickRangeHandle(e.m_vPosition, rangeGuid); handle != DragHandle::None)
@@ -1570,13 +1620,13 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
         if (e.m_vPosition.x >= s_fHead)
         {
           m_bScrubbing = true;
-          SetAuditionValue(pParameter, XToValue(pParameter, e.m_vPosition.x));
+          SetAuditionValue(parameter.m_sName, XToValue(parameter, e.m_vPosition.x));
           return;
         }
       }
 
       // loop region and fade handles win over selection
-      if (pParameter == nullptr)
+      if (!bParameterTab)
       {
         if (const DragHandle handle = PickHandle(e.m_vPosition); handle != DragHandle::None)
         {
@@ -1649,12 +1699,12 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
       }
 
       // parameter tab: a row of an instrument that is not on the parameter is placed on it around the clicked value
-      if (const plDocumentObject* pParameter = GetCurrentParameter(); pParameter != nullptr && e.m_vPosition.x >= s_fHead)
+      if (TabParameter parameter; GetCurrentParameter(parameter) && e.m_vPosition.x >= s_fHead)
       {
         plHybridArray<const plDocumentObject*, 8> instruments;
         GatherInstruments(instruments);
 
-        const plString sParameter = pParameter->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
+        const plString& sParameter = parameter.m_sName;
         for (plUInt32 i = 0; i < instruments.GetCount(); ++i)
         {
           const float y = GetRowTop(i);
@@ -1662,9 +1712,9 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
               instruments[i]->GetTypeAccessor().GetValue("RangeParameter").ConvertTo<plString>() == sParameter)
             continue;
 
-          float fMin, fMax;
-          GetParameterRange(pParameter, fMin, fMax);
-          const float fValue = XToValue(pParameter, e.m_vPosition.x);
+          const float fMin = parameter.m_fMin;
+          const float fMax = parameter.m_fMax;
+          const float fValue = XToValue(parameter, e.m_vPosition.x);
           const float fSpan = (fMax - fMin) * 0.1f;
 
           plObjectCommandAccessor accessor(m_pDocument->GetCommandHistory());
@@ -1689,9 +1739,9 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
       }
       else if (m_bScrubbing)
       {
-        if (const plDocumentObject* pParameter = GetCurrentParameter())
+        if (TabParameter parameter; GetCurrentParameter(parameter))
         {
-          SetAuditionValue(pParameter, XToValue(pParameter, e.m_vPosition.x));
+          SetAuditionValue(parameter.m_sName, XToValue(parameter, e.m_vPosition.x));
         }
         else
         {
@@ -1789,7 +1839,8 @@ void plEditorUiAudioEventTimeline::OnKey(const plEditorUiKeyEvent& e)
     return;
   }
 
-  const plDocumentObject* pParameter = GetCurrentParameter();
+  TabParameter parameter;
+  const bool bParameterTab = GetCurrentParameter(parameter);
   const bool bShift = (e.m_uiModifiers & plEditorUiPointerEvent::Shift) != 0;
 
   switch (e.m_Key)
@@ -1813,13 +1864,11 @@ void plEditorUiAudioEventTimeline::OnKey(const plEditorUiKeyEvent& e)
       const float fDirection = e.m_Key == Key::Left ? -1.0f : 1.0f;
 
       // a parameter tab scrubs its value in hundredths of the range, the time axis moves the cursor by 0.1 s
-      if (pParameter != nullptr)
+      if (bParameterTab)
       {
-        float fMin, fMax;
-        GetParameterRange(pParameter, fMin, fMax);
-        const plString sName = pParameter->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
-        const float fValue = GetAuditionValue(sName, pParameter->GetTypeAccessor().GetValue("Default").ConvertTo<float>());
-        SetAuditionValue(pParameter, plMath::Clamp(fValue + fDirection * (fMax - fMin) * (bShift ? 0.1f : 0.01f), fMin, fMax));
+        const float fValue = GetAuditionValue(parameter.m_sName, parameter.m_fDefault);
+        const float fStep = (parameter.m_fMax - parameter.m_fMin) * (bShift ? 0.1f : 0.01f);
+        SetAuditionValue(parameter.m_sName, plMath::Clamp(fValue + fDirection * fStep, parameter.m_fMin, parameter.m_fMax));
       }
       else
       {

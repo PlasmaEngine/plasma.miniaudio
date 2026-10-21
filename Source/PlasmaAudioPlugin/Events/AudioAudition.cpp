@@ -197,6 +197,7 @@ void plAudioAudition::Activate(Slot& ref_slot, plPlasmaAudioEventManager& ref_ev
   ref_slot.m_EventData.m_bSeeded = ref_slot.m_Request.m_bSeeded;
   ref_slot.m_EventData.m_uiSeed = ref_slot.m_Request.m_uiSeed;
   ref_slot.m_EventData.m_StartOffset = ref_slot.m_Request.m_StartOffset;
+  ref_slot.m_Entity.m_fAuditionDistance = ref_slot.m_Request.m_fDistance;
 
   ref_slot.m_Entity.m_SwitchStates.Clear();
   for (const plString& sState : ref_slot.m_Request.m_SwitchStates)
@@ -288,6 +289,14 @@ void plAudioAudition::Update(plPlasmaAudioEventManager& ref_events, plMiniAudioB
         {
           for (plUInt32 i = 0; i < cmd.m_ParameterNames.GetCount() && i < cmd.m_ParameterValues.GetCount(); ++i)
           {
+            // the built-in Distance follows the audition's distance
+            if (cmd.m_ParameterNames[i].IsEqual_NoCase("Distance"))
+            {
+              (*pSlot)->m_Request.m_fDistance = cmd.m_ParameterValues[i];
+              (*pSlot)->m_Entity.m_fAuditionDistance = cmd.m_ParameterValues[i];
+              continue;
+            }
+
             ref_events.SetEventParameter(&(*pSlot)->m_Entity, cmd.m_ParameterNames[i], cmd.m_ParameterValues[i]);
           }
         }

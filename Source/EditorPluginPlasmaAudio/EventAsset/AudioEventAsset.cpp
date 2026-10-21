@@ -1,5 +1,6 @@
 ﻿#include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
+#include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationAsset.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
@@ -99,10 +100,19 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventAssetProperties, 1, plRTTIDefaultAll
     PL_MEMBER_PROPERTY("LoopStart", m_fLoopStart)->AddAttributes(new plClampValueAttribute(0.0f, 600.0f), new plSuffixAttribute(" sec")),
     PL_MEMBER_PROPERTY("LoopEnd", m_fLoopEnd)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 600.0f), new plSuffixAttribute(" sec")),
     PL_MEMBER_PROPERTY("Spatialize", m_bSpatialize)->AddAttributes(new plGroupAttribute("Spatializer"), new plDefaultValueAttribute(true)),
-    PL_MEMBER_PROPERTY("MinDistance", m_fMinDistance)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.01f, 10000.0f)),
-    PL_MEMBER_PROPERTY("MaxDistance", m_fMaxDistance)->AddAttributes(new plDefaultValueAttribute(100.0f), new plClampValueAttribute(0.01f, 10000.0f)),
-    PL_MEMBER_PROPERTY("Rolloff", m_fRolloff)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.001f, 1000.0f), new plAudioRolloffCurveWidgetAttribute()),
+    PL_MEMBER_PROPERTY("Attenuation", m_sAttenuation)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Audio_Attenuation", plDependencyFlags::Transform)),
+    PL_ENUM_MEMBER_PROPERTY("Curve", plAudioAttenuationCurve, m_eCurve),
+    PL_MEMBER_PROPERTY("MinDistance", m_fMinDistance)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.01f, 10000.0f), new plSuffixAttribute(" m")),
+    PL_MEMBER_PROPERTY("MaxDistance", m_fMaxDistance)->AddAttributes(new plDefaultValueAttribute(100.0f), new plClampValueAttribute(0.01f, 10000.0f), new plSuffixAttribute(" m")),
+    PL_MEMBER_PROPERTY("Rolloff", m_fRolloff)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.001f, 1000.0f)),
+    PL_ARRAY_MEMBER_PROPERTY("CurvePoints", m_CurvePoints),
+    PL_MEMBER_PROPERTY("ConeInnerAngle", m_fConeInnerAngle)->AddAttributes(new plDefaultValueAttribute(360.0f), new plClampValueAttribute(0.0f, 360.0f), new plSuffixAttribute(" deg")),
+    PL_MEMBER_PROPERTY("ConeOuterAngle", m_fConeOuterAngle)->AddAttributes(new plDefaultValueAttribute(360.0f), new plClampValueAttribute(0.0f, 360.0f), new plSuffixAttribute(" deg")),
+    PL_MEMBER_PROPERTY("ConeOuterVolume", m_fConeOuterVolumeDb)->AddAttributes(new plDefaultValueAttribute(-12.0f), new plClampValueAttribute(-60.0f, 0.0f), new plSuffixAttribute(" dB")),
+    PL_MEMBER_PROPERTY("Spread", m_fSpread)->AddAttributes(new plClampValueAttribute(0.0f, 360.0f), new plSuffixAttribute(" deg")),
     PL_MEMBER_PROPERTY("DopplerFactor", m_fDopplerFactor)->AddAttributes(new plClampValueAttribute(0.0f, 10.0f)),
+    PL_MEMBER_PROPERTY("OcclusionCutoff", m_fOcclusionCutoff)->AddAttributes(new plGroupAttribute("Occlusion"), new plDefaultValueAttribute(250.0f), new plClampValueAttribute(20.0f, 22000.0f), new plSuffixAttribute(" Hz")),
+    PL_MEMBER_PROPERTY("OcclusionVolume", m_fOcclusionVolumeDb)->AddAttributes(new plDefaultValueAttribute(-6.0f), new plClampValueAttribute(-60.0f, 0.0f), new plSuffixAttribute(" dB")),
     // the arrays are edited through the Event Timeline window (timeline, tab strip, deck);
     // they are hidden in property grids via PropertyMetaStateEventHandler
     PL_ARRAY_MEMBER_PROPERTY("Instruments", m_Instruments),
@@ -136,10 +146,26 @@ void plAudioEventAssetProperties::PropertyMetaStateEventHandler(plPropertyMetaSt
 
     const bool bSpatialize = e.m_pObject->GetTypeAccessor().GetValue("Spatialize").ConvertTo<bool>();
 
-    props["MinDistance"].m_Visibility = bSpatialize ? plPropertyUiState::Default : plPropertyUiState::Invisible;
-    props["MaxDistance"].m_Visibility = bSpatialize ? plPropertyUiState::Default : plPropertyUiState::Invisible;
-    props["Rolloff"].m_Visibility = bSpatialize ? plPropertyUiState::Default : plPropertyUiState::Invisible;
-    props["DopplerFactor"].m_Visibility = bSpatialize ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    // a shared attenuation replaces the inline curve; the curve's points are dragged in the window's attenuation panel
+    const bool bShared = !e.m_pObject->GetTypeAccessor().GetValue("Attenuation").ConvertTo<plString>().IsEmpty();
+    const bool bInline = bSpatialize && !bShared;
+    const plInt64 iCurve = e.m_pObject->GetTypeAccessor().GetValue("Curve").ConvertTo<plInt64>();
+    auto Show = [&](const char* szProperty, bool bVisible)
+    { props[szProperty].m_Visibility = bVisible ? plPropertyUiState::Default : plPropertyUiState::Invisible; };
+
+    Show("Attenuation", bSpatialize);
+    Show("Curve", bInline);
+    Show("MinDistance", bInline);
+    Show("MaxDistance", bInline);
+    Show("Rolloff", bInline && iCurve == plAudioAttenuationCurve::Inverse);
+    Show("CurvePoints", false);
+    Show("ConeInnerAngle", bSpatialize);
+    Show("ConeOuterAngle", bSpatialize);
+    Show("ConeOuterVolume", bSpatialize);
+    Show("Spread", bSpatialize);
+    Show("DopplerFactor", bSpatialize);
+    Show("OcclusionCutoff", bSpatialize);
+    Show("OcclusionVolume", bSpatialize);
 
     // these arrays are edited through the Audio Event window (instrument dropdown, tab strip,
     // playlist panel) — showing them in the grid duplicates the whole document into the macros dock
@@ -320,6 +346,37 @@ plStatus plAudioEventAssetDocument::WriteAuditionData(plStreamWriter& inout_stre
   return WriteEventData(inout_stream, desc);
 }
 
+plStatus plAudioEventAssetDocument::BuildAttenuation(plAudioEventDesc& ref_desc) const
+{
+  const plAudioEventAssetProperties* pProp = GetProperties();
+
+  if (!pProp->m_sAttenuation.IsEmpty())
+  {
+    plAudioAttenuationAssetMetaInfo shared;
+    if (!plAudioAttenuationAssetMetaInfo::Find(pProp->m_sAttenuation, shared))
+      return plStatus(plFmt("The audio event uses an unknown Audio Attenuation: '{}'", pProp->m_sAttenuation));
+
+    shared.ApplyTo(ref_desc);
+    return plStatus(PL_SUCCESS);
+  }
+
+  ref_desc.m_eAttenuationCurve = static_cast<plAudioAttenuationCurve::Enum>(pProp->m_eCurve.GetValue());
+  ref_desc.m_fMinDistance = plMath::Min(pProp->m_fMinDistance, pProp->m_fMaxDistance);
+  ref_desc.m_fMaxDistance = plMath::Max(pProp->m_fMinDistance, pProp->m_fMaxDistance);
+  ref_desc.m_fRolloff = pProp->m_fRolloff;
+
+  ref_desc.m_AttenuationPoints.Clear();
+  for (const plAudioEventCurvePoint& point : pProp->m_CurvePoints)
+  {
+    ref_desc.m_AttenuationPoints.PushBack(plVec2(plMath::Clamp(point.m_fX, 0.0f, 1.0f), plMath::Clamp(point.m_fY, 0.0f, 1.0f)));
+  }
+
+  ref_desc.m_AttenuationPoints.Sort([](const plVec2& a, const plVec2& b)
+    { return a.x < b.x; });
+
+  return plStatus(PL_SUCCESS);
+}
+
 plStatus plAudioEventAssetDocument::BuildEventDesc(plAudioEventDesc& out_desc) const
 {
   const plAudioEventAssetProperties* pProp = GetProperties();
@@ -341,10 +398,14 @@ plStatus plAudioEventAssetDocument::BuildEventDesc(plAudioEventDesc& out_desc) c
   desc.m_LoopStart = plTime::MakeFromSeconds(plMath::Min(pProp->m_fLoopStart, pProp->m_fLoopEnd));
   desc.m_LoopEnd = plTime::MakeFromSeconds(plMath::Max(pProp->m_fLoopStart, pProp->m_fLoopEnd));
   desc.m_bSpatialize = pProp->m_bSpatialize;
-  desc.m_fMinDistance = plMath::Min(pProp->m_fMinDistance, pProp->m_fMaxDistance);
-  desc.m_fMaxDistance = plMath::Max(pProp->m_fMinDistance, pProp->m_fMaxDistance);
-  desc.m_fRolloff = pProp->m_fRolloff;
+  PL_SUCCEED_OR_RETURN(BuildAttenuation(desc));
+  desc.m_fConeInnerAngle = plMath::Clamp(pProp->m_fConeInnerAngle, 0.0f, 360.0f);
+  desc.m_fConeOuterAngle = plMath::Clamp(plMath::Max(pProp->m_fConeOuterAngle, pProp->m_fConeInnerAngle), 0.0f, 360.0f);
+  desc.m_fConeOuterGainDb = pProp->m_fConeOuterVolumeDb;
+  desc.m_fSpread = plMath::Clamp(pProp->m_fSpread, 0.0f, 360.0f);
   desc.m_fDopplerFactor = pProp->m_fDopplerFactor;
+  desc.m_fOcclusionCutoffHz = pProp->m_fOcclusionCutoff;
+  desc.m_fOcclusionVolumeDb = pProp->m_fOcclusionVolumeDb;
 
   // parameters
   for (const auto& parameter : pProp->m_Parameters)
@@ -354,6 +415,17 @@ plStatus plAudioEventAssetDocument::BuildEventDesc(plAudioEventDesc& out_desc) c
     paramDesc.m_fMin = plMath::Min(parameter.m_fMin, parameter.m_fMax);
     paramDesc.m_fMax = plMath::Max(parameter.m_fMin, parameter.m_fMax);
     paramDesc.m_fDefault = plMath::Clamp(parameter.m_fDefault, paramDesc.m_fMin, paramDesc.m_fMax);
+  }
+
+  // the built-in Distance of a spatialized event, when it has no parameter of that name: instruments and automations
+  // can use it, and the runtime feeds it
+  if (desc.m_bSpatialize && desc.FindParameterByName("Distance") == plInvalidIndex)
+  {
+    auto& paramDesc = desc.m_Parameters.ExpandAndGetRef();
+    paramDesc.m_sName = "Distance";
+    paramDesc.m_fMin = 0.0f;
+    paramDesc.m_fMax = desc.m_fMaxDistance;
+    paramDesc.m_fDefault = 0.0f;
   }
 
   // instruments + deduplicated sample table

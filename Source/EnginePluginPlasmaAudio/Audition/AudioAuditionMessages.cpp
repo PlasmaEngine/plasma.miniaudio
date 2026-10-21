@@ -21,6 +21,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioAuditionMsgToEngine, 1, plRTTIDefaultAllo
     PL_MEMBER_PROPERTY("Seeded", m_bSeeded),
     PL_MEMBER_PROPERTY("Seed", m_uiSeed),
     PL_ARRAY_MEMBER_PROPERTY("SwitchStates", m_SwitchStates),
+    PL_MEMBER_PROPERTY("Distance", m_fDistance)->AddAttributes(new plDefaultValueAttribute(-1.0f)),
     PL_ARRAY_MEMBER_PROPERTY("ParameterNames", m_ParameterNames),
     PL_ARRAY_MEMBER_PROPERTY("ParameterValues", m_ParameterValues),
   }

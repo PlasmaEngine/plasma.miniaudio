@@ -44,7 +44,10 @@ public:
   /// \brief Play: switch states as "Group/State".
   plDynamicArray<plString> m_SwitchStates;
 
-  /// \brief SetParameters: the values to set.
+  /// \brief Play: heard at this distance from the listener (the Distance tab); negative plays it unspatialized.
+  float m_fDistance = -1.0f;
+
+  /// \brief SetParameters: the values to set. "Distance" moves the audition to that distance.
   plDynamicArray<plString> m_ParameterNames;
   plDynamicArray<float> m_ParameterValues;
 };
