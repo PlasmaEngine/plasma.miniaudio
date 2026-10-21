@@ -218,6 +218,7 @@ void plPlasmaAudioEventInstance::Reset()
   m_uiTimelineOriginFrame = 0;
   m_uiSampleRate = 48000;
   m_uiRegionLoopInstrument = plInvalidIndex;
+  m_bSeeded = false;
 
   m_Elapsed = plTime::MakeZero();
   m_bStopping = false;
@@ -228,7 +229,7 @@ void plPlasmaAudioEventInstance::Reset()
   m_uiBus = 0;
 }
 
-plResult plPlasmaAudioEventInstance::Start(const plAudioEventResourceHandle& hEvent, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine, const plHashTable<plUInt64, float>* pGlobalParameters, plRandom& ref_rng)
+plResult plPlasmaAudioEventInstance::Start(const plAudioEventResourceHandle& hEvent, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine, const plHashTable<plUInt64, float>* pGlobalParameters, plRandom& ref_sharedRng)
 {
   // the caller loaded the resource and holds the resource manager mutex, so it cannot be unloaded in between; the
   // decoders read straight out of the resource's sample buffers until the instance ends or the resource is unloaded
@@ -248,14 +249,27 @@ plResult plPlasmaAudioEventInstance::Start(const plAudioEventResourceHandle& hEv
   m_pEngine = pEngine;
   m_pGlobalParameters = pGlobalParameters;
 
+  plTime startOffset = plTime::MakeZero();
+
   if (m_pEventData != nullptr)
   {
     m_pEventData->m_pInstance = this;
+
+    // a seeded instance draws its playlist picks and randomization from its own generator, so they repeat
+    if (m_pEventData->m_bSeeded)
+    {
+      m_SeededRng.Initialize(m_pEventData->m_uiSeed);
+      m_bSeeded = true;
+    }
+
+    startOffset = m_pEventData->m_StartOffset;
   }
+
+  plRandom& ref_rng = m_bSeeded ? m_SeededRng : ref_sharedRng;
 
   m_uiSampleRate = plMath::Max<ma_uint32>(ma_engine_get_sample_rate(m_pEngine), 1u);
   m_uiStartFrame = ma_engine_get_time_in_pcm_frames(m_pEngine);
-  m_uiTimelineOriginFrame = m_uiStartFrame;
+  m_uiTimelineOriginFrame = m_uiStartFrame - plMath::Min(ToFrames(startOffset), m_uiStartFrame);
 
   const auto& desc = m_pResource->GetDescriptor();
 
@@ -303,7 +317,7 @@ plResult plPlasmaAudioEventInstance::Start(const plAudioEventResourceHandle& hEv
 
     const bool bSkip = instrumentDesc.m_Playlist.IsEmpty() || instrumentDesc.m_bMute || !bSwitchAllows || bBehindRegion;
 
-    m_Instruments[i].m_uiNextTriggerFrame = m_uiStartFrame + ToFrames(instrumentDesc.m_StartDelay);
+    m_Instruments[i].m_uiNextTriggerFrame = m_uiTimelineOriginFrame + ToFrames(instrumentDesc.m_StartDelay);
     m_Instruments[i].m_bPendingTrigger = !bSkip;
     m_Instruments[i].m_bDone = bSkip;
 
@@ -710,20 +724,26 @@ void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSl
   // the follow-up voice of a looping instrument inherits the state of the voice it follows and is not logged
   const bool bFollowUp = GetVoice(uiInstrument, (uiSlot + 1) % VoiceSlotsPerInstrument).m_bActive;
 
-  if (!AdmitVoice(uiInstrument, uiSlot, voice.m_fBaseVolume))
+  const bool bAdmitted = AdmitVoice(uiInstrument, uiSlot, GetVoiceVolume(voice));
+
+  // a start offset puts the start frames of the instruments it skips before the instance's start: such a voice begins
+  // as a virtual voice whose timeline started at that frame and is made real right away, mid-sample
+  const bool bBeforeStart = uiStartFrame < m_uiStartFrame;
+
+  if (!bAdmitted || bBeforeStart)
   {
     // a Kill event plays real or not at all, as when one of its voices is virtualized
-    if (desc.m_eVirtualMode == plAudioEventVirtualMode::Kill)
+    if (!bAdmitted && desc.m_eVirtualMode == plAudioEventVirtualMode::Kill)
     {
       Log(plAudioLogEventType::Killed, "not admitted at start");
       Stop(true);
       return;
     }
 
-    if (!bFollowUp && m_pEventLog != nullptr)
+    if (!bAdmitted && !bFollowUp && m_pEventLog != nullptr)
     {
       plStringBuilder sDetail;
-      sDetail.SetFormat("audibility {}", plArgF(ComputeAudibility(voice.m_fBaseVolume), 3));
+      sDetail.SetFormat("audibility {}", plArgF(ComputeAudibility(GetVoiceVolume(voice)), 3));
       Log(plAudioLogEventType::CulledAtStart, sDetail);
     }
 
@@ -762,6 +782,12 @@ void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSl
     voice.m_bActive = true;
     state.m_uiCurrentSlot = static_cast<plUInt8>(uiSlot);
     state.m_bLoadWaitLogged = false;
+
+    // a voice that ran out before the start offset stays virtual and Update ends it
+    if (bAdmitted)
+    {
+      RealizeVoice(uiInstrument * VoiceSlotsPerInstrument + uiSlot);
+    }
     return;
   }
 
@@ -1000,7 +1026,7 @@ plPlasmaAudioEventInstance::BuildResult plPlasmaAudioEventInstance::BuildVoiceCh
   }
 
   const float fPitchNow = voice.m_fBasePitch * m_fCurrentPitchMultiplier;
-  ma_sound_set_volume(&voice.m_Sound, voice.m_fBaseVolume * m_fCurrentVolumeMultiplier);
+  ma_sound_set_volume(&voice.m_Sound, GetVoiceVolume(voice) * m_fCurrentVolumeMultiplier);
   ma_sound_set_pitch(&voice.m_Sound, fPitchNow);
 
   // sample-accurate start: the sound runs from the next mixed chunk on and its data source emits silence up to
@@ -1496,8 +1522,49 @@ void plPlasmaAudioEventInstance::ApplyModulation()
   // fades to silence toward the max distance, where the audibility reaches 0 and the voice is virtualized
   fVolume *= GetDistanceFade();
 
+  // instruments placed on a parameter range follow that parameter
+  for (plUInt32 i = 0; i < m_Instruments.GetCount() && i < desc.m_Instruments.GetCount(); ++i)
+  {
+    const auto& instrumentDesc = desc.m_Instruments[i];
+    const plUInt32 uiParam = instrumentDesc.m_uiRangeParameter;
+    m_Instruments[i].m_fRangeGain = uiParam < m_ParameterValues.GetCount() ? instrumentDesc.GetRangeGain(m_ParameterValues[uiParam]) : 1.0f;
+  }
+
   m_fCurrentVolumeMultiplier = fVolume;
   m_fCurrentPitchMultiplier = fPitch;
+}
+
+double plPlasmaAudioEventInstance::GetTimelinePosition() const
+{
+  if (m_pEngine == nullptr)
+    return 0.0;
+
+  const ma_uint64 uiNow = ma_engine_get_time_in_pcm_frames(m_pEngine);
+  double fPosition = (static_cast<double>(uiNow) - static_cast<double>(m_uiTimelineOriginFrame)) / m_uiSampleRate;
+
+  // a looping region moves the origin to its next pass one look-ahead span early; until then the previous pass plays
+  if (m_pResource != nullptr && IsRegionLooping())
+  {
+    const auto& desc = m_pResource->GetDescriptor();
+    if (fPosition < desc.m_LoopStart.GetSeconds())
+    {
+      fPosition += (desc.m_LoopEnd - desc.m_LoopStart).GetSeconds();
+    }
+  }
+
+  return plMath::Max(fPosition, 0.0);
+}
+
+bool plPlasmaAudioEventInstance::IsInstrumentSounding(plUInt32 uiInstrument) const
+{
+  for (plUInt32 uiSlot = 0; uiSlot < VoiceSlotsPerInstrument; ++uiSlot)
+  {
+    const plUInt32 uiVoice = uiInstrument * VoiceSlotsPerInstrument + uiSlot;
+    if (uiVoice < m_Voices.GetCount() && m_Voices[uiVoice].m_bActive)
+      return true;
+  }
+
+  return false;
 }
 
 plUInt32 plPlasmaAudioEventInstance::GetActiveVoiceCount() const
@@ -1588,7 +1655,7 @@ void plPlasmaAudioEventInstance::AppendSnapshotVoices(plDynamicArray<plAudioVoic
     entry.m_fAudibility = m_fAudibility;
     entry.m_fDistance = m_fDistance;
     entry.m_fOcclusion = fOcclusion;
-    entry.m_fVolume = m_fCurrentVolumeMultiplier * voice.m_fBaseVolume;
+    entry.m_fVolume = m_fCurrentVolumeMultiplier * GetVoiceVolume(voice);
     entry.m_fAge = static_cast<float>(m_Elapsed.GetSeconds());
     entry.m_sBus = sBus;
 
@@ -1611,10 +1678,12 @@ void plPlasmaAudioEventInstance::AppendSnapshotVoices(plDynamicArray<plAudioVoic
   }
 }
 
-bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> listeners, plRandom& ref_rng)
+bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> listeners, plRandom& ref_sharedRng)
 {
   if (m_pResource == nullptr)
     return false;
+
+  plRandom& ref_rng = m_bSeeded ? m_SeededRng : ref_sharedRng;
 
   m_Elapsed += delta;
   SelectListener(listeners);
@@ -1755,7 +1824,7 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
 
         if (!m_bStopping)
         {
-          ma_sound_set_volume(&voice.m_Sound, voice.m_fBaseVolume * m_fCurrentVolumeMultiplier);
+          ma_sound_set_volume(&voice.m_Sound, GetVoiceVolume(voice) * m_fCurrentVolumeMultiplier);
           ma_sound_set_pitch(&voice.m_Sound, voice.m_fBasePitch * m_fCurrentPitchMultiplier);
         }
 
@@ -1888,7 +1957,7 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
   {
     if (voice.m_bActive)
     {
-      fMaxBaseVolume = plMath::Max(fMaxBaseVolume, voice.m_fBaseVolume);
+      fMaxBaseVolume = plMath::Max(fMaxBaseVolume, GetVoiceVolume(voice));
       bAnyVoice = true;
     }
   }
@@ -2638,6 +2707,45 @@ bool plPlasmaAudioEventManager::IsEventPlaying(const plPlasmaAudioEventData* pEv
   {
     if (pInstance->m_pEventData == pEventData)
       return true;
+  }
+
+  return false;
+}
+
+bool plPlasmaAudioEventManager::GetEventState(const plPlasmaAudioEventData* pEventData, bool& out_bWaiting, double& out_fPosition, plDynamicArray<bool>& out_sounding, plDynamicArray<float>& out_rangeGains) const
+{
+  PL_LOCK(m_Mutex);
+
+  out_bWaiting = false;
+  out_fPosition = 0.0;
+  out_sounding.Clear();
+  out_rangeGains.Clear();
+
+  for (const PendingActivation& activation : m_PendingActivations)
+  {
+    if (activation.m_pEventData == pEventData)
+    {
+      out_bWaiting = true;
+      return true;
+    }
+  }
+
+  for (const auto& pInstance : m_Instances)
+  {
+    if (pInstance->m_pEventData != pEventData)
+      continue;
+
+    out_fPosition = pInstance->GetTimelinePosition();
+
+    const plUInt32 uiInstruments = pInstance->GetInstrumentCount();
+    out_sounding.SetCount(uiInstruments);
+    out_rangeGains.SetCount(uiInstruments);
+    for (plUInt32 i = 0; i < uiInstruments; ++i)
+    {
+      out_sounding[i] = pInstance->IsInstrumentSounding(i);
+      out_rangeGains[i] = pInstance->GetInstrumentRangeGain(i);
+    }
+    return true;
   }
 
   return false;

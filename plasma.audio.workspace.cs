@@ -8,6 +8,7 @@ public class PlasmaAudioWorkspace : WorkspaceRules
     public PlasmaAudioWorkspace(BuildContext context) : base(context)
     {
         TargetNames.Add("PlasmaAudioPlugin");
+        TargetNames.Add("EnginePluginPlasmaAudio");
         TargetNames.Add("EditorPluginPlasmaAudio");
         TargetNames.Add("PlasmaAudioTest");
     }

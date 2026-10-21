@@ -1,0 +1,275 @@
+#include <PlasmaAudioPlugin/PlasmaAudioPluginPCH.h>
+
+#include <AudioSystem/Core/AudioSystem.h>
+#include <AudioSystem/Core/AudioSystemRequests.h>
+#include <Foundation/Threading/Lock.h>
+#include <PlasmaAudioPlugin/Events/AudioAudition.h>
+#include <PlasmaAudioPlugin/Events/MiniAudioAudioEvents.h>
+#include <PlasmaAudioPlugin/MiniAudioAtlData.h>
+#include <PlasmaAudioPlugin/Mixer/MiniAudioBusGraph.h>
+
+namespace
+{
+  /// How long an audition waits for the mixer it requested before it plays without it.
+  constexpr plTime s_MixerWait = plTime::MakeFromSeconds(3.0);
+} // namespace
+
+struct plAudioAudition::Command
+{
+  enum class Type : plUInt8
+  {
+    Play,
+    Stop,
+    SetParameters,
+    Remove
+  };
+
+  Type m_Type = Type::Play;
+  plUInt64 m_uiKey = 0;
+  plAudioAuditionRequest m_Request;
+  plDynamicArray<plString> m_ParameterNames;
+  plDynamicArray<float> m_ParameterValues;
+};
+
+struct plAudioAudition::Slot
+{
+  explicit Slot(plUInt64 uiEntityId)
+    : m_Entity(uiEntityId, true)
+  {
+  }
+
+  plPlasmaAudioEntityData m_Entity;
+  plPlasmaAudioEventData m_EventData;
+
+  plAudioAuditionRequest m_Request;
+  bool m_bPendingStart = false; ///< waits for the requested mixer
+  plTime m_MixerDeadline;
+};
+
+plAudioAudition* plAudioAudition::s_pSingleton = nullptr;
+
+plAudioAudition::plAudioAudition() = default;
+plAudioAudition::~plAudioAudition() = default;
+
+void plAudioAudition::Play(plUInt64 uiKey, const plAudioAuditionRequest& request)
+{
+  PL_LOCK(m_Mutex);
+
+  Command& cmd = m_Commands.ExpandAndGetRef();
+  cmd.m_Type = Command::Type::Play;
+  cmd.m_uiKey = uiKey;
+  cmd.m_Request = request;
+
+  // until the audio update ran, the audition counts as waiting to start
+  plAudioAuditionStatus& status = m_Status[uiKey];
+  status.m_bPlaying = true;
+  status.m_bWaiting = true;
+  status.m_fPosition = request.m_StartOffset.GetSeconds();
+}
+
+void plAudioAudition::Stop(plUInt64 uiKey)
+{
+  PL_LOCK(m_Mutex);
+
+  Command& cmd = m_Commands.ExpandAndGetRef();
+  cmd.m_Type = Command::Type::Stop;
+  cmd.m_uiKey = uiKey;
+}
+
+void plAudioAudition::SetParameters(plUInt64 uiKey, plArrayPtr<const plString> names, plArrayPtr<const float> values)
+{
+  PL_LOCK(m_Mutex);
+
+  Command& cmd = m_Commands.ExpandAndGetRef();
+  cmd.m_Type = Command::Type::SetParameters;
+  cmd.m_uiKey = uiKey;
+  cmd.m_ParameterNames = names;
+  cmd.m_ParameterValues = values;
+}
+
+void plAudioAudition::Remove(plUInt64 uiKey)
+{
+  PL_LOCK(m_Mutex);
+
+  Command& cmd = m_Commands.ExpandAndGetRef();
+  cmd.m_Type = Command::Type::Remove;
+  cmd.m_uiKey = uiKey;
+
+  m_Status.Remove(uiKey);
+}
+
+bool plAudioAudition::GetStatus(plUInt64 uiKey, plAudioAuditionStatus& out_status) const
+{
+  PL_LOCK(m_Mutex);
+
+  const plAudioAuditionStatus* pStatus = nullptr;
+  if (!m_Status.TryGetValue(uiKey, pStatus))
+    return false;
+
+  out_status = *pStatus;
+  return true;
+}
+
+void plAudioAudition::Activate(Slot& ref_slot, plPlasmaAudioEventManager& ref_events, plMiniAudioBusGraph& ref_busGraph, ma_engine* pEngine)
+{
+  ref_slot.m_bPendingStart = false;
+
+  ref_slot.m_EventData.m_bSeeded = ref_slot.m_Request.m_bSeeded;
+  ref_slot.m_EventData.m_uiSeed = ref_slot.m_Request.m_uiSeed;
+  ref_slot.m_EventData.m_StartOffset = ref_slot.m_Request.m_StartOffset;
+
+  ref_slot.m_Entity.m_SwitchStates.Clear();
+  for (const plString& sState : ref_slot.m_Request.m_SwitchStates)
+  {
+    const char* szSeparator = sState.FindLastSubString("/");
+    if (szSeparator != nullptr)
+    {
+      ref_slot.m_Entity.SetSwitchState(plStringView(sState.GetData(), szSeparator), sState);
+    }
+  }
+
+  if (ref_events.ActivateEvent(ref_slot.m_Request.m_sEventResourceId, &ref_slot.m_Entity, &ref_slot.m_EventData, &ref_busGraph, pEngine).Failed())
+  {
+    plLog::Warning("PlasmaAudio: the audition of '{}' could not start", ref_slot.m_Request.m_sEventResourceId);
+  }
+}
+
+void plAudioAudition::Update(plPlasmaAudioEventManager& ref_events, plMiniAudioBusGraph& ref_busGraph, ma_engine* pEngine, float fMasterPeak)
+{
+  plDynamicArray<Command> commands;
+  {
+    PL_LOCK(m_Mutex);
+    commands.Swap(m_Commands);
+  }
+
+  const plTime tNow = plTime::Now();
+
+  for (Command& cmd : commands)
+  {
+    plUniquePtr<Slot>* pSlot = m_Slots.GetValue(cmd.m_uiKey);
+
+    switch (cmd.m_Type)
+    {
+      case Command::Type::Play:
+      {
+        if (pSlot == nullptr)
+        {
+          m_Slots.Insert(cmd.m_uiKey, PL_DEFAULT_NEW(Slot, m_uiNextEntityId++));
+          pSlot = m_Slots.GetValue(cmd.m_uiKey);
+        }
+
+        Slot& slot = **pSlot;
+
+        // the previous audition ends right away and keeps playing nothing of its own
+        ref_events.StopEvent(&slot.m_EventData, true).IgnoreResult();
+        ref_events.DetachEventData(&slot.m_EventData);
+
+        slot.m_Request = std::move(cmd.m_Request);
+
+        // loading a mixer stops everything that plays, so the event starts once the mixer is built
+        if (!ref_busGraph.IsBuilt() && !slot.m_Request.m_sMixerResourceId.IsEmpty())
+        {
+          if (plAudioSystem* pAudioSystem = plAudioSystem::GetSingleton())
+          {
+            plAudioSystemRequestSetMixerControl request;
+            request.m_uiOp = plAudioMixerControlOp::LoadMixer;
+            request.m_sTarget = slot.m_Request.m_sMixerResourceId;
+            pAudioSystem->SendRequest(request);
+          }
+
+          slot.m_bPendingStart = true;
+          slot.m_MixerDeadline = tNow + s_MixerWait;
+        }
+        else
+        {
+          Activate(slot, ref_events, ref_busGraph, pEngine);
+        }
+        break;
+      }
+
+      case Command::Type::Stop:
+        if (pSlot != nullptr)
+        {
+          (*pSlot)->m_bPendingStart = false;
+          ref_events.StopEvent(&(*pSlot)->m_EventData, false).IgnoreResult();
+        }
+        break;
+
+      case Command::Type::SetParameters:
+        if (pSlot != nullptr)
+        {
+          for (plUInt32 i = 0; i < cmd.m_ParameterNames.GetCount() && i < cmd.m_ParameterValues.GetCount(); ++i)
+          {
+            ref_events.SetEventParameter(&(*pSlot)->m_Entity, cmd.m_ParameterNames[i], cmd.m_ParameterValues[i]);
+          }
+        }
+        break;
+
+      case Command::Type::Remove:
+        if (pSlot != nullptr)
+        {
+          // severs the instances' links to the slot's entity and event data, which are deleted with the slot
+          ref_events.StopAllOnEntity(&(*pSlot)->m_Entity, true);
+          ref_events.DetachEventData(&(*pSlot)->m_EventData);
+          m_Slots.Remove(cmd.m_uiKey);
+        }
+        break;
+    }
+  }
+
+  // auditions waiting for their mixer start once it is built, or without it after a while
+  for (auto it = m_Slots.GetIterator(); it.IsValid(); ++it)
+  {
+    Slot& slot = *it.Value();
+    if (slot.m_bPendingStart && (ref_busGraph.IsBuilt() || tNow >= slot.m_MixerDeadline))
+    {
+      Activate(slot, ref_events, ref_busGraph, pEngine);
+    }
+  }
+
+  // the status of every audition
+  PL_LOCK(m_Mutex);
+
+  for (auto it = m_Slots.GetIterator(); it.IsValid(); ++it)
+  {
+    const Slot& slot = *it.Value();
+
+    // a key removed since the commands were taken has no status any more
+    plAudioAuditionStatus* pStatus = m_Status.GetValue(it.Key());
+    if (pStatus == nullptr)
+      continue;
+
+    // a play requested since the commands were taken keeps its waiting state until the next update
+    bool bQueued = false;
+    for (const Command& cmd : m_Commands)
+    {
+      bQueued |= cmd.m_uiKey == it.Key() && cmd.m_Type == Command::Type::Play;
+    }
+    if (bQueued)
+      continue;
+
+    bool bWaiting = false;
+    pStatus->m_bPlaying = ref_events.GetEventState(&slot.m_EventData, bWaiting, pStatus->m_fPosition, pStatus->m_InstrumentSounding, pStatus->m_InstrumentRangeGains);
+    pStatus->m_bWaiting = bWaiting || slot.m_bPendingStart;
+    pStatus->m_bPlaying |= slot.m_bPendingStart;
+    pStatus->m_bHasMixer = ref_busGraph.IsBuilt();
+    pStatus->m_fPeak = fMasterPeak;
+  }
+}
+
+void plAudioAudition::StopAll(plPlasmaAudioEventManager& ref_events)
+{
+  for (auto it = m_Slots.GetIterator(); it.IsValid(); ++it)
+  {
+    ref_events.StopAllOnEntity(&it.Value()->m_Entity, true);
+    ref_events.DetachEventData(&it.Value()->m_EventData);
+  }
+
+  m_Slots.Clear();
+
+  PL_LOCK(m_Mutex);
+  m_Commands.Clear();
+  m_Status.Clear();
+}
+
+PL_STATICLINK_FILE(PlasmaAudioPlugin, PlasmaAudioPlugin_Events_AudioAudition);

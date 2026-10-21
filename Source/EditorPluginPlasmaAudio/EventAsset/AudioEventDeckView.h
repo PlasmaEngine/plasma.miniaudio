@@ -36,6 +36,9 @@ public:
   /// "..." of a playlist entry: pick its Audio Clip.
   plDelegate<void(const plUuid&)> m_OnPickEntryClip;
 
+  /// The play button of a playlist entry: audition that entry alone.
+  plDelegate<void(const plUuid&)> m_OnAuditionEntry;
+
   plString GetToolTipAt(const plVec2& vLogical) const override;
 
 protected:

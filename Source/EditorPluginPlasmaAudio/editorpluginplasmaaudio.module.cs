@@ -12,6 +12,9 @@ public class EditorPluginPlasmaAudioModule : ModuleRules
         PublicDependencies.Add("MiniAudioModule");
         PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/PlasmaAudioPlugin", "plPlasmaAudioPlugin");
 
+        // the audition messages exchanged with the engine process
+        PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/EnginePluginPlasmaAudio", "plEnginePluginPlasmaAudio");
+
         // The clip, event and mixer windows and the Audio Profiler are engine-drawn: EditorUi and the retained UI runtime.
         PlasmaPackageSdk.AddImportLibrary(this, context, "plEditorUi");
         PlasmaPackageSdk.AddImportLibrary(this, context, "plGameUiPlugin");

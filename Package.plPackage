@@ -24,7 +24,7 @@ PackageInfo
 	string %Banner{"Branding/PlasmaAudioBanner.png"}
 
 	string %EditorPlugins{"plEditorPluginPlasmaAudio"}
-	string %EditorEnginePlugins{}
+	string %EditorEnginePlugins{"plEnginePluginPlasmaAudio"}
 	string %RuntimePlugins{"plPlasmaAudioPlugin"}
 	string %PackageDependencies{}
 

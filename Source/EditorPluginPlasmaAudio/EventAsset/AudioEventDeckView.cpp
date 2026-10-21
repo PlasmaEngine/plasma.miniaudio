@@ -235,12 +235,17 @@ void plEditorUiAudioEventDeck::BuildDocument()
       const float fMoreX = fRemoveX - 22.0f;
       const float fWeightX = fMoreX - 4.0f - 48.0f;
       const float fHintX = fWeightX - 14.0f;
+      const float fPlayX = fHintX - 4.0f - 20.0f;
 
       plString sText, sToolTip;
       bool bSilence = false;
       DescribeEntry(entries[i], sText, sToolTip, bSilence);
 
-      plAudioEngineUi::HitButton(pRoot, plRectFloat(s_fPad, y, fHintX - 4.0f - s_fPad, ControlHeight), IndexedName("Deck.Entry", i), sToolTip, &board);
+      plAudioEngineUi::HitButton(pRoot, plRectFloat(s_fPad, y, fPlayX - 4.0f - s_fPad, ControlHeight), IndexedName("Deck.Entry", i), sToolTip, &board);
+
+      plUiButton* pPlay = IconButton(pRoot, Icon::Play, IndexedName("Deck.Play", i));
+      plAudioEngineUi::Place(pPlay, plRectFloat(fPlayX, y + 2.0f, 20.0f, 20.0f));
+      SetToolTip(board, IndexedName("Deck.Play", i), "Auditions this entry alone, through the engine process");
 
       const plString sField = IndexedName("Deck.Field.Weight", i);
       NumberField(pRoot, plRectFloat(fWeightX, y, 48.0f, ControlHeight), sField, TextBinding(sField), SubmitEvent(sField));
@@ -406,12 +411,13 @@ void plEditorUiAudioEventDeck::DrawInstrumentColumn(float fWidth)
     const float fMoreX = fRemoveX - 22.0f;
     const float fWeightX = fMoreX - 4.0f - 48.0f;
     const float fHintX = fWeightX - 14.0f;
+    const float fPlayX = fHintX - 4.0f - 20.0f;
 
     plString sText, sToolTip;
     bool bSilence = false;
     DescribeEntry(entries[i], sText, sToolTip, bSilence);
 
-    const plRectFloat button(s_fPad, y, fHintX - 4.0f - s_fPad, ControlHeight);
+    const plRectFloat button(s_fPad, y, fPlayX - 4.0f - s_fPad, ControlHeight);
     m_Writer.Rect(button, Plate(), 4.0f);
     m_Writer.RectOutline(button, pSelected == entries[i] ? Accent() : Line(), 1.0f, 4.0f);
     plAudioEngineUi::Icon(m_Writer, plRectFloat(button.x + 8.0f, y + 5.0f, 14.0f, 14.0f), plAudioEngineUi::IconClip, bSilence ? Dim() : audio, true);
@@ -547,6 +553,11 @@ void plEditorUiAudioEventDeck::OnUiEvent(const plMsgUiEvent& event)
     if (const plInt32 iEntry = IndexOf(sId, "Deck.Entry"); iEntry >= 0 && iEntry < static_cast<plInt32>(entries.GetCount()))
     {
       m_pDocument->GetSelectionManager()->SetSelection(entries[iEntry]);
+    }
+    else if (const plInt32 iPlay = IndexOf(sId, "Deck.Play"); iPlay >= 0 && iPlay < static_cast<plInt32>(entries.GetCount()))
+    {
+      if (m_OnAuditionEntry.IsValid())
+        m_OnAuditionEntry(entries[iPlay]->GetGuid());
     }
     else if (const plInt32 iPick = IndexOf(sId, "Deck.Pick"); iPick >= 0 && iPick < static_cast<plInt32>(entries.GetCount()))
     {

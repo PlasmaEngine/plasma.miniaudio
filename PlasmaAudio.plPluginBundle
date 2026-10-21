@@ -8,7 +8,7 @@ PluginInfo
 	string %MaxEngineVersion{"0.7.0"}
 	string %Description{"PlasmaAudio: event-based audio with mixer, snapshots and DSP. Built on miniaudio, compiled into the plugin."}
 	string %EditorPlugins{"plEditorPluginPlasmaAudio"}
-	string %EditorEnginePlugins{}
+	string %EditorEnginePlugins{"plEnginePluginPlasmaAudio"}
 	string %RuntimePlugins{"plPlasmaAudioPlugin"}
 	string %PackageDependencies{}
 	string %RequiredPlugins{}

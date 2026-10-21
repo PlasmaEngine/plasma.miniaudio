@@ -167,6 +167,17 @@ public:
   PL_NODISCARD float GetEffectiveVolume() const { return m_fCurrentVolumeMultiplier; }
   PL_NODISCARD plTime GetAge() const { return m_Elapsed; }
 
+  /// \brief Position on the event's timeline in seconds: time since the start (plus the start offset), restarting at
+  /// the loop start with every pass of a looping region.
+  PL_NODISCARD double GetTimelinePosition() const;
+
+  /// \brief Number of instruments of the playing event.
+  PL_NODISCARD plUInt32 GetInstrumentCount() const { return m_Instruments.GetCount(); }
+
+  /// \brief Whether the instrument has an active voice, and the volume factor of its parameter range.
+  PL_NODISCARD bool IsInstrumentSounding(plUInt32 uiInstrument) const;
+  PL_NODISCARD float GetInstrumentRangeGain(plUInt32 uiInstrument) const { return m_Instruments[uiInstrument].m_fRangeGain; }
+
   /// \brief The event resource the instance plays; null once that resource was unloaded.
   PL_NODISCARD const plAudioEventResource* GetResource() const { return m_pResource; }
 
@@ -304,7 +315,11 @@ private:
     bool m_bDone = false;
     bool m_bLoadWaitLogged = false;  ///< the wait for the clip of the pending trigger was logged
     bool m_bClipMissingLogged = false; ///< a missing clip of the instrument was logged
+    float m_fRangeGain = 1.0f;         ///< volume factor of the instrument's parameter range, set by ApplyModulation
   };
+
+  /// \brief Base volume of the voice times the parameter range gain of its instrument.
+  float GetVoiceVolume(const Voice& voice) const { return voice.m_fBaseVolume * m_Instruments[voice.m_uiInstrument].m_fRangeGain; }
 
   /// \brief Adds an entry about this instance to m_pEventLog, if set.
   void Log(plAudioLogEventType::Enum type, plStringView sDetail = plStringView()) const;
@@ -401,6 +416,10 @@ private:
   ma_uint32 m_uiSampleRate = 48000;           ///< engine sample rate
   plUInt32 m_uiRegionLoopInstrument = plInvalidIndex; ///< instrument that loops the region natively on its inner source
 
+  /// \brief Generator of a seeded instance (plPlasmaAudioEventData::m_bSeeded); the others use the manager's.
+  plRandom m_SeededRng;
+  bool m_bSeeded = false;
+
   plTime m_Elapsed;
   bool m_bStopping = false;
   float m_fCurrentVolumeMultiplier = 1.0f;
@@ -471,6 +490,11 @@ public:
 
   /// \brief Whether an instance is bound to the event data, or its start is still waiting for the event to load.
   PL_NODISCARD bool IsEventPlaying(const plPlasmaAudioEventData* pEventData) const;
+
+  /// \brief State of the instance started for the event data: whether it waits to start (its event or mixer is still
+  /// loading), its timeline position in seconds, and per instrument whether it sounds and its parameter range gain.
+  /// Returns false when nothing plays for the event data.
+  bool GetEventState(const plPlasmaAudioEventData* pEventData, bool& out_bWaiting, double& out_fPosition, plDynamicArray<bool>& out_sounding, plDynamicArray<float>& out_rangeGains) const;
 
   /// \brief Starts the activations whose events finished loading, then updates every instance and the voice manager.
   /// listeners holds the position of every listener that is heard.

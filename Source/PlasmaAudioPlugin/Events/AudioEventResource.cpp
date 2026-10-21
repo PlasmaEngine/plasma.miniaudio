@@ -15,7 +15,8 @@
 // version 4: instrument switch-state filter
 // version 5: playlist entry clip reference
 // version 6: voice priority + virtual mode
-static constexpr plTypeVersion kAudioEventDescVersion = 6;
+// version 7: instrument parameter range
+static constexpr plTypeVersion kAudioEventDescVersion = 7;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventResource, 1, plRTTIDefaultAllocator<plAudioEventResource>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -72,6 +73,10 @@ void plAudioEventInstrumentDesc::Save(plStreamWriter& inout_stream) const
   inout_stream << m_fVolumeRandDb;
   inout_stream << m_fPitchSemitones;
   inout_stream << m_fPitchRandSemitones;
+  inout_stream << m_uiRangeParameter;
+  inout_stream << m_fRangeMin;
+  inout_stream << m_fRangeMax;
+  inout_stream << m_fRangeFade;
 
   inout_stream << m_Playlist.GetCount();
   for (const auto& entry : m_Playlist)
@@ -103,11 +108,37 @@ void plAudioEventInstrumentDesc::Load(plStreamReader& inout_stream, plTypeVersio
   inout_stream >> m_fPitchSemitones;
   inout_stream >> m_fPitchRandSemitones;
 
+  if (uiVersion >= 7)
+  {
+    inout_stream >> m_uiRangeParameter;
+    inout_stream >> m_fRangeMin;
+    inout_stream >> m_fRangeMax;
+    inout_stream >> m_fRangeFade;
+  }
+
   plUInt32 uiCount = 0;
   inout_stream >> uiCount;
   m_Playlist.SetCount(uiCount);
   for (auto& entry : m_Playlist)
     entry.Load(inout_stream, uiVersion);
+}
+
+float plAudioEventInstrumentDesc::GetRangeGain(float fValue) const
+{
+  if (m_uiRangeParameter == plAudioEventNoParameter)
+    return 1.0f;
+
+  const float fMin = plMath::Min(m_fRangeMin, m_fRangeMax);
+  const float fMax = plMath::Max(m_fRangeMin, m_fRangeMax);
+
+  if (fValue >= fMin && fValue <= fMax)
+    return 1.0f;
+
+  if (m_fRangeFade <= 0.0f)
+    return 0.0f;
+
+  const float fOutside = fValue < fMin ? fMin - fValue : fValue - fMax;
+  return plMath::Clamp(1.0f - fOutside / m_fRangeFade, 0.0f, 1.0f);
 }
 
 void plAudioEventParameterDesc::Save(plStreamWriter& inout_stream) const

@@ -130,6 +130,15 @@ public:
 
   /// \brief The event instance currently bound to this event data (audio-thread only, owned by the event manager).
   plPlasmaAudioEventInstance* m_pInstance = nullptr;
+
+  /// \brief With m_bSeeded, the instance started for this event data draws its random picks from a generator seeded
+  /// with m_uiSeed, so the same seed plays the same entries, volumes and pitches. Read when the instance starts.
+  plUInt32 m_uiSeed = 0;
+  bool m_bSeeded = false;
+
+  /// \brief Where on its timeline the instance starts. Instruments that started earlier begin mid-sample. The offset is
+  /// limited to the time the audio engine has been running.
+  plTime m_StartOffset = plTime::MakeZero();
 };
 
 class PL_PLASMAAUDIOPLUGIN_DLL plPlasmaAudioTriggerData final : public plAudioSystemTriggerData

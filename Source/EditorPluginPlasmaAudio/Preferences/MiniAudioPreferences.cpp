@@ -1,5 +1,6 @@
 #include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
+#include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorPluginPlasmaAudio/Preferences/MiniAudioPreferences.h>
 
 // clang-format off
@@ -9,6 +10,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plPlasmaAudioProjectPreferences, 1, plRTTIDefaul
   {
     PL_MEMBER_PROPERTY("Mute", m_bMute),
     PL_MEMBER_PROPERTY("Volume", m_fMasterVolume)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 1.0f)),
+    PL_MEMBER_PROPERTY("AuditionMixer", m_sAuditionMixer)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Audio_Mixer")),
   }
   PL_END_PROPERTIES;
 }
@@ -67,4 +69,29 @@ void plPlasmaAudioProjectPreferences::ProcessEventHandler(const plEditorEnginePr
   {
     SyncCVars();
   }
+}
+
+plString plPlasmaAudioProjectPreferences::GetAuditionMixer() const
+{
+  if (!m_sAuditionMixer.IsEmpty())
+    return m_sAuditionMixer;
+
+  plString sOnlyMixer;
+
+  plAssetCurator::plLockedAssetTable assets = plAssetCurator::GetSingleton()->GetKnownAssets();
+  for (auto it = assets->GetIterator(); it.IsValid(); ++it)
+  {
+    const plAssetInfo* pInfo = it.Value();
+    if (pInfo->m_Info == nullptr || !plStringView(pInfo->m_Info->GetAssetsDocumentTypeName()).IsEqual("Audio Mixer"))
+      continue;
+
+    // several mixers: which one the game loads is not known
+    if (!sOnlyMixer.IsEmpty())
+      return plString();
+
+    plStringBuilder sGuid;
+    sOnlyMixer = plConversionUtils::ToString(it.Key(), sGuid);
+  }
+
+  return sOnlyMixer;
 }

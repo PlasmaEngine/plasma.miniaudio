@@ -13,8 +13,11 @@
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/IO/OSFile.h>
 #include <Foundation/Math/ColorScheme.h>
+#include <EditorPluginPlasmaAudio/Preferences/MiniAudioPreferences.h>
 #include <EditorPluginPlasmaAudio/Preview/AudioEnumRegistry.h>
-#include <EditorPluginPlasmaAudio/Preview/AudioPreviewService.h>
+#include <EnginePluginPlasmaAudio/Audition/AudioAuditionMessages.h>
+#include <Foundation/IO/MemoryStream.h>
+#include <MiniAudio/miniaudio.h>
 #include <GuiFoundation/ActionViews/MenuBarActionMapView.moc.h>
 #include <GuiFoundation/ActionViews/ToolBarActionMapView.moc.h>
 #include <GuiFoundation/DockPanels/DocumentPanel.moc.h>
@@ -1515,7 +1518,6 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
   m_pAssetDoc = static_cast<plAudioEventAssetDocument*>(pDocument);
   m_Accent = AccentColor(pDocument);
   m_bEngineViews = plAudioEngineUi::UseEngineViews();
-  m_AuditionRng.InitializeFromCurrentTime();
 
   // Menu Bar
   {
@@ -1602,23 +1604,16 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
   GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::StructureEventHandler, this));
   GetDocument()->GetSelectionManager()->m_Events.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::SelectionEventHandler, this));
 
-  // poll the audition meter (only does work while something is auditioning)
+  // the audition plays in the engine process; while it plays, its status is polled for the playhead and the meter
+  m_AuditionSubscription = m_pAssetDoc->m_AuditionEvents.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::OnAuditionStatus, this));
+
   m_pMeterTimer = new QTimer(this);
-  m_pMeterTimer->setInterval(50);
+  m_pMeterTimer->setInterval(40);
   connect(m_pMeterTimer, &QTimer::timeout, this, [this]()
     {
-      const float fPeak = plAudioPreviewService::GetSingleton().GetMasterPeak();
-
-      if (m_pMeterView != nullptr)
-        m_pMeterView->SetPeak(fPeak);
-
-      if (m_pLevelMeter != nullptr)
-        m_pLevelMeter->SetPeak(fPeak);
-
-      if (m_pMeterLabel != nullptr)
-      {
-        m_pMeterLabel->setText(fPeak <= 0.001f ? QString::fromUtf8("-\xE2\x88\x9E dB") : QString::asprintf("%.1f dB", plAudioMixerUtils::LinearToDb(fPeak)));
-      } });
+      if (m_bAuditioning)
+        SendAuditionCommand(plAudioAuditionCommand::Poll);
+    });
   m_pMeterTimer->start();
 
   FinishWindowCreation();
@@ -1639,8 +1634,15 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
 
     m_pToolStrip = new plQtEngineControlStrip(pRow);
     m_pToolStrip->setObjectName("AudioEventToolStrip");
-    m_uiPlay = m_pToolStrip->AddIconButton(Icon::Play, "Auditions the event in the editor (respects per-track M mute and S solo)");
-    m_uiStop = m_pToolStrip->AddIconButton(Icon::Stop, "Stops the audition");
+    m_uiPlay = m_pToolStrip->AddIconButton(Icon::Play, "Plays the event from the timeline cursor through the engine process's event manager and mixer, as the game does (respects M mute and S solo). Space in the timeline plays and stops.");
+    m_uiStop = m_pToolStrip->AddIconButton(Icon::Stop, "Stops the audition with the event's stop fade");
+    m_pToolStrip->AddChip("RUNTIME AUDITION", plEditorUi::Accent(),
+      "The audition runs in the engine process: clip build settings, fades, loop region, retrigger, automation, parameter ranges, voice limits and the mixer's buses all apply. Not yet: 3D position (P4) and switch states.");
+    m_pToolStrip->AddSeparator();
+    m_pToolStrip->AddLabel("Seed", -1.0f);
+    m_uiSeedField = m_pToolStrip->AddNumberField("#", "", "1", "The seed of the random playlist picks, volumes and pitches: the same seed plays the same takes", 70.0f);
+    m_uiNewSeed = m_pToolStrip->AddIconButton(Icon::Repeat, "A new seed");
+    m_uiFit = m_pToolStrip->AddIconButton(Icon::FitWidth, "Fits the timeline to the event (F in the timeline; Ctrl+wheel zooms)");
     m_pToolStrip->AddSeparator();
     m_uiAddInstrument = m_pToolStrip->AddIconTextButton(Icon::Add, "Instrument", "Adds an instrument track (fill its playlist with '+ Add Files...' in the deck; double-click a track header to rename)");
     m_uiRemoveSelected = m_pToolStrip->AddIconTextButton(Icon::Remove, "Remove Selected", "Removes the selected instrument / parameter / automation");
@@ -1655,6 +1657,16 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
         OnPlayEvent();
       else if (uiControl == m_uiStop)
         OnStopEvent();
+      else if (uiControl == m_uiSeedField)
+      {
+        plInt64 iSeed = m_uiSeed;
+        plConversionUtils::StringToInt64(m_pToolStrip->GetText(uiControl), iSeed).IgnoreResult();
+        SetSeed(static_cast<plUInt32>(plMath::Clamp<plInt64>(iSeed, 0, 0xFFFFFFFF)));
+      }
+      else if (uiControl == m_uiNewSeed)
+        SetSeed(static_cast<plUInt32>(static_cast<plUInt64>(plTime::Now().GetMicroseconds()) % 100000));
+      else if (uiControl == m_uiFit && m_pTimelineView != nullptr)
+        m_pTimelineView->FitView();
       else if (uiControl == m_uiAddInstrument)
         OnAddInstrument();
       else if (uiControl == m_uiRemoveSelected)
@@ -1683,6 +1695,10 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
     m_pTimelineView = plQtEngineUiContentWidget::Create<plEditorUiAudioEventTimeline>(pSplitter, "AudioEventTimeline", &pTimelineWidget, GetDocument());
     m_pTimelineView->m_OnAddParameter = [this]()
     { OnAddParameter(); };
+    m_pTimelineView->m_OnTogglePlay = [this]()
+    { OnTogglePlay(); };
+    m_pTimelineView->m_OnAuditionValueChanged = [this](const plString& sName, float fValue)
+    { OnAuditionParameterChanged(sName, fValue); };
     pSplitter->addWidget(pTimelineWidget);
   }
 
@@ -1711,6 +1727,8 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
     { OnAddPlaylistEntry(); };
     m_pDeckView->m_OnPickEntryClip = [this](const plUuid& entryGuid)
     { PickEntryClip(entryGuid); };
+    m_pDeckView->m_OnAuditionEntry = [this](const plUuid& entryGuid)
+    { StartAudition(entryGuid, 0.0); };
     pDeckLayout->addWidget(m_pDeckWidget, 0, 0, 1, 2);
 
     plQtEngineUiContentWidget* pAutomationWidget = nullptr;
@@ -2148,8 +2166,8 @@ void plAudioEventAssetDocumentWindow::CreateQtCentralWidget(QWidget* pCentralWid
 
 plAudioEventAssetDocumentWindow::~plAudioEventAssetDocumentWindow()
 {
-  // leave the shared preview device running, but silence anything this window started
-  plAudioPreviewService::GetSingleton().StopAll();
+  OnStopEvent();
+  m_pAssetDoc->m_AuditionEvents.RemoveEventHandler(m_AuditionSubscription);
 
   GetDocument()->GetObjectManager()->m_PropertyEvents.RemoveEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::PropertyEventHandler, this));
   GetDocument()->GetObjectManager()->m_StructureEvents.RemoveEventHandler(plMakeDelegate(&plAudioEventAssetDocumentWindow::StructureEventHandler, this));
@@ -3067,140 +3085,204 @@ void plAudioEventAssetDocumentWindow::OnAddAutomationFor(plUInt8 uiTarget, const
 
 void plAudioEventAssetDocumentWindow::OnPlayEvent()
 {
-  plAudioPreviewService& preview = plAudioPreviewService::GetSingleton();
+  StartAudition(plUuid(), m_pTimelineView != nullptr ? m_pTimelineView->GetCursor() : 0.0);
+}
 
-  if (!preview.EnsureInit())
-  {
-    ShowTemporaryStatusBarMsg("Could not open an audio device for auditioning.");
-    return;
-  }
-
-  // restart from silence
-  preview.StopAll();
-
-  plHybridArray<const plDocumentObject*, 8> instruments;
-  GatherChildrenOfProperty(GetPropertiesObject(), "Instruments", instruments);
-
-  if (instruments.IsEmpty())
-  {
-    ShowTemporaryStatusBarMsg("Nothing to play - add an instrument first.");
-    return;
-  }
-
-  const bool bAnySolo = HasSoloTracks();
-
-  // route the preview into the event's mixer bus, so the Mixer Console's meters respond
-  const plString sOutputBus = GetPropertiesObject() != nullptr ? GetPropertiesObject()->GetTypeAccessor().GetValue("OutputBus").ConvertTo<plString>() : plString();
-
-  plUInt32 uiPlayed = 0;
-  plUInt32 uiSkipped = 0;
-
-  for (const plDocumentObject* pInstrument : instruments)
-  {
-    const auto& accessor = pInstrument->GetTypeAccessor();
-
-    // disabled channels: persisted mute, or silenced because something else is solo'd
-    if (accessor.GetValue("Mute").ConvertTo<bool>())
-    {
-      ++uiSkipped;
-      continue;
-    }
-
-    if (bAnySolo && !IsSoloTrack(pInstrument->GetGuid()))
-    {
-      ++uiSkipped;
-      continue;
-    }
-
-    plHybridArray<const plDocumentObject*, 8> playlist;
-    GatherChildrenOfProperty(pInstrument, "Playlist", playlist);
-
-    if (playlist.IsEmpty())
-      continue;
-
-    // pick an entry: weighted random (sequential instruments audition their first entry)
-    const plInt64 iMode = accessor.GetValue("PlaylistMode").ConvertTo<plInt64>();
-    const plDocumentObject* pEntry = playlist[0];
-
-    if (iMode != plAudioEventPlaylistMode::Sequential)
-    {
-      float fTotalWeight = 0.0f;
-      for (const plDocumentObject* pCandidate : playlist)
-        fTotalWeight += plMath::Max(pCandidate->GetTypeAccessor().GetValue("Weight").ConvertTo<float>(), 0.0f);
-
-      if (fTotalWeight > 0.0f)
-      {
-        float fPick = static_cast<float>(m_AuditionRng.DoubleZeroToOneExclusive()) * fTotalWeight;
-        for (const plDocumentObject* pCandidate : playlist)
-        {
-          fPick -= plMath::Max(pCandidate->GetTypeAccessor().GetValue("Weight").ConvertTo<float>(), 0.0f);
-          if (fPick <= 0.0f)
-          {
-            pEntry = pCandidate;
-            break;
-          }
-        }
-      }
-    }
-
-    // a clip auditions its source file (clip settings such as normalisation are not applied here)
-    plString sFile;
-    const plString sClip = pEntry->GetTypeAccessor().GetValue("Clip").ConvertTo<plString>();
-    if (!sClip.IsEmpty())
-    {
-      plAudioClipAssetMetaInfo clipInfo;
-      if (plAudioClipAssetUtils::GetClipInfo(sClip, clipInfo))
-        sFile = clipInfo.m_sSourceFile;
-    }
-    else
-    {
-      sFile = pEntry->GetTypeAccessor().GetValue("File").ConvertTo<plString>();
-    }
-
-    if (sFile.IsEmpty()) // silence entry, or a clip without a known source file
-      continue;
-
-    plStringBuilder sAbsPath = sFile;
-    if (!plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
-      continue;
-
-    // randomized volume / pitch, exactly like the runtime instrument does
-    const float fVolumeDb = accessor.GetValue("Volume").ConvertTo<float>();
-    const float fVolumeRand = accessor.GetValue("VolumeRandomization").ConvertTo<float>();
-    const float fPitchSt = accessor.GetValue("Pitch").ConvertTo<float>();
-    const float fPitchRand = accessor.GetValue("PitchRandomization").ConvertTo<float>();
-
-    const float fVolume = plAudioMixerUtils::DbToLinear(fVolumeDb + static_cast<float>(m_AuditionRng.DoubleMinMax(-fVolumeRand, fVolumeRand)));
-    const float fPitch = plAudioMixerUtils::SemitonesToPitch(fPitchSt + static_cast<float>(m_AuditionRng.DoubleMinMax(-fPitchRand, fPitchRand)));
-
-    const double fDelay = accessor.GetValue("StartDelay").ConvertTo<double>();
-
-    // gapless single-entry loops keep looping; scatterers/multi-entry loops play one iteration here
-    const bool bLoop = accessor.GetValue("Loop").ConvertTo<bool>() && playlist.GetCount() == 1 &&
-                       accessor.GetValue("MinRetriggerDelay").ConvertTo<double>() <= 0.0 &&
-                       accessor.GetValue("MaxRetriggerDelay").ConvertTo<double>() <= 0.0;
-
-    if (preview.PlayFile(sAbsPath.GetData(), fVolume, fPitch, fDelay, bLoop, sOutputBus).Succeeded())
-    {
-      ++uiPlayed;
-    }
-  }
-
-  if (uiPlayed == 0)
-  {
-    ShowTemporaryStatusBarMsg(uiSkipped > 0 ? "All channels are muted or silenced by solo." : "Nothing to play - the playlists have no sound files.");
-  }
-  else if (uiSkipped > 0)
-  {
-    plStringBuilder sMsg;
-    sMsg.SetFormat("Auditioning {0} channel(s), {1} disabled.", uiPlayed, uiSkipped);
-    ShowTemporaryStatusBarMsg(sMsg.GetView());
-  }
+void plAudioEventAssetDocumentWindow::OnTogglePlay()
+{
+  if (m_bAuditioning)
+    OnStopEvent();
+  else
+    OnPlayEvent();
 }
 
 void plAudioEventAssetDocumentWindow::OnStopEvent()
 {
-  plAudioPreviewService::GetSingleton().StopAll();
+  if (m_bAuditioning)
+    SendAuditionCommand(plAudioAuditionCommand::Stop);
+}
+
+void plAudioEventAssetDocumentWindow::StartAudition(const plUuid& entryGuid, double fStartOffset)
+{
+  plAudioEventDesc desc;
+  if (plStatus res = m_pAssetDoc->BuildEventDesc(desc); res.Failed())
+  {
+    ShowTemporaryStatusBarMsg(res.m_sMessage.GetView());
+    return;
+  }
+
+  plHybridArray<const plDocumentObject*, 8> instruments;
+  GatherChildrenOfProperty(GetPropertiesObject(), "Instruments", instruments);
+
+  if (entryGuid.IsValid())
+  {
+    // one playlist entry, right away: its instrument alone, with only that entry and without its range or switch
+    const plDocumentObject* pEntry = GetDocument()->GetObjectManager()->GetObject(entryGuid);
+    if (pEntry == nullptr || pEntry->GetParent() == nullptr)
+      return;
+
+    const plUInt32 uiInstrument = instruments.IndexOf(pEntry->GetParent());
+    const plUInt32 uiEntry = pEntry->GetPropertyIndex().ConvertTo<plUInt32>();
+    if (uiInstrument >= desc.m_Instruments.GetCount() || uiEntry >= desc.m_Instruments[uiInstrument].m_Playlist.GetCount())
+      return;
+
+    plAudioEventInstrumentDesc instrument = desc.m_Instruments[uiInstrument];
+    const plAudioEventPlaylistEntryDesc entry = instrument.m_Playlist[uiEntry];
+    instrument.m_Playlist.Clear();
+    instrument.m_Playlist.PushBack(entry);
+    instrument.m_StartDelay = plTime::MakeZero();
+    instrument.m_bLoop = false;
+    instrument.m_bMute = false;
+    instrument.m_sSwitchState.Clear();
+    instrument.m_uiRangeParameter = plAudioEventNoParameter;
+
+    desc.m_Instruments.Clear();
+    desc.m_Instruments.PushBack(instrument);
+    desc.m_bLoopRegion = false;
+    desc.m_FadeIn = plTime::MakeZero();
+    fStartOffset = 0.0;
+  }
+  else
+  {
+    // solo is a session state of the window: the other instruments are muted for the audition
+    const bool bAnySolo = HasSoloTracks();
+    bool bAnyAudible = false;
+
+    for (plUInt32 i = 0; i < desc.m_Instruments.GetCount() && i < instruments.GetCount(); ++i)
+    {
+      plAudioEventInstrumentDesc& instrument = desc.m_Instruments[i];
+      if (bAnySolo && !IsSoloTrack(instruments[i]->GetGuid()))
+        instrument.m_bMute = true;
+
+      bAnyAudible |= !instrument.m_bMute && !instrument.m_Playlist.IsEmpty();
+    }
+
+    if (!bAnyAudible)
+    {
+      ShowTemporaryStatusBarMsg(bAnySolo ? "All channels are muted or silenced by solo." : "Nothing to play - the playlists are empty or every channel is muted.");
+      return;
+    }
+  }
+
+  // the parameters start at the values the parameter tabs audition
+  if (m_pTimelineView != nullptr)
+  {
+    for (plAudioEventParameterDesc& parameter : desc.m_Parameters)
+    {
+      parameter.m_fDefault = plMath::Clamp(m_pTimelineView->GetAuditionValue(parameter.m_sName, parameter.m_fDefault), parameter.m_fMin, parameter.m_fMax);
+    }
+  }
+
+  plContiguousMemoryStreamStorage storage;
+  {
+    plMemoryStreamWriter writer(&storage);
+    if (plStatus res = m_pAssetDoc->WriteAuditionData(writer, desc); res.Failed())
+    {
+      ShowTemporaryStatusBarMsg(res.m_sMessage.GetView());
+      return;
+    }
+  }
+
+  plAudioAuditionMsgToEngine msg;
+  msg.m_Command = plAudioAuditionCommand::Play;
+  msg.m_EventData.PushBackRange(plArrayPtr<const plUInt8>(storage.GetData(), storage.GetStorageSize32()));
+  msg.m_fStartOffset = fStartOffset;
+  msg.m_bSeeded = true;
+  msg.m_uiSeed = m_uiSeed;
+
+  if (plPlasmaAudioProjectPreferences* pPreferences = plPreferences::QueryPreferences<plPlasmaAudioProjectPreferences>())
+  {
+    msg.m_sMixer = pPreferences->GetAuditionMixer();
+  }
+
+  m_bAuditioning = m_pAssetDoc->SendMessageToEngine(&msg);
+  m_bMixerNoteShown = false;
+
+  if (!m_bAuditioning)
+  {
+    ShowTemporaryStatusBarMsg("The engine process is not running - the audition plays there.");
+  }
+}
+
+void plAudioEventAssetDocumentWindow::SetSeed(plUInt32 uiSeed)
+{
+  m_uiSeed = uiSeed;
+
+  if (m_pToolStrip != nullptr)
+  {
+    plStringBuilder sSeed;
+    sSeed.SetFormat("{}", uiSeed);
+    m_pToolStrip->SetText(m_uiSeedField, sSeed);
+  }
+}
+
+void plAudioEventAssetDocumentWindow::SendAuditionCommand(plAudioAuditionCommand::Enum command)
+{
+  plAudioAuditionMsgToEngine msg;
+  msg.m_Command = command;
+
+  if (!m_pAssetDoc->SendMessageToEngine(&msg))
+  {
+    m_bAuditioning = false;
+    ShowAuditionLevel(0.0f);
+  }
+}
+
+void plAudioEventAssetDocumentWindow::OnAuditionParameterChanged(const plString& sName, float fValue)
+{
+  if (!m_bAuditioning)
+    return;
+
+  plAudioAuditionMsgToEngine msg;
+  msg.m_Command = plAudioAuditionCommand::SetParameters;
+  msg.m_ParameterNames.PushBack(sName);
+  msg.m_ParameterValues.PushBack(fValue);
+  m_pAssetDoc->SendMessageToEngine(&msg);
+}
+
+void plAudioEventAssetDocumentWindow::OnAuditionStatus(const plAudioAuditionStatusMsgToEditor& status)
+{
+  if (!status.m_sError.IsEmpty())
+  {
+    ShowTemporaryStatusBarMsg(status.m_sError.GetView());
+  }
+
+  if (!status.m_bAvailable)
+  {
+    m_bAuditioning = false;
+  }
+  else if (status.m_bPlaying && !status.m_bWaiting && !status.m_bHasMixer && !m_bMixerNoteShown)
+  {
+    m_bMixerNoteShown = true;
+    ShowTemporaryStatusBarMsg("No mixer is loaded: the event plays straight to the output. Set 'Audition Mixer' in the PlasmaAudio project preferences.");
+  }
+
+  const bool bPlaying = status.m_bAvailable && status.m_bPlaying;
+  if (!bPlaying && !status.m_bWaiting)
+  {
+    m_bAuditioning = false;
+  }
+
+  ShowAuditionLevel(bPlaying ? status.m_fPeak : 0.0f);
+
+  if (m_pTimelineView != nullptr)
+  {
+    m_pTimelineView->SetPlayback(bPlaying && !status.m_bWaiting, status.m_fPosition, status.m_InstrumentSounding);
+  }
+}
+
+void plAudioEventAssetDocumentWindow::ShowAuditionLevel(float fPeak)
+{
+  if (m_pMeterView != nullptr)
+    m_pMeterView->SetPeak(fPeak);
+
+  if (m_pLevelMeter != nullptr)
+    m_pLevelMeter->SetPeak(fPeak);
+
+  if (m_pMeterLabel != nullptr)
+  {
+    m_pMeterLabel->setText(fPeak <= 0.001f ? QString::fromUtf8("-\xE2\x88\x9E dB") : QString::asprintf("%.1f dB", plAudioMixerUtils::LinearToDb(fPeak)));
+  }
 }
 
 void plAudioEventAssetDocumentWindow::OnRemoveSelected()

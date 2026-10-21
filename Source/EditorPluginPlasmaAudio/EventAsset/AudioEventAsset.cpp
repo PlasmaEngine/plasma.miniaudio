@@ -1,8 +1,10 @@
 ﻿#include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
+#include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
 #include <Foundation/IO/FileSystem/FileReader.h>
+#include <Foundation/Utilities/AssetFileHeader.h>
 #include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
 #include <ToolsFoundation/Object/ObjectCommandAccessor.h>
 
@@ -35,6 +37,10 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventInstrument, 1, plRTTIDefaultAllocato
     PL_MEMBER_PROPERTY("VolumeRandomization", m_fVolumeRandDb)->AddAttributes(new plClampValueAttribute(0.0f, 24.0f), new plSuffixAttribute(" dB")),
     PL_MEMBER_PROPERTY("Pitch", m_fPitchSemitones)->AddAttributes(new plClampValueAttribute(-24.0f, 24.0f), new plSuffixAttribute(" st")),
     PL_MEMBER_PROPERTY("PitchRandomization", m_fPitchRandSemitones)->AddAttributes(new plClampValueAttribute(0.0f, 24.0f), new plSuffixAttribute(" st")),
+    PL_MEMBER_PROPERTY("RangeParameter", m_sRangeParameter),
+    PL_MEMBER_PROPERTY("RangeMin", m_fRangeMin),
+    PL_MEMBER_PROPERTY("RangeMax", m_fRangeMax)->AddAttributes(new plDefaultValueAttribute(1.0f)),
+    PL_MEMBER_PROPERTY("RangeFade", m_fRangeFade)->AddAttributes(new plClampValueAttribute(0.0f, plVariant())),
     PL_ARRAY_MEMBER_PROPERTY("Playlist", m_Playlist),
   }
   PL_END_PROPERTIES;
@@ -166,8 +172,20 @@ void plAudioEventAssetProperties::PropertyMetaStateEventHandler(plPropertyMetaSt
 }
 
 plAudioEventAssetDocument::plAudioEventAssetDocument(plStringView sDocumentPath)
-  : plSimpleAssetDocument<plAudioEventAssetProperties>(sDocumentPath, plAssetDocEngineConnection::None)
+  : plSimpleAssetDocument<plAudioEventAssetProperties>(sDocumentPath, plAssetDocEngineConnection::Simple)
 {
+}
+
+void plAudioEventAssetDocument::HandleEngineMessage(const plEditorEngineDocumentMsg* pMsg)
+{
+  if (const auto* pStatus = plDynamicCast<const plAudioAuditionStatusMsgToEditor*>(pMsg))
+  {
+    m_AuditionStatus = *pStatus;
+    m_AuditionEvents.Broadcast(m_AuditionStatus);
+    return;
+  }
+
+  plSimpleAssetDocument<plAudioEventAssetProperties>::HandleEngineMessage(pMsg);
 }
 
 plStatus plAudioEventAssetDocument::ExtractClips(plUInt32& out_uiConverted)
@@ -282,12 +300,35 @@ void plAudioEventAssetDocument::UpdateAssetDocumentInfo(plAssetDocumentInfo* pIn
 
 plTransformStatus plAudioEventAssetDocument::InternalTransformAsset(plStreamWriter& stream, plStringView sOutputTag, const plPlatformProfile* pAssetProfile, const plAssetFileHeader& AssetHeader, plBitflags<plTransformFlags> transformFlags)
 {
+  plAudioEventDesc desc;
+  PL_SUCCEED_OR_RETURN(BuildEventDesc(desc));
+
+  return WriteEventData(stream, desc);
+}
+
+plStatus plAudioEventAssetDocument::WriteAuditionData(plStreamWriter& inout_stream, const plAudioEventDesc& desc) const
+{
+  // what an event resource file holds: its path, the asset file header, then the event
+  plStringBuilder sPath = GetDocumentPath();
+  sPath.ChangeFileExtension("plAudioEvent");
+  inout_stream << sPath;
+
+  plAssetFileHeader header;
+  header.SetFileHashAndVersion(plAssetCurator::GetSingleton()->GetAssetTransformHash(GetGuid()), GetAssetTypeVersion());
+  PL_SUCCEED_OR_RETURN(header.Write(inout_stream));
+
+  return WriteEventData(inout_stream, desc);
+}
+
+plStatus plAudioEventAssetDocument::BuildEventDesc(plAudioEventDesc& out_desc) const
+{
   const plAudioEventAssetProperties* pProp = GetProperties();
 
   if (pProp->m_Instruments.IsEmpty())
     return plStatus("The audio event has no instruments.");
 
-  plAudioEventDesc desc;
+  plAudioEventDesc& desc = out_desc;
+  desc = plAudioEventDesc();
   desc.m_sOutputBus = pProp->m_sOutputBus;
   desc.m_uiMaxInstances = pProp->m_uiMaxInstances;
   desc.m_eStealing = static_cast<plAudioEventStealingMode::Enum>(pProp->m_eStealing.GetValue());
@@ -333,6 +374,18 @@ plTransformStatus plAudioEventAssetDocument::InternalTransformAsset(plStreamWrit
     instrumentDesc.m_fVolumeRandDb = instrument.m_fVolumeRandDb;
     instrumentDesc.m_fPitchSemitones = instrument.m_fPitchSemitones;
     instrumentDesc.m_fPitchRandSemitones = instrument.m_fPitchRandSemitones;
+
+    if (!instrument.m_sRangeParameter.IsEmpty())
+    {
+      const plUInt32 uiParam = desc.FindParameterByName(instrument.m_sRangeParameter);
+      if (uiParam == plInvalidIndex)
+        return plStatus(plFmt("Instrument '{0}' is placed on the unknown parameter '{1}'. Add it to the Parameters list.", instrument.m_sName, instrument.m_sRangeParameter));
+
+      instrumentDesc.m_uiRangeParameter = static_cast<plUInt8>(uiParam);
+      instrumentDesc.m_fRangeMin = plMath::Min(instrument.m_fRangeMin, instrument.m_fRangeMax);
+      instrumentDesc.m_fRangeMax = plMath::Max(instrument.m_fRangeMin, instrument.m_fRangeMax);
+      instrumentDesc.m_fRangeFade = plMath::Max(instrument.m_fRangeFade, 0.0f);
+    }
 
     for (const auto& entry : instrument.m_Playlist)
     {
@@ -391,6 +444,11 @@ plTransformStatus plAudioEventAssetDocument::InternalTransformAsset(plStreamWrit
     automationDesc.m_Curve.CreateLinearApproximation();
   }
 
+  return plStatus(PL_SUCCESS);
+}
+
+plStatus plAudioEventAssetDocument::WriteEventData(plStreamWriter& stream, const plAudioEventDesc& desc) const
+{
   PL_SUCCEED_OR_RETURN(desc.Save(stream));
 
   // sample payloads

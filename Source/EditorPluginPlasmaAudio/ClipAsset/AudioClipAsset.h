@@ -61,6 +61,8 @@ public:
 };
 
 /// \brief Source file facts published in the asset document info, so tools can show them without opening the clip.
+struct plAudioClipHeader;
+
 class plAudioClipAssetMetaInfo : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plAudioClipAssetMetaInfo, plReflectedClass);
@@ -101,6 +103,10 @@ struct plAudioClipAssetUtils
 
   /// \brief The published meta info of the Audio Clip sClipGuid (a GUID string or asset path). False when the clip is unknown to the curator.
   static bool GetClipInfo(plStringView sClipGuid, plAudioClipAssetMetaInfo& out_info, plString* out_pDisplayName = nullptr);
+
+  /// \brief Header of the clip as it was last built (its waveform peaks, frames, loop points). False when the clip has
+  /// not been built for the current platform yet.
+  static bool ReadBuiltHeader(plStringView sClipGuid, plAudioClipHeader& out_header);
 };
 
 class plAudioClipAssetDocument : public plSimpleAssetDocument<plAudioClipAssetProperties>

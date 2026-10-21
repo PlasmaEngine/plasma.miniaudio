@@ -83,6 +83,7 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventPlaylistEntryDesc
 };
 
 constexpr plUInt16 plAudioEventSilenceSample = 0xFFFF;
+constexpr plUInt8 plAudioEventNoParameter = 0xFF;
 
 /// \brief One instrument of an audio event: a (possibly single-entry) playlist with
 /// randomization, placed on the event timeline at a start delay.
@@ -111,6 +112,17 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventInstrumentDesc
   float m_fVolumeRandDb = 0.0f;       ///< +/- random range applied per trigger
   float m_fPitchSemitones = 0.0f;
   float m_fPitchRandSemitones = 0.0f; ///< +/- random range applied per trigger
+
+  /// \brief Optional parameter range: the instrument plays at full volume while the parameter m_uiRangeParameter
+  /// (index into plAudioEventDesc::m_Parameters, plAudioEventNoParameter = always) is inside [m_fRangeMin, m_fRangeMax],
+  /// fades linearly to silence over m_fRangeFade outside it, and is silent beyond.
+  plUInt8 m_uiRangeParameter = plAudioEventNoParameter;
+  float m_fRangeMin = 0.0f;
+  float m_fRangeMax = 1.0f;
+  float m_fRangeFade = 0.0f;
+
+  /// \brief Volume factor of the parameter range at a parameter value.
+  PL_NODISCARD float GetRangeGain(float fValue) const;
 
   plHybridArray<plAudioEventPlaylistEntryDesc, 4> m_Playlist;
 

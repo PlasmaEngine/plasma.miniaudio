@@ -5,7 +5,10 @@
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAssetManager.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
+#include <Foundation/IO/FileSystem/FileReader.h>
 #include <Foundation/IO/OSFile.h>
+#include <Foundation/Utilities/AssetFileHeader.h>
+#include <PlasmaAudioPlugin/Clips/AudioClipDesc.h>
 #include <Foundation/Strings/PathUtils.h>
 #include <Foundation/Strings/StringConversion.h>
 #include <Foundation/Threading/Mutex.h>
@@ -381,6 +384,34 @@ bool plAudioClipAssetUtils::GetClipInfo(plStringView sClipGuid, plAudioClipAsset
 
   out_info = *pMeta;
   return true;
+}
+
+bool plAudioClipAssetUtils::ReadBuiltHeader(plStringView sClipGuid, plAudioClipHeader& out_header)
+{
+  if (sClipGuid.IsEmpty())
+    return false;
+
+  plStringBuilder sOutputFile;
+  {
+    const auto pSubAsset = plAssetCurator::GetSingleton()->FindSubAsset(sClipGuid);
+    if (!pSubAsset.isValid() || pSubAsset->m_pAssetInfo == nullptr || pSubAsset->m_pAssetInfo->m_pDocumentTypeDescriptor == nullptr)
+      return false;
+
+    const plAssetDocumentTypeDescriptor* pTypeDesc = pSubAsset->m_pAssetInfo->m_pDocumentTypeDescriptor;
+    const auto* pManager = static_cast<const plAssetDocumentManager*>(pTypeDesc->m_pManager);
+    sOutputFile = pManager->GetAbsoluteOutputFileName(pTypeDesc, pSubAsset->m_pAssetInfo->m_Path.GetAbsolutePath(), "");
+  }
+
+  // the built clip starts with the asset file header and the clip header; the payload after them is not read
+  plFileReader file;
+  if (file.Open(sOutputFile).Failed())
+    return false;
+
+  plAssetFileHeader assetHeader;
+  if (assetHeader.Read(file).Failed())
+    return false;
+
+  return out_header.Read(file).Succeeded();
 }
 
 //////////////////////////////////////////////////////////////////////////

@@ -5,6 +5,7 @@
 #include <Foundation/Configuration/Singleton.h>
 #include <PlasmaAudioPlugin/Banks/AudioBankResource.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
+#include <PlasmaAudioPlugin/Events/AudioAudition.h>
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
 #include <PlasmaAudioPlugin/Events/MiniAudioAudioEvents.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioBusGraph.h>
@@ -176,6 +177,9 @@ private:
   /// declared before the event manager: voices of streamed clips release their streams into it
   plAudioStreamService m_StreamService;
   plPlasmaAudioEventManager m_EventManager;
+
+  /// the editor's auditions, played through m_EventManager
+  plAudioAudition m_Audition;
 
   /// environment ids this middleware registered for the current mixer (unregistered on unload)
   plHybridArray<plAudioSystemDataID, 4> m_RegisteredEnvironmentIds;

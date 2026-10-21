@@ -2,6 +2,7 @@
 
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
 #include <EditorFramework/Assets/AssetDocumentGenerator.h>
+#include <EnginePluginPlasmaAudio/Audition/AudioAuditionMessages.h>
 #include <EditorFramework/Assets/SimpleAssetDocument.h>
 #include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioRolloffAttribute.h>
@@ -38,6 +39,13 @@ public:
   float m_fVolumeRandDb = 0.0f;
   float m_fPitchSemitones = 0.0f;
   float m_fPitchRandSemitones = 0.0f;
+
+  // optional parameter range: full volume while the parameter is in [min, max], fading to silence over 'fade' outside
+  plString m_sRangeParameter; // empty = always plays
+  float m_fRangeMin = 0.0f;
+  float m_fRangeMax = 1.0f;
+  float m_fRangeFade = 0.0f;
+
   plDynamicArray<plAudioEventPlaylistEntry> m_Playlist;
 };
 
@@ -133,10 +141,31 @@ public:
   /// undoable transaction; the document is not saved.
   plStatus ExtractClips(plUInt32& out_uiConverted);
 
+  /// \brief The runtime description of the event as it is edited now (not as it was saved).
+  plStatus BuildEventDesc(plAudioEventDesc& out_desc) const;
+
+  /// \brief The description followed by the embedded sound files: the data of an event resource.
+  plStatus WriteEventData(plStreamWriter& inout_stream, const plAudioEventDesc& desc) const;
+
+  /// \brief Everything an event resource file holds (its path, the asset file header, the event data), for the audition
+  /// in the engine process.
+  plStatus WriteAuditionData(plStreamWriter& inout_stream, const plAudioEventDesc& desc) const;
+
+  /// \brief The audition status the engine process reported last.
+  const plAudioAuditionStatusMsgToEditor& GetAuditionStatus() const { return m_AuditionStatus; }
+
+  /// \brief Raised for every audition status from the engine process.
+  plEvent<const plAudioAuditionStatusMsgToEditor&> m_AuditionEvents;
+
 protected:
+  virtual void HandleEngineMessage(const plEditorEngineDocumentMsg* pMsg) override;
+
   virtual void UpdateAssetDocumentInfo(plAssetDocumentInfo* pInfo) const override;
   virtual plTransformStatus InternalTransformAsset(plStreamWriter& stream, plStringView sOutputTag, const plPlatformProfile* pAssetProfile,
     const plAssetFileHeader& AssetHeader, plBitflags<plTransformFlags> transformFlags) override;
+
+private:
+  plAudioAuditionStatusMsgToEditor m_AuditionStatus;
 };
 
 //////////////////////////////////////////////////////////////////////////

@@ -228,9 +228,19 @@ private:
   void OnAddParameter();
   void OnRemoveSelected();
 
-  /// \brief Auditions the event in the editor process (respects per-track mute and solo).
+  /// \brief Auditions the event from the timeline cursor through the engine process (respects mute and session solo).
   void OnPlayEvent();
   void OnStopEvent();
+  void OnTogglePlay();
+
+  /// \brief Sends the event as it is edited now to the engine process and plays it there. With a valid entryGuid only
+  /// that playlist entry plays.
+  void StartAudition(const plUuid& entryGuid, double fStartOffset);
+  void SendAuditionCommand(plAudioAuditionCommand::Enum command);
+  void OnAuditionParameterChanged(const plString& sName, float fValue);
+  void OnAuditionStatus(const plAudioAuditionStatusMsgToEditor& status);
+  void ShowAuditionLevel(float fPeak);
+  void SetSeed(plUInt32 uiSeed);
 
   void OnAddPlaylistEntry();
   void OnAddFilesToInstrument();
@@ -289,7 +299,11 @@ private:
   bool m_bRefreshQueued = false;
   bool m_bUpdatingUi = false;
 
-  plRandom m_AuditionRng;
+  // audition in the engine process; the seed is a session value that makes the random picks repeat
+  bool m_bAuditioning = false;
+  bool m_bMixerNoteShown = false;
+  plUInt32 m_uiSeed = 1;
+  plEventSubscriptionID m_AuditionSubscription = 0;
 
   plQtAudioLevelMeterWidget* m_pLevelMeter = nullptr;
   QLabel* m_pMeterLabel = nullptr;
@@ -300,6 +314,9 @@ private:
   plQtEngineControlStrip* m_pToolStrip = nullptr;
   plUInt32 m_uiPlay = 0;
   plUInt32 m_uiStop = 0;
+  plUInt32 m_uiSeedField = 0;
+  plUInt32 m_uiNewSeed = 0;
+  plUInt32 m_uiFit = 0;
   plUInt32 m_uiAddInstrument = 0;
   plUInt32 m_uiRemoveSelected = 0;
   plEditorUiAudioMeter* m_pMeterView = nullptr;

@@ -13,6 +13,7 @@ public class EditorPluginPlasmaAudioTarget : TargetRules
         UseAdaptiveUnityBuild = true;
         UseIncrementalLinking = true;
         TargetDependencies.Add("PlasmaAudioPlugin");
+        TargetDependencies.Add("EnginePluginPlasmaAudio");
         ExtraModules.Add("EditorPluginPlasmaAudioModule");
         ExtraModules.Add("MiniAudioModule");
     }

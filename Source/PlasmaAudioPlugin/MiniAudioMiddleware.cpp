@@ -92,6 +92,8 @@ plResult plPlasmaAudioMiddleware::Startup()
   m_StreamService.Startup();
   m_EventManager.SetStreamService(&m_StreamService);
 
+  plAudioAudition::s_pSingleton = &m_Audition;
+
   // the engine never calls SetLanguage itself: follow the App.Language cvar of the game application instead
   m_pLanguageCVar = plCVar::FindCVarByName("App.Language");
   if (m_pLanguageCVar != nullptr && m_pLanguageCVar->GetType() == plCVarType::String)
@@ -140,6 +142,11 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
     }
 
     // voices are spatialized against their closest listener, so audibility and distance use the closest one as well
+    float fMasterPeak = 0.0f;
+    float fMasterRms = 0.0f;
+    GetBusMeter(0, fMasterPeak, fMasterRms);
+    m_Audition.Update(m_EventManager, m_BusGraph, m_pBackend->GetEngine(), fMasterPeak);
+
     plVec3 listenerPositions[plMiniAudioSingleton::MaxListeners];
     const plUInt32 uiListeners = m_pBackend->GetActiveListenerPositions(plArrayPtr<plVec3>(listenerPositions));
     m_EventManager.Update(delta, plArrayPtr<const plVec3>(listenerPositions, uiListeners));
@@ -336,6 +343,9 @@ plResult plPlasmaAudioMiddleware::Shutdown()
   m_Banks.Clear();
   m_PendingBanks.Clear();
   m_LanguageReloads.Clear();
+
+  plAudioAudition::s_pSingleton = nullptr;
+  m_Audition.StopAll(m_EventManager);
 
   m_EventManager.StopAll(true);
   DestroyAllPcmStreams();

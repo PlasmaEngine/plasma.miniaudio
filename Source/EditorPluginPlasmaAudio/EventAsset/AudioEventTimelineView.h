@@ -15,10 +15,17 @@ struct plEditorUiPointerEvent;
 /// \brief Engine-drawn instrument timeline of the Audio Event window, with the parameter tabs above it.
 ///
 /// One row per instrument: a header with the track colour, name, routing and state, the M (saved Mute) and S
-/// (session solo) toggles, and the clip block at its start delay. Below the rows the Logic lane shows the fade in
-/// and stop fade and the Automation lane one chip per automation. Clicking selects, dragging a clip moves its
-/// start delay (10 ms snap), dragging the loop and fade handles edits them, double-clicking a header renames the
-/// instrument. Every drag is one undo step, written on release.
+/// (session solo) toggles, and the clip block at its start delay with the waveform peaks of its longest entry. Below
+/// the rows the Logic lane shows the fade in and stop fade and the Automation lane one chip per automation. Clicking
+/// selects, dragging a clip moves its start delay (10 ms snap), dragging the loop and fade handles edits them,
+/// double-clicking a header renames the instrument. Every drag is one undo step, written on release.
+///
+/// Ctrl+wheel zooms around the pointer, F fits the event, clicking the ruler moves the cursor auditions start from, and
+/// Space plays or stops. While auditioning, the playhead follows the engine process and sounding tracks light up.
+///
+/// A parameter tab turns the x-axis into that parameter's range: each instrument placed on the parameter shows its
+/// range with the fade ramps on both sides (drag the top edges to change the range), and dragging elsewhere in the
+/// lanes, or the arrow keys, scrub the value the audition plays with.
 class plEditorUiAudioEventTimeline : public plEditorUiContent
 {
 public:
@@ -38,6 +45,24 @@ public:
   /// The "+ Parameter" tab was clicked.
   plDelegate<void()> m_OnAddParameter;
 
+  /// Space: play or stop the audition.
+  plDelegate<void()> m_OnTogglePlay;
+
+  /// A parameter's audition value was scrubbed.
+  plDelegate<void(const plString&, float)> m_OnAuditionValueChanged;
+
+  /// Where auditions start, in seconds (set by clicking the ruler).
+  double GetCursor() const { return m_fCursor; }
+
+  /// The value a parameter is auditioned with: the scrubbed value, else fDefault.
+  float GetAuditionValue(plStringView sParameter, float fDefault) const;
+
+  /// The audition's state: whether it plays, its timeline position and which instruments sound (one byte each).
+  void SetPlayback(bool bPlaying, double fPosition, plArrayPtr<const plUInt8> sounding);
+
+  /// Zooms so the whole event fits the width.
+  void FitView();
+
   /// The height that shows the tabs, the ruler, every track and the lanes without scrolling.
   float GetPreferredHeight() const { return GetCanvasTop() + GetContentSize().y; }
 
@@ -52,7 +77,9 @@ private:
     LoopStart,
     LoopEnd,
     FadeIn,
-    FadeOut
+    FadeOut,
+    RangeMin, ///< parameter tab: the low edge of an instrument's range
+    RangeMax  ///< parameter tab: the high edge of an instrument's range
   };
 
   enum class HitKind
@@ -75,7 +102,22 @@ private:
   void GatherInstruments(plHybridArray<const plDocumentObject*, 8>& out_instruments) const;
   double GetSampleDuration(plStringView sFile) const;
   double GetEntryDuration(const plDocumentObject* pEntry) const;
-  double GetLongestEntry(const plDocumentObject* pInstrument) const;
+  double GetLongestEntry(const plDocumentObject* pInstrument, const plDocumentObject** out_pEntry = nullptr) const;
+
+  /// Waveform overview of an entry, peak magnitudes 0..1 over its length: the built clip's header peaks, or decoded
+  /// from an embedded sound file. Empty when unknown.
+  const plDynamicArray<float>& GetEntryPeaks(const plDocumentObject* pEntry) const;
+
+  // parameter tabs
+  const plDocumentObject* GetCurrentParameter() const;
+  void GetParameterRange(const plDocumentObject* pParameter, float& out_fMin, float& out_fMax) const;
+  float ValueToX(const plDocumentObject* pParameter, float fValue) const;
+  float XToValue(const plDocumentObject* pParameter, float x) const;
+  void SetAuditionValue(const plDocumentObject* pParameter, float fValue);
+  void DrawParameterRuler(const plRectFloat& canvas, const plDocumentObject* pParameter);
+  void DrawParameterTrack(const plDocumentObject* pInstrument, plUInt32 uiIndex, const plDocumentObject* pParameter, bool bAnySolo, const plUuid& selected);
+  DragHandle PickRangeHandle(const plVec2& vPos, plUuid& out_instrumentGuid) const;
+  void ApplyRangeDrag(float x, bool bFinal);
   double GetInstrumentDelay(const plDocumentObject* pInstrument) const;
   double GetMarkerValue(const char* szProperty, DragHandle handle) const;
   double GetTimeExtent() const;
@@ -91,6 +133,7 @@ private:
   void UpdateTabs();
   void Draw();
   void DrawRuler(const plRectFloat& canvas, double fExtent, bool bLoopRegion);
+  void DrawTrackHeader(const plDocumentObject* pInstrument, plUInt32 uiIndex, plStringView sSub, bool bAnySolo, bool bSelected, bool bSounding);
   void DrawTrack(const plDocumentObject* pInstrument, plUInt32 uiIndex, bool bAnySolo, const plString& sOutputBus, const plUuid& selected);
   void DrawLanes(plUInt32 uiInstruments, const plUuid& selected);
 
@@ -111,6 +154,20 @@ private:
 
   plDynamicArray<Hit> m_Hits;
   mutable plMap<plString, double> m_DurationCache; ///< file path -> seconds (0 = could not decode)
+  mutable plMap<plString, plDynamicArray<float>> m_PeakCache; ///< clip GUID or file path -> peaks
+
+  // zoom, the audition cursor and the playback the engine process reports
+  double m_fPixelsPerSecond = 120.0;
+  double m_fCursor = 0.0;
+  bool m_bPlaying = false;
+  double m_fPlayhead = 0.0;
+  plDynamicArray<plUInt8> m_Sounding;
+
+  // parameter tabs: the auditioned values (session), scrubbing, and a range edge being dragged
+  plMap<plString, float> m_AuditionValues;
+  bool m_bScrubbing = false;
+  plUuid m_RangeDragGuid;
+  float m_fRangeDragValue = 0.0f;
   plHybridArray<plUuid, 8> m_SoloTracks;
 
   // tabs: Timeline and one per parameter

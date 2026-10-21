@@ -21,9 +21,14 @@ public:
 
   void SyncCVars();
 
+  /// \brief The mixer the Audio Event window auditions through when the engine process has none loaded: the one set in
+  /// the preferences, else the project's only mixer. Empty when there is none, or several and none is set.
+  plString GetAuditionMixer() const;
+
 private:
   void ProcessEventHandler(const plEditorEngineProcessConnection::Event& e);
 
   bool m_bMute = false;
   float m_fMasterVolume = 1.0f;
+  plString m_sAuditionMixer; ///< asset GUID of an Audio Mixer
 };

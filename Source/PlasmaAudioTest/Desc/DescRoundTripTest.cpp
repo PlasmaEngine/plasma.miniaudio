@@ -41,6 +41,10 @@ namespace
       instrument.m_fVolumeRandDb = 1.5f;
       instrument.m_fPitchSemitones = 2.0f;
       instrument.m_fPitchRandSemitones = 0.5f;
+      instrument.m_uiRangeParameter = 0;
+      instrument.m_fRangeMin = 0.25f;
+      instrument.m_fRangeMax = 0.75f;
+      instrument.m_fRangeFade = 0.125f;
 
       auto& e0 = instrument.m_Playlist.ExpandAndGetRef();
       e0.m_uiSample = 0;
@@ -103,8 +107,15 @@ namespace
     return desc;
   }
 
-  void CompareInstrument(const plAudioEventInstrumentDesc& a, const plAudioEventInstrumentDesc& b, bool bHasMute, bool bHasSwitch, bool bHasClip)
+  void CompareInstrument(const plAudioEventInstrumentDesc& a, const plAudioEventInstrumentDesc& b, bool bHasMute, bool bHasSwitch, bool bHasClip, bool bHasRange)
   {
+    const plAudioEventInstrumentDesc defaults;
+    const plAudioEventInstrumentDesc& range = bHasRange ? b : defaults;
+    PL_TEST_INT(a.m_uiRangeParameter, range.m_uiRangeParameter);
+    PL_TEST_FLOAT(a.m_fRangeMin, range.m_fRangeMin, 0.0f);
+    PL_TEST_FLOAT(a.m_fRangeMax, range.m_fRangeMax, 0.0f);
+    PL_TEST_FLOAT(a.m_fRangeFade, range.m_fRangeFade, 0.0f);
+
     PL_TEST_STRING(a.m_sName, b.m_sName);
     PL_TEST_DOUBLE(a.m_StartDelay.GetSeconds(), b.m_StartDelay.GetSeconds(), 0.0);
     PL_TEST_INT(a.m_ePlaylistMode, b.m_ePlaylistMode);
@@ -161,7 +172,7 @@ namespace
     {
       for (plUInt32 i = 0; i < loaded.m_Instruments.GetCount(); ++i)
       {
-        CompareInstrument(loaded.m_Instruments[i], reference.m_Instruments[i], uiVersion >= 2, uiVersion >= 4, uiVersion >= 5);
+        CompareInstrument(loaded.m_Instruments[i], reference.m_Instruments[i], uiVersion >= 2, uiVersion >= 4, uiVersion >= 5, uiVersion >= 7);
       }
     }
 
@@ -405,7 +416,7 @@ PL_CREATE_SIMPLE_TEST(Desc, EventRoundTrip)
     plAudioEventDesc loaded;
     PL_TEST_RESULT(loaded.Load(reader));
 
-    CompareEventDesc(loaded, reference, 6);
+    CompareEventDesc(loaded, reference, 7);
 
     // the whole stream was consumed
     plUInt8 uiExtra = 0;
