@@ -2,6 +2,7 @@
 
 #include <EditorFramework/Assets/AssetDocumentGenerator.h>
 #include <EditorFramework/Assets/SimpleAssetDocument.h>
+#include <EnginePluginPlasmaAudio/Audition/AudioAuditionMessages.h>
 #include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipBuilder.h>
 #include <PlasmaAudioPlugin/Codecs/AudioCodec.h>
@@ -116,10 +117,24 @@ class plAudioClipAssetDocument : public plSimpleAssetDocument<plAudioClipAssetPr
 public:
   plAudioClipAssetDocument(plStringView sDocumentPath);
 
+  /// \brief Writes the event the clip window auditions, as an event resource file holds it (its path, the asset file
+  /// header, then the event): one instrument playing the built clip, looping when bLoop is set.
+  plStatus WriteAuditionData(plStreamWriter& inout_stream, bool bLoop) const;
+
+  /// \brief The last audition status the engine process sent.
+  const plAudioAuditionStatusMsgToEditor& GetAuditionStatus() const { return m_AuditionStatus; }
+
+  /// \brief Fires for every audition status the engine process sends.
+  plEvent<const plAudioAuditionStatusMsgToEditor&> m_AuditionEvents;
+
 protected:
+  virtual void HandleEngineMessage(const plEditorEngineDocumentMsg* pMsg) override;
   virtual void UpdateAssetDocumentInfo(plAssetDocumentInfo* pInfo) const override;
   virtual plTransformStatus InternalTransformAsset(plStreamWriter& stream, plStringView sOutputTag, const plPlatformProfile* pAssetProfile,
     const plAssetFileHeader& AssetHeader, plBitflags<plTransformFlags> transformFlags) override;
+
+private:
+  plAudioAuditionStatusMsgToEditor m_AuditionStatus;
 };
 
 //////////////////////////////////////////////////////////////////////////

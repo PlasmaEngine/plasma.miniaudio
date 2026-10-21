@@ -12,9 +12,6 @@
 /// hover, press, tooltips and click events come from the retained UI.
 namespace plAudioEngineUi
 {
-  /// Whether the audio windows create the engine-drawn views. "-engineAudioEditors false" keeps the Qt widgets.
-  bool UseEngineViews();
-
   /// Package artwork for the engine views (the Qt resource prefix "PlasmaAudioIcons"; ":/AssetIcons/" resolves to
   /// the SDK's own artwork). The asset icons are coloured: draw them with bMonochrome.
   inline constexpr const char* IconClip = ":/PlasmaAudioIcons/AudioClip.svg";

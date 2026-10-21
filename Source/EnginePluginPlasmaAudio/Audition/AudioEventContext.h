@@ -4,11 +4,12 @@
 #include <EnginePluginPlasmaAudio/Audition/AudioAuditionMessages.h>
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
 
-/// \brief The engine process side of an Audio Event document: plays the window's audition through the PlasmaAudio
-/// event manager and mixer (plAudioAudition).
+/// \brief The engine process side of an Audio Event or Audio Clip document: plays the window's audition through the
+/// PlasmaAudio event manager and mixer (plAudioAudition).
 ///
 /// The event the window sends is loaded as the resource "PlasmaAudio.Audition.<document guid>", so the saved event and
-/// scenes that use it are not touched. The context has no view and no world.
+/// scenes that use it are not touched. A clip window sends an event with one instrument that plays the built clip. The
+/// context has no view and no world.
 class PL_ENGINEPLUGINPLASMAAUDIO_DLL plAudioEventContext : public plEngineProcessDocumentContext
 {
   PL_ADD_DYNAMIC_REFLECTION(plAudioEventContext, plEngineProcessDocumentContext);

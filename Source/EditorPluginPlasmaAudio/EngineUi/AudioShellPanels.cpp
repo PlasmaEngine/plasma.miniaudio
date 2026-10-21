@@ -11,6 +11,7 @@
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventDeckView.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventTimelineView.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAsset.h>
+#include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerConsoleViews.h>
 #include <EditorUi/DockManager.h>
 #include <EditorUi/Surface.h>
 #include <EditorUi/Widgets.h>
@@ -159,10 +160,6 @@ void plEditorUiAudioShellStack::PlaceParts()
 
 bool plAudioShellPanels::Matches(const plDocument* pDocument) const
 {
-  // the Qt views of the windows cannot be lent
-  if (!plAudioEngineUi::UseEngineViews())
-    return false;
-
   return plDynamicCast<const plAudioClipAssetDocument*>(pDocument) != nullptr || plDynamicCast<const plAudioEventAssetDocument*>(pDocument) != nullptr ||
          plDynamicCast<const plAudioMixerAssetDocument*>(pDocument) != nullptr;
 }
@@ -279,25 +276,26 @@ void plAudioShellPanels::CreateMixerPanels(plEditorUiDocumentFrame& ref_frame)
   QWidget* pWindow = ref_frame.GetContextWindow();
   plAssetDocument* pDocument = static_cast<plAssetDocument*>(ref_frame.GetDocument());
 
-  // Mixer Console: the add buttons and the live meter toggle, the strips and the status row
+  // Mixer Console: the add buttons, the source and the validation, the strips, the snapshot rail and the status row
   auto* pConsole = static_cast<plEditorUiAudioShellStack*>(ref_frame.AddContent({"AudioMixerConsoleDockWidget", "Mixer Console"}, PL_DEFAULT_NEW(plEditorUiAudioShellStack)));
   pConsole->AddLentPart(ref_frame, pWindow, "AudioMixerToolStrip", -1.0f);
   pConsole->AddLentPart(ref_frame, pWindow, "AudioMixerStrips", 0.0f);
+  pConsole->AddLentPart(ref_frame, pWindow, "AudioMixerSnapshotRail", plEditorUiAudioMixerSnapshotRail::GetHeight());
   pConsole->AddLentPart(ref_frame, pWindow, "AudioMixerStatus", plEditorUiAudioStatusRow::GetHeight());
 
   if (plQtEngineUiContentWidget* pRouting = FindView(pWindow, "AudioMixerRouting"))
     ref_frame.AddLentContent({"AudioMixerRoutingDockWidget", "Routing"}, *pRouting);
 
-  if (plQtEngineUiContentWidget* pSnapshots = FindView(pWindow, "AudioMixerSnapshots"))
-    ref_frame.AddLentContent({"AudioMixerSnapshotsDockWidget", "Snapshots"}, *pSnapshots);
+  if (plQtEngineUiContentWidget* pInsert = FindView(pWindow, "AudioMixerInsert"))
+    ref_frame.AddLentContent({"AudioMixerInsertDockWidget", "Insert"}, *pInsert);
 
   // the selected bus, VCA or snapshot
   ref_frame.AddContent({"AudioMixerAssetDockWidget", "Properties"}, PL_DEFAULT_NEW(plEditorUiAssetProperties, pDocument, pWindow));
 
-  // Routing on the left, Snapshots first on the right with Properties as its neighbour tab
+  // Routing on the left, Insert first on the right with Properties as its neighbour tab
   plEditorUiDockManager& panels = ref_frame.GetPanels();
-  panels.DockPanel("AudioMixerRoutingDockWidget", "AudioMixerConsoleDockWidget", plEditorUiDockSide::Left, 0.2f);
-  panels.DockPanel("AudioMixerSnapshotsDockWidget", "AudioMixerConsoleDockWidget", plEditorUiDockSide::Right, 0.26f);
-  panels.DockPanel("AudioMixerAssetDockWidget", "AudioMixerSnapshotsDockWidget", plEditorUiDockSide::Tab);
-  panels.SetCurrentPanel("AudioMixerSnapshotsDockWidget");
+  panels.DockPanel("AudioMixerRoutingDockWidget", "AudioMixerConsoleDockWidget", plEditorUiDockSide::Left, 0.18f);
+  panels.DockPanel("AudioMixerInsertDockWidget", "AudioMixerConsoleDockWidget", plEditorUiDockSide::Right, 0.24f);
+  panels.DockPanel("AudioMixerAssetDockWidget", "AudioMixerInsertDockWidget", plEditorUiDockSide::Tab);
+  panels.SetCurrentPanel("AudioMixerInsertDockWidget");
 }

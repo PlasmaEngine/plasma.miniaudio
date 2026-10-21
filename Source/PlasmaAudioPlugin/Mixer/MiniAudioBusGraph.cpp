@@ -45,21 +45,39 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
     ma_sound_group_set_volume(&bus.m_Group, plAudioMixerUtils::DbToLinear(desc.m_Buses[i].m_fVolumeDb));
   }
 
-  // 2) build per-bus chains: group -> effects -> meter -> [splitter] -> parent
+  // 2) the effects of every bus before any wiring, since a bus's splitter feeds the key inputs of other buses' effects.
+  // A failed effect stays in its slot as a bypass, so the effect indices of snapshot overrides stay valid.
+  plDynamicArray<plHybridArray<ma_node*, 2>> keyTaps; // per key bus: the key inputs it feeds
+  keyTaps.SetCount(desc.m_Buses.GetCount());
+
   for (plUInt32 i = 0; i < desc.m_Buses.GetCount(); ++i)
   {
     const auto& busDesc = desc.m_Buses[i];
     auto& bus = m_Buses[i];
 
-    // effects: a failed one stays in its slot as a bypass, so the effect indices of snapshot overrides stay valid
     for (const auto& effectDesc : busDesc.m_Effects)
     {
+      // a key bus fed by this bus would close a feedback loop; such an effect measures its own input instead
+      const plUInt8 uiKey = effectDesc.m_uiSidechainBus;
+      const bool bKeyed = plAudioEffectRegistry::GetTypeInfo(effectDesc.m_eType).m_bUsesSidechain && uiKey < desc.m_Buses.GetCount() && uiKey != i && !desc.IsRoutedTo(i, uiKey, true);
+
       auto& effect = bus.m_Effects.ExpandAndGetRef();
-      if (effect.Create(pEngine, effectDesc).Failed())
+      if (effect.Create(pEngine, effectDesc, bKeyed).Failed())
       {
         plLog::Warning("PlasmaAudio: insert effect {0} on bus '{1}' could not be created and is bypassed.", bus.m_Effects.GetCount() - 1, busDesc.m_sName);
       }
+      else if (effect.GetKeyInput() != nullptr)
+      {
+        keyTaps[uiKey].PushBack(effect.GetKeyInput());
+      }
     }
+  }
+
+  // 3) build per-bus chains: group -> effects -> meter -> [splitter] -> parent
+  for (plUInt32 i = 0; i < desc.m_Buses.GetCount(); ++i)
+  {
+    const auto& busDesc = desc.m_Buses[i];
+    auto& bus = m_Buses[i];
 
     // meter
     if (plMiniAudioDsp::InitMeterNode(pEngine, &bus.m_Meter).Failed())
@@ -70,12 +88,12 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
     }
     bus.m_bMeterValid = true;
 
-    // splitter (dry out 0 + one output per send)
-    if (!busDesc.m_Sends.IsEmpty())
+    // splitter (dry out 0 + one output per send + one per sidechain tap)
+    if (!busDesc.m_Sends.IsEmpty() || !keyTaps[i].IsEmpty())
     {
       bus.m_pSplitter = PL_DEFAULT_NEW(ma_splitter_node);
       ma_splitter_node_config cfg = ma_splitter_node_config_init(uiChannels);
-      cfg.outputBusCount = 1 + busDesc.m_Sends.GetCount();
+      cfg.outputBusCount = 1 + busDesc.m_Sends.GetCount() + keyTaps[i].GetCount();
 
       if (ma_splitter_node_init(ma_engine_get_node_graph(pEngine), &cfg, nullptr, bus.m_pSplitter) != MA_SUCCESS)
       {
@@ -128,23 +146,35 @@ plResult plMiniAudioBusGraph::Build(const plAudioMixerDesc& desc, ma_engine* pEn
         ma_node_attach_output_bus(pSplitterNode, 1 + s, reinterpret_cast<ma_node*>(&m_Buses[uiTarget].m_Group), 0);
         ma_node_set_output_bus_volume(pSplitterNode, 1 + s, plAudioMixerUtils::DbToLinear(busDesc.m_Sends[s].m_fLevelDb));
       }
+
+      // sidechain taps: the bus's signal after its fader feeds input 1 of the effects it keys
+      for (plUInt32 t = 0; t < keyTaps[i].GetCount(); ++t)
+      {
+        ma_node_attach_output_bus(reinterpret_cast<ma_node*>(bus.m_pSplitter), 1 + busDesc.m_Sends.GetCount() + t, keyTaps[i][t], 1);
+      }
     }
   }
 
-  InitBusValues();
+  GetAuthoredValues(m_Desc, m_BusValues);
+
+  if (m_bTestSignal)
+  {
+    CreateTestSignals();
+  }
 
   plLog::Info("PlasmaAudio: mixer graph built ({0} buses).", desc.m_Buses.GetCount());
   return PL_SUCCESS;
 }
 
-void plMiniAudioBusGraph::InitBusValues()
+void plMiniAudioBusGraph::GetAuthoredValues(const plAudioMixerDesc& desc, plDynamicArray<BusValues>& out_values)
 {
-  m_BusValues.SetCount(m_Desc.m_Buses.GetCount());
+  out_values.Clear();
+  out_values.SetCount(desc.m_Buses.GetCount());
 
-  for (plUInt32 i = 0; i < m_Desc.m_Buses.GetCount(); ++i)
+  for (plUInt32 i = 0; i < desc.m_Buses.GetCount(); ++i)
   {
-    const plAudioBusDesc& busDesc = m_Desc.m_Buses[i];
-    BusValues& values = m_BusValues[i];
+    const plAudioBusDesc& busDesc = desc.m_Buses[i];
+    BusValues& values = out_values[i];
 
     // Build sets the authored volume and send levels; the pitch stays at miniaudio's default
     values.m_fGain = plAudioMixerUtils::DbToLinear(busDesc.m_fVolumeDb);
@@ -157,20 +187,89 @@ void plMiniAudioBusGraph::InitBusValues()
     }
 
     values.m_EffectParams.SetCount(busDesc.m_Effects.GetCount() * plAudioEffectMaxParams);
+    values.m_EffectBypass.SetCount(busDesc.m_Effects.GetCount());
     for (plUInt32 e = 0; e < busDesc.m_Effects.GetCount(); ++e)
     {
       for (plUInt32 p = 0; p < plAudioEffectMaxParams; ++p)
       {
         values.m_EffectParams[e * plAudioEffectMaxParams + p] = busDesc.m_Effects[e].m_fParams[p];
       }
+
+      values.m_EffectBypass[e] = busDesc.m_Effects[e].m_bBypass;
     }
   }
+}
+
+void plMiniAudioBusGraph::SetTestSignal(bool bEnable)
+{
+  if (m_bTestSignal == bEnable)
+    return;
+
+  m_bTestSignal = bEnable;
+
+  if (!IsBuilt())
+    return;
+
+  if (bEnable)
+  {
+    CreateTestSignals();
+  }
+  else
+  {
+    DestroyTestSignals();
+  }
+}
+
+void plMiniAudioBusGraph::CreateTestSignals()
+{
+  DestroyTestSignals();
+
+  const plUInt32 uiBusCount = m_Desc.m_Buses.GetCount();
+
+  for (plUInt32 i = 0; i < uiBusCount; ++i)
+  {
+    if (m_Desc.m_Buses[i].m_bIsAux)
+      continue;
+
+    // buses with children hear their children's signal
+    bool bHasChild = false;
+    for (plUInt32 j = 0; j < uiBusCount; ++j)
+    {
+      bHasChild |= (j != i && m_Desc.m_Buses[j].m_uiParent == i);
+    }
+
+    if (bHasChild)
+      continue;
+
+    plMaTestSignalNode& node = m_TestSignals.ExpandAndGetRef();
+    node.m_fPeriodSeconds = 2.3f + 0.9f * static_cast<float>(m_TestSignals.GetCount() - 1);
+    node.m_fBurstSeconds = node.m_fPeriodSeconds * 0.55f;
+    node.m_uiNoiseState = 0x9E3779B9u * (i + 1);
+
+    if (plMiniAudioDsp::InitTestSignalNode(m_pEngine, &node).Succeeded())
+    {
+      ma_node_attach_output_bus(reinterpret_cast<ma_node*>(&node), 0, reinterpret_cast<ma_node*>(&m_Buses[i].m_Group), 0);
+    }
+  }
+}
+
+void plMiniAudioBusGraph::DestroyTestSignals()
+{
+  for (plMaTestSignalNode& node : m_TestSignals)
+  {
+    plMiniAudioDsp::UninitTestSignalNode(&node);
+  }
+
+  m_TestSignals.Clear();
 }
 
 void plMiniAudioBusGraph::Teardown()
 {
   if (m_pEngine == nullptr && m_Buses.IsEmpty())
     return;
+
+  // the test signals feed the bus groups, so they go first
+  DestroyTestSignals();
 
   // detach and destroy in reverse creation order
   for (plUInt32 i = m_Buses.GetCount(); i-- > 0;)
@@ -309,6 +408,32 @@ void plMiniAudioBusGraph::SetBusEffectParameter(plUInt32 uiBusIndex, plUInt32 ui
   bus.m_Effects[uiEffectIndex].SetParameter(uiParamIndex, fValue);
 }
 
+void plMiniAudioBusGraph::SetBusEffectBypass(plUInt32 uiBusIndex, plUInt32 uiEffectIndex, bool bBypass)
+{
+  if (uiBusIndex >= m_Buses.GetCount())
+    return;
+
+  plHybridArray<bool, 2>& bypass = m_BusValues[uiBusIndex].m_EffectBypass;
+  if (uiEffectIndex < bypass.GetCount())
+  {
+    bypass[uiEffectIndex] = bBypass;
+  }
+
+  auto& bus = m_Buses[uiBusIndex];
+  if (uiEffectIndex < bus.m_Effects.GetCount())
+  {
+    bus.m_Effects[uiEffectIndex].SetBypass(bBypass);
+  }
+}
+
+float plMiniAudioBusGraph::GetEffectGainReductionDb(plUInt32 uiBusIndex, plUInt32 uiEffectIndex) const
+{
+  if (uiBusIndex >= m_Buses.GetCount() || uiEffectIndex >= m_Buses[uiBusIndex].m_Effects.GetCount())
+    return 0.0f;
+
+  return m_Buses[uiBusIndex].m_Effects[uiEffectIndex].GetGainReductionDb();
+}
+
 void plMiniAudioBusGraph::GetBusMeter(plUInt32 uiBusIndex, float& out_fPeak, float& out_fRms) const
 {
   out_fPeak = 0.0f;
@@ -340,6 +465,11 @@ void plMiniAudioBusGraph::ApplyBusValues(const plDynamicArray<BusValues>& values
     for (plUInt32 uiSlot = 0; uiSlot < busValues.m_EffectParams.GetCount(); ++uiSlot)
     {
       SetBusEffectParameter(uiBus, uiSlot / plAudioEffectMaxParams, uiSlot % plAudioEffectMaxParams, busValues.m_EffectParams[uiSlot]);
+    }
+
+    for (plUInt32 e = 0; e < busValues.m_EffectBypass.GetCount(); ++e)
+    {
+      SetBusEffectBypass(uiBus, e, busValues.m_EffectBypass[e]);
     }
   }
 }

@@ -13,7 +13,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventContext, 1, plRTTIDefaultAllocator<p
 {
   PL_BEGIN_PROPERTIES
   {
-    PL_CONSTANT_PROPERTY("DocumentType", (const char*) "Audio Event"),
+    PL_CONSTANT_PROPERTY("DocumentType", (const char*) "Audio Event;Audio Clip"),
   }
   PL_END_PROPERTIES;
 }

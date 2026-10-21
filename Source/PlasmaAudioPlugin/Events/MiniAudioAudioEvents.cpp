@@ -1416,6 +1416,73 @@ void plPlasmaAudioEventInstance::OnEventUnloading()
   }
 }
 
+namespace
+{
+  /// The last node of a voice's chain, whose output 0 goes to the bus: sound -> [occlusion LPF] -> [env splitter].
+  template <typename VOICE>
+  ma_node* GetVoiceTail(VOICE& ref_voice)
+  {
+    if (ref_voice.m_bEnvSplitterValid)
+      return reinterpret_cast<ma_node*>(&ref_voice.m_EnvSplitter);
+
+    if (ref_voice.m_bOcclusionLpfValid)
+      return reinterpret_cast<ma_node*>(&ref_voice.m_OcclusionFilter);
+
+    if (ref_voice.m_bSoundValid)
+      return reinterpret_cast<ma_node*>(&ref_voice.m_Sound);
+
+    return nullptr;
+  }
+} // namespace
+
+void plPlasmaAudioEventInstance::DetachFromBusGraph()
+{
+  for (Voice& voice : m_Voices)
+  {
+    ma_node* pTail = GetVoiceTail(voice);
+    if (pTail == nullptr)
+      continue;
+
+    ma_node_detach_output_bus(pTail, 0);
+
+    if (voice.m_bEnvSplitterValid)
+    {
+      ma_node_detach_output_bus(pTail, 1);
+      voice.m_pEnvAux = nullptr;
+    }
+  }
+}
+
+void plPlasmaAudioEventInstance::ReattachToBusGraph()
+{
+  if (m_pBusGraph == nullptr || m_pEngine == nullptr)
+    return;
+
+  // the output bus may have another index in the rebuilt graph
+  if (m_pBusGraph->IsBuilt() && m_pResource != nullptr)
+  {
+    m_uiBus = m_pBusGraph->ResolveBus(m_pResource->GetDescriptor().m_sOutputBus);
+  }
+  else
+  {
+    m_uiBus = 0;
+  }
+
+  ma_node* pTarget = m_pBusGraph->IsBuilt() ? reinterpret_cast<ma_node*>(m_pBusGraph->GetBusInput(m_uiBus)) : nullptr;
+  if (pTarget == nullptr)
+  {
+    pTarget = ma_node_graph_get_endpoint(ma_engine_get_node_graph(m_pEngine));
+  }
+
+  for (Voice& voice : m_Voices)
+  {
+    if (ma_node* pTail = GetVoiceTail(voice))
+    {
+      ma_node_attach_output_bus(pTail, 0, pTarget, 0);
+    }
+  }
+}
+
 void plPlasmaAudioEventInstance::Stop(bool bImmediate)
 {
   if (m_bStopping && !bImmediate)
@@ -2630,6 +2697,32 @@ void plPlasmaAudioEventManager::StopAllOnEntity(const plPlasmaAudioEntityData* p
         // the entity data is about to be destroyed — sever the link
         pInstance->m_pEntity = nullptr;
       }
+    }
+  }
+}
+
+void plPlasmaAudioEventManager::DetachFromBusGraph(const plMiniAudioBusGraph* pBusGraph)
+{
+  PL_LOCK(m_Mutex);
+
+  for (auto& pInstance : m_Instances)
+  {
+    if (pInstance->GetBusGraph() == pBusGraph)
+    {
+      pInstance->DetachFromBusGraph();
+    }
+  }
+}
+
+void plPlasmaAudioEventManager::ReattachToBusGraph(const plMiniAudioBusGraph* pBusGraph)
+{
+  PL_LOCK(m_Mutex);
+
+  for (auto& pInstance : m_Instances)
+  {
+    if (pInstance->GetBusGraph() == pBusGraph)
+    {
+      pInstance->ReattachToBusGraph();
     }
   }
 }

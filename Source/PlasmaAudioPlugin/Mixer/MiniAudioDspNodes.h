@@ -47,18 +47,34 @@ struct plMaReverbNode
   std::atomic<float> m_fWidth = 1.0f; ///< stereo spread of the wet signal between channel pairs (0 = mono, 1 = full)
   std::atomic<float> m_fWet = 1.0f;
   std::atomic<float> m_fDry = 0.0f;
+  std::atomic<bool> m_bBypass = false; ///< passes the input through unchanged
 
   // per channel: NumCombs combs + NumAllpasses allpasses
   Comb* m_pCombs = nullptr;         // [channels * NumCombs]
   Allpass* m_pAllpasses = nullptr;  // [channels * NumAllpasses]
 };
 
-/// \brief Feed-forward compressor node (envelope follower, shared gain across channels).
+/// \brief Feed-forward dynamics node (envelope follower, shared gain across channels): a compressor, a limiter or a
+/// ducker.
+///
+/// A node created with a key input has a second input bus; the level is then measured on that input (a sidechain)
+/// while the gain is applied to the first one. A ducker lowers its input by the depth while the key is above the
+/// threshold.
 struct plMaCompressorNode
 {
+  enum class Mode : plUInt8
+  {
+    Compressor,
+    Limiter, ///< m_fThresholdDb is the ceiling, the ratio is ignored
+    Ducker,  ///< lowers the signal by m_fDepthDb while the key is above m_fThresholdDb
+  };
+
   ma_node_base m_Base; // must be first
   plUInt32 m_uiChannels = 0;
   plUInt32 m_uiSampleRate = 48000;
+  plUInt32 m_InputChannels[2] = {};
+  Mode m_eMode = Mode::Compressor;
+  bool m_bHasKeyInput = false; ///< input bus 1 is the key
 
   // parameters: written by the audio thread, read once per processed chunk by the device thread
   std::atomic<float> m_fThresholdDb = -18.0f;
@@ -66,11 +82,14 @@ struct plMaCompressorNode
   std::atomic<float> m_fAttackMs = 10.0f;
   std::atomic<float> m_fReleaseMs = 120.0f;
   std::atomic<float> m_fMakeupDb = 0.0f;
+  std::atomic<float> m_fDepthDb = -7.0f;
+  std::atomic<bool> m_bBypass = false;
 
-  /// \brief When true the node acts as a hard limiter: m_fThresholdDb is the ceiling, ratio is ignored.
-  bool m_bLimiter = false;
+  /// \brief The deepest gain reduction of the last processed chunk, in dB (0 or negative). Read by meters.
+  std::atomic<float> m_fGainReductionDb = 0.0f;
 
-  float m_fEnvelope = 0.0f; ///< device thread only
+  float m_fEnvelope = 0.0f;   ///< device thread only
+  float m_fDuckGainDb = 0.0f; ///< device thread only
 };
 
 /// \brief A biquad-based filter (low pass and high pass of order 1..8, low shelf, peak, high shelf) whose settings can
@@ -108,6 +127,7 @@ struct plMaFilterNode
   plAtomicInteger32 m_iQBits;         ///< float bits, peak only
   plAtomicInteger32 m_iOrder;         ///< low and high pass only, 1..m_uiMaxOrder
   plAtomicInteger32 m_iGeneration;
+  plAtomicInteger32 m_iBypass; ///< non-zero passes the input through unchanged
 
   // device thread
   plInt32 m_iAppliedGeneration = 0;
@@ -148,6 +168,7 @@ struct plMaDelayNode
   std::atomic<float> m_fFeedback = 0.3f;
   std::atomic<float> m_fWet = 0.35f;
   std::atomic<float> m_fDry = 1.0f;
+  std::atomic<bool> m_bBypass = false; ///< passes the input through unchanged
 
   // device thread
   float* m_pBuffer = nullptr; ///< m_uiMaxDelayFrames frames, interleaved
@@ -198,8 +219,33 @@ struct plMaClockNode
   bool m_bValid = false;
 };
 
+/// \brief Source node playing a test signal: noise in bursts, so meters, faders and dynamics can be judged without
+/// game audio.
+///
+/// Each burst lasts m_fBurstSeconds out of every m_fPeriodSeconds, with short ramps; the bursts of different nodes
+/// fall apart when their periods differ.
+struct plMaTestSignalNode
+{
+  ma_node_base m_Base; // must be first
+  plUInt32 m_uiChannels = 0;
+  plUInt32 m_uiSampleRate = 48000;
+  float m_fLevel = 0.125f; ///< linear peak of the noise
+  float m_fPeriodSeconds = 4.0f;
+  float m_fBurstSeconds = 2.0f;
+  bool m_bValid = false;
+
+  // device thread
+  plUInt32 m_uiNoiseState = 0x12345u;
+  plUInt64 m_uiFrame = 0;
+  float m_fPink[3] = {};
+};
+
 namespace plMiniAudioDsp
 {
+  /// \brief Creates a test signal node; attach its output bus 0 where it should play.
+  PL_PLASMAAUDIOPLUGIN_DLL plResult InitTestSignalNode(ma_engine* pEngine, plMaTestSignalNode* pNode);
+  PL_PLASMAAUDIOPLUGIN_DLL void UninitTestSignalNode(plMaTestSignalNode* pNode);
+
   /// \brief Creates the clock node and attaches it to the engine's endpoint.
   PL_PLASMAAUDIOPLUGIN_DLL plResult InitClockNode(ma_engine* pEngine, plMaClockNode* pNode);
   PL_PLASMAAUDIOPLUGIN_DLL void UninitClockNode(plMaClockNode* pNode);
@@ -223,8 +269,9 @@ namespace plMiniAudioDsp
   plResult InitReverbNode(ma_engine* pEngine, plMaReverbNode* pNode);
   void UninitReverbNode(plMaReverbNode* pNode);
 
-  plResult InitCompressorNode(ma_engine* pEngine, plMaCompressorNode* pNode, bool bLimiter);
-  void UninitCompressorNode(plMaCompressorNode* pNode);
+  /// \brief bHasKeyInput gives the node a second input bus whose level drives the gain.
+  PL_PLASMAAUDIOPLUGIN_DLL plResult InitCompressorNode(ma_engine* pEngine, plMaCompressorNode* pNode, plMaCompressorNode::Mode mode, bool bHasKeyInput);
+  PL_PLASMAAUDIOPLUGIN_DLL void UninitCompressorNode(plMaCompressorNode* pNode);
 
   /// \brief Initializes the filter with its first settings. uiMaxOrder bounds the low / high pass order the filter can
   /// later be set to. pCallbacks (may be null for miniaudio's default heap) allocates the node and a filter heap that
@@ -255,14 +302,24 @@ public:
   /// \brief Longest delay a Delay effect can be set to while it plays (or its authored delay, when longer).
   static constexpr float MaxLiveDelayMs = 2000.0f;
 
-  plResult Create(ma_engine* pEngine, const plAudioEffectDesc& desc);
+  /// \brief bHasKeyInput gives a compressor or ducker the key input GetKeyInput returns.
+  plResult Create(ma_engine* pEngine, const plAudioEffectDesc& desc, bool bHasKeyInput = false);
   void Destroy();
 
   /// \brief Live parameter update. Parameter indices follow plAudioEffectType documentation.
   void SetParameter(plUInt32 uiParamIndex, float fValue);
 
+  /// \brief Bypasses the effect (its input passes through) or puts it back in.
+  void SetBypass(bool bBypass);
+
   ma_node* GetHead() const { return m_Nodes.IsEmpty() ? nullptr : m_Nodes[0]; }
   ma_node* GetTail() const { return m_Nodes.IsEmpty() ? nullptr : m_Nodes.PeekBack(); }
+
+  /// \brief The node whose input bus 1 takes the key signal; null without a key input.
+  ma_node* GetKeyInput() const;
+
+  /// \brief The gain reduction of a compressor, limiter or ducker in dB (0 or negative); 0 for other effects.
+  float GetGainReductionDb() const;
 
   plAudioEffectType::Enum GetType() const { return m_eType; }
 
@@ -273,5 +330,6 @@ private:
   plAudioEffectType::Enum m_eType = plAudioEffectType::Default;
   float m_fParams[plAudioEffectMaxParams] = {};
   ma_engine* m_pEngine = nullptr;
+  bool m_bHasKeyInput = false;
   plHybridArray<ma_node*, 3> m_Nodes; // head..tail, already attached to each other
 };

@@ -3,6 +3,12 @@
 #include <Foundation/Math/Math.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioDspNodes.h>
 
+/// A bypassed effect node copies its input to its output.
+static void plMaPassThrough(const float** ppFramesIn, float** ppFramesOut, plUInt32 uiFrames, plUInt32 uiChannels)
+{
+  plMemoryUtils::Copy(ppFramesOut[0], ppFramesIn[0], static_cast<size_t>(uiFrames) * uiChannels);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Meter node
 // ---------------------------------------------------------------------------------------------
@@ -270,6 +276,73 @@ void plMiniAudioDsp::UninitClockNode(plMaClockNode* pNode)
   pNode->m_bValid = false;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Test signal node
+// ---------------------------------------------------------------------------------------------
+
+static void plMaTestSignalNodeProcess(ma_node* pNodeBase, const float** ppFramesIn, ma_uint32* pFrameCountIn, float** ppFramesOut, ma_uint32* pFrameCountOut)
+{
+  PL_IGNORE_UNUSED(ppFramesIn);
+  PL_IGNORE_UNUSED(pFrameCountIn);
+
+  auto* pNode = reinterpret_cast<plMaTestSignalNode*>(pNodeBase);
+
+  float* pOut = ppFramesOut[0];
+  const plUInt32 uiFrames = *pFrameCountOut;
+  const plUInt32 uiChannels = pNode->m_uiChannels;
+  const double fSampleRate = static_cast<double>(pNode->m_uiSampleRate);
+  const double fRampSeconds = 0.02;
+
+  for (plUInt32 f = 0; f < uiFrames; ++f)
+  {
+    // burst envelope with short ramps at both ends
+    const double fTime = plMath::Mod(static_cast<double>(pNode->m_uiFrame++) / fSampleRate, static_cast<double>(pNode->m_fPeriodSeconds));
+    const double fEnvelope = plMath::Clamp(plMath::Min(fTime, static_cast<double>(pNode->m_fBurstSeconds) - fTime) / fRampSeconds, 0.0, 1.0);
+
+    // white noise (xorshift) through an economy pink filter
+    pNode->m_uiNoiseState ^= pNode->m_uiNoiseState << 13;
+    pNode->m_uiNoiseState ^= pNode->m_uiNoiseState >> 17;
+    pNode->m_uiNoiseState ^= pNode->m_uiNoiseState << 5;
+    const float fWhite = static_cast<float>(pNode->m_uiNoiseState) / 4294967295.0f * 2.0f - 1.0f;
+
+    pNode->m_fPink[0] = 0.99765f * pNode->m_fPink[0] + fWhite * 0.0990460f;
+    pNode->m_fPink[1] = 0.96300f * pNode->m_fPink[1] + fWhite * 0.2965164f;
+    pNode->m_fPink[2] = 0.57000f * pNode->m_fPink[2] + fWhite * 1.0526913f;
+    const float fPink = (pNode->m_fPink[0] + pNode->m_fPink[1] + pNode->m_fPink[2] + fWhite * 0.1848f) * 0.25f;
+
+    const float fSample = fPink * pNode->m_fLevel * static_cast<float>(fEnvelope);
+    for (plUInt32 c = 0; c < uiChannels; ++c)
+      pOut[f * uiChannels + c] = fSample;
+  }
+}
+
+static ma_node_vtable g_plMaTestSignalNodeVTable = {plMaTestSignalNodeProcess, nullptr, 0, 1, MA_NODE_FLAG_CONTINUOUS_PROCESSING};
+
+plResult plMiniAudioDsp::InitTestSignalNode(ma_engine* pEngine, plMaTestSignalNode* pNode)
+{
+  pNode->m_uiChannels = ma_engine_get_channels(pEngine);
+  pNode->m_uiSampleRate = ma_engine_get_sample_rate(pEngine);
+
+  ma_node_config cfg = ma_node_config_init();
+  cfg.vtable = &g_plMaTestSignalNodeVTable;
+  cfg.pOutputChannels = &pNode->m_uiChannels;
+
+  if (ma_node_init(ma_engine_get_node_graph(pEngine), &cfg, nullptr, &pNode->m_Base) != MA_SUCCESS)
+    return PL_FAILURE;
+
+  pNode->m_bValid = true;
+  return PL_SUCCESS;
+}
+
+void plMiniAudioDsp::UninitTestSignalNode(plMaTestSignalNode* pNode)
+{
+  if (!pNode->m_bValid)
+    return;
+
+  ma_node_uninit(&pNode->m_Base, nullptr);
+  pNode->m_bValid = false;
+}
+
 ma_uint64 plMiniAudioDsp::RenderWithoutDevice(ma_engine* pEngine, plTime delta, double& ref_fFrameRemainder, plDynamicArray<float>& ref_scratch)
 {
   constexpr ma_uint32 uiChunkFrames = 1024;
@@ -339,6 +412,12 @@ static void plMaReverbNodeProcess(ma_node* pNode, const float** ppFramesIn, ma_u
   float* pOut = ppFramesOut[0];
   const plUInt32 uiFrames = *pFrameCountOut;
   const plUInt32 uiChannels = pReverb->m_uiChannels;
+
+  if (pReverb->m_bBypass.load(std::memory_order_relaxed))
+  {
+    plMaPassThrough(ppFramesIn, ppFramesOut, uiFrames, uiChannels);
+    return;
+  }
 
   const float fFeedback = 0.7f + 0.28f * plMath::Clamp(pReverb->m_fRoomSize.load(std::memory_order_relaxed), 0.0f, 1.0f);
   const float fDamp1 = plMath::Clamp(pReverb->m_fDamping.load(std::memory_order_relaxed), 0.0f, 1.0f) * 0.4f;
@@ -510,50 +589,104 @@ static void plMaCompressorNodeProcess(ma_node* pNode, const float** ppFramesIn, 
   const plUInt32 uiChannels = pComp->m_uiChannels;
   const float fSampleRate = static_cast<float>(pComp->m_uiSampleRate);
 
+  if (pComp->m_bBypass.load(std::memory_order_relaxed))
+  {
+    plMaPassThrough(ppFramesIn, ppFramesOut, uiFrames, uiChannels);
+    pComp->m_fEnvelope = 0.0f;
+    pComp->m_fDuckGainDb = 0.0f;
+    pComp->m_fGainReductionDb.store(0.0f, std::memory_order_relaxed);
+    return;
+  }
+
+  // the level is measured on the key when there is one, the gain applies to the input
+  const float* pKey = (pComp->m_bHasKeyInput && ppFramesIn[1] != nullptr) ? ppFramesIn[1] : pIn;
+
   const float fAttackCoef = plMath::Exp(-1.0f / (plMath::Max(pComp->m_fAttackMs.load(std::memory_order_relaxed), 0.02f) * 0.001f * fSampleRate));
   const float fReleaseCoef = plMath::Exp(-1.0f / (plMath::Max(pComp->m_fReleaseMs.load(std::memory_order_relaxed), 1.0f) * 0.001f * fSampleRate));
   const float fThresholdLin = plAudioMixerUtils::DbToLinear(pComp->m_fThresholdDb.load(std::memory_order_relaxed));
-  const float fMakeupLin = plAudioMixerUtils::DbToLinear(pComp->m_fMakeupDb.load(std::memory_order_relaxed));
-  const float fInvRatio = pComp->m_bLimiter ? 0.0f : (1.0f / plMath::Max(pComp->m_fRatio.load(std::memory_order_relaxed), 1.0f));
 
   float fEnvelope = pComp->m_fEnvelope;
+  float fMinGain = 1.0f;
 
-  for (plUInt32 f = 0; f < uiFrames; ++f)
+  if (pComp->m_eMode == plMaCompressorNode::Mode::Ducker)
   {
-    float fLevel = 0.0f;
-    for (plUInt32 c = 0; c < uiChannels; ++c)
-      fLevel = plMath::Max(fLevel, plMath::Abs(pIn[f * uiChannels + c]));
+    // the key's envelope opens the duck; the duck itself moves with the attack and release times
+    const float fKeyAttackCoef = plMath::Exp(-1.0f / (0.002f * fSampleRate));
+    const float fKeyReleaseCoef = plMath::Exp(-1.0f / (0.060f * fSampleRate));
+    const float fDepthDb = plMath::Min(pComp->m_fDepthDb.load(std::memory_order_relaxed), 0.0f);
+    float fDuckDb = pComp->m_fDuckGainDb;
 
-    const float fCoef = (fLevel > fEnvelope) ? fAttackCoef : fReleaseCoef;
-    fEnvelope = fCoef * fEnvelope + (1.0f - fCoef) * fLevel;
-
-    float fGain = 1.0f;
-    if (fEnvelope > fThresholdLin && fEnvelope > 0.0f)
+    for (plUInt32 f = 0; f < uiFrames; ++f)
     {
-      // gain reduction so that (threshold + over * invRatio) is the resulting level
-      const float fTarget = fThresholdLin * plMath::Pow(fEnvelope / fThresholdLin, fInvRatio);
-      fGain = fTarget / fEnvelope;
+      float fLevel = 0.0f;
+      for (plUInt32 c = 0; c < uiChannels; ++c)
+        fLevel = plMath::Max(fLevel, plMath::Abs(pKey[f * uiChannels + c]));
+
+      const float fKeyCoef = (fLevel > fEnvelope) ? fKeyAttackCoef : fKeyReleaseCoef;
+      fEnvelope = fKeyCoef * fEnvelope + (1.0f - fKeyCoef) * fLevel;
+
+      const float fTargetDb = (fEnvelope > fThresholdLin) ? fDepthDb : 0.0f;
+      const float fCoef = (fTargetDb < fDuckDb) ? fAttackCoef : fReleaseCoef;
+      fDuckDb = fCoef * fDuckDb + (1.0f - fCoef) * fTargetDb;
+
+      const float fGain = plMath::Pow(10.0f, fDuckDb / 20.0f);
+      fMinGain = plMath::Min(fMinGain, fGain);
+
+      for (plUInt32 c = 0; c < uiChannels; ++c)
+        pOut[f * uiChannels + c] = pIn[f * uiChannels + c] * fGain;
     }
 
-    const float fTotalGain = fGain * fMakeupLin;
-    for (plUInt32 c = 0; c < uiChannels; ++c)
-      pOut[f * uiChannels + c] = pIn[f * uiChannels + c] * fTotalGain;
+    pComp->m_fDuckGainDb = fDuckDb;
+  }
+  else
+  {
+    const float fMakeupLin = plAudioMixerUtils::DbToLinear(pComp->m_fMakeupDb.load(std::memory_order_relaxed));
+    const float fInvRatio = (pComp->m_eMode == plMaCompressorNode::Mode::Limiter) ? 0.0f : (1.0f / plMath::Max(pComp->m_fRatio.load(std::memory_order_relaxed), 1.0f));
+
+    for (plUInt32 f = 0; f < uiFrames; ++f)
+    {
+      float fLevel = 0.0f;
+      for (plUInt32 c = 0; c < uiChannels; ++c)
+        fLevel = plMath::Max(fLevel, plMath::Abs(pKey[f * uiChannels + c]));
+
+      const float fCoef = (fLevel > fEnvelope) ? fAttackCoef : fReleaseCoef;
+      fEnvelope = fCoef * fEnvelope + (1.0f - fCoef) * fLevel;
+
+      float fGain = 1.0f;
+      if (fEnvelope > fThresholdLin && fEnvelope > 0.0f)
+      {
+        // gain reduction so that (threshold + over * invRatio) is the resulting level
+        const float fTarget = fThresholdLin * plMath::Pow(fEnvelope / fThresholdLin, fInvRatio);
+        fGain = fTarget / fEnvelope;
+      }
+
+      fMinGain = plMath::Min(fMinGain, fGain);
+
+      const float fTotalGain = fGain * fMakeupLin;
+      for (plUInt32 c = 0; c < uiChannels; ++c)
+        pOut[f * uiChannels + c] = pIn[f * uiChannels + c] * fTotalGain;
+    }
   }
 
   pComp->m_fEnvelope = fEnvelope;
+  pComp->m_fGainReductionDb.store(fMinGain < 1.0f ? 20.0f * plMath::Log10(plMath::Max(fMinGain, 0.0001f)) : 0.0f, std::memory_order_relaxed);
 }
 
-static ma_node_vtable g_plMaCompressorNodeVTable = {plMaCompressorNodeProcess, nullptr, 1, 1, 0};
+static ma_node_vtable g_plMaCompressorNodeVTable = {plMaCompressorNodeProcess, nullptr, MA_NODE_BUS_COUNT_UNKNOWN, 1, 0};
 
-plResult plMiniAudioDsp::InitCompressorNode(ma_engine* pEngine, plMaCompressorNode* pNode, bool bLimiter)
+plResult plMiniAudioDsp::InitCompressorNode(ma_engine* pEngine, plMaCompressorNode* pNode, plMaCompressorNode::Mode mode, bool bHasKeyInput)
 {
   pNode->m_uiChannels = ma_engine_get_channels(pEngine);
   pNode->m_uiSampleRate = ma_engine_get_sample_rate(pEngine);
-  pNode->m_bLimiter = bLimiter;
+  pNode->m_eMode = mode;
+  pNode->m_bHasKeyInput = bHasKeyInput;
+  pNode->m_InputChannels[0] = pNode->m_uiChannels;
+  pNode->m_InputChannels[1] = pNode->m_uiChannels;
 
   ma_node_config cfg = ma_node_config_init();
   cfg.vtable = &g_plMaCompressorNodeVTable;
-  cfg.pInputChannels = &pNode->m_uiChannels;
+  cfg.inputBusCount = bHasKeyInput ? 2 : 1;
+  cfg.pInputChannels = pNode->m_InputChannels;
   cfg.pOutputChannels = &pNode->m_uiChannels;
 
   if (ma_node_init(ma_engine_get_node_graph(pEngine), &cfg, nullptr, &pNode->m_Base) != MA_SUCCESS)
@@ -707,6 +840,12 @@ static void plMaFilterNodeProcess(ma_node* pNodeBase, const float** ppFramesIn, 
 
   const ma_uint32 uiFrames = *pFrameCountOut;
 
+  if (pNode->m_iBypass != 0)
+  {
+    plMaPassThrough(ppFramesIn, ppFramesOut, uiFrames, pNode->m_uiChannels);
+    return;
+  }
+
   switch (pNode->m_eType)
   {
     case plMaFilterNode::Type::LowPass:
@@ -859,6 +998,12 @@ static void plMaDelayNodeProcess(ma_node* pNodeBase, const float** ppFramesIn, m
   const plUInt32 uiChannels = pNode->m_uiChannels;
   const plUInt32 uiSize = pNode->m_uiMaxDelayFrames;
 
+  if (pNode->m_bBypass.load(std::memory_order_relaxed))
+  {
+    plMaPassThrough(ppFramesIn, ppFramesOut, uiFrames, uiChannels);
+    return;
+  }
+
   const plUInt32 uiDelay = plMath::Clamp<plUInt32>(pNode->m_uiDelayFrames.load(std::memory_order_relaxed), 1u, uiSize - 1);
   const float fFeedback = plMath::Clamp(pNode->m_fFeedback.load(std::memory_order_relaxed), 0.0f, 0.99f);
   const float fWet = plMath::Clamp(pNode->m_fWet.load(std::memory_order_relaxed), 0.0f, 1.0f);
@@ -925,10 +1070,11 @@ void plMiniAudioDsp::UninitDelayNode(plMaDelayNode* pNode)
 // plMiniAudioEffect
 // ---------------------------------------------------------------------------------------------
 
-plResult plMiniAudioEffect::Create(ma_engine* pEngine, const plAudioEffectDesc& desc)
+plResult plMiniAudioEffect::Create(ma_engine* pEngine, const plAudioEffectDesc& desc, bool bHasKeyInput)
 {
   m_pEngine = pEngine;
   m_eType = desc.m_eType;
+  m_bHasKeyInput = false;
   plMemoryUtils::Copy(m_fParams, desc.m_fParams, plAudioEffectMaxParams);
 
   const plUInt32 uiSampleRate = ma_engine_get_sample_rate(pEngine);
@@ -1018,14 +1164,25 @@ plResult plMiniAudioEffect::Create(ma_engine* pEngine, const plAudioEffectDesc& 
 
     case plAudioEffectType::Compressor:
     case plAudioEffectType::Limiter:
+    case plAudioEffectType::Ducker:
     {
-      const bool bLimiter = (m_eType == plAudioEffectType::Limiter);
       plMaCompressorNode* pNode = PL_DEFAULT_NEW(plMaCompressorNode);
-      if (bLimiter)
+      plMaCompressorNode::Mode mode = plMaCompressorNode::Mode::Compressor;
+
+      if (m_eType == plAudioEffectType::Limiter)
       {
+        mode = plMaCompressorNode::Mode::Limiter;
         pNode->m_fThresholdDb = m_fParams[0];
         pNode->m_fReleaseMs = m_fParams[1];
         pNode->m_fAttackMs = 0.1f;
+      }
+      else if (m_eType == plAudioEffectType::Ducker)
+      {
+        mode = plMaCompressorNode::Mode::Ducker;
+        pNode->m_fDepthDb = m_fParams[0];
+        pNode->m_fThresholdDb = m_fParams[1];
+        pNode->m_fAttackMs = m_fParams[2];
+        pNode->m_fReleaseMs = m_fParams[3];
       }
       else
       {
@@ -1035,17 +1192,74 @@ plResult plMiniAudioEffect::Create(ma_engine* pEngine, const plAudioEffectDesc& 
         pNode->m_fReleaseMs = m_fParams[3];
         pNode->m_fMakeupDb = m_fParams[4];
       }
-      if (plMiniAudioDsp::InitCompressorNode(pEngine, pNode, bLimiter).Failed())
+
+      // a limiter always measures its own input
+      const bool bKey = bHasKeyInput && m_eType != plAudioEffectType::Limiter;
+      if (plMiniAudioDsp::InitCompressorNode(pEngine, pNode, mode, bKey).Failed())
       {
         PL_DEFAULT_DELETE(pNode);
         return PL_FAILURE;
       }
+      m_bHasKeyInput = bKey;
       m_Nodes.PushBack(reinterpret_cast<ma_node*>(pNode));
       break;
     }
   }
 
-  return m_Nodes.IsEmpty() ? PL_FAILURE : PL_SUCCESS;
+  if (m_Nodes.IsEmpty())
+    return PL_FAILURE;
+
+  SetBypass(desc.m_bBypass);
+  return PL_SUCCESS;
+}
+
+void plMiniAudioEffect::SetBypass(bool bBypass)
+{
+  for (ma_node* pNodeBase : m_Nodes)
+  {
+    switch (m_eType)
+    {
+      case plAudioEffectType::LowPass:
+      case plAudioEffectType::HighPass:
+      case plAudioEffectType::Eq3:
+        reinterpret_cast<plMaFilterNode*>(pNodeBase)->m_iBypass = bBypass ? 1 : 0;
+        break;
+      case plAudioEffectType::Delay:
+        reinterpret_cast<plMaDelayNode*>(pNodeBase)->m_bBypass.store(bBypass, std::memory_order_relaxed);
+        break;
+      case plAudioEffectType::Reverb:
+        reinterpret_cast<plMaReverbNode*>(pNodeBase)->m_bBypass.store(bBypass, std::memory_order_relaxed);
+        break;
+      case plAudioEffectType::Compressor:
+      case plAudioEffectType::Limiter:
+      case plAudioEffectType::Ducker:
+        reinterpret_cast<plMaCompressorNode*>(pNodeBase)->m_bBypass.store(bBypass, std::memory_order_relaxed);
+        break;
+    }
+  }
+}
+
+ma_node* plMiniAudioEffect::GetKeyInput() const
+{
+  return m_bHasKeyInput && !m_Nodes.IsEmpty() ? m_Nodes[0] : nullptr;
+}
+
+float plMiniAudioEffect::GetGainReductionDb() const
+{
+  switch (m_eType)
+  {
+    case plAudioEffectType::Compressor:
+    case plAudioEffectType::Limiter:
+    case plAudioEffectType::Ducker:
+      if (!m_Nodes.IsEmpty())
+        return reinterpret_cast<const plMaCompressorNode*>(m_Nodes[0])->m_fGainReductionDb.load(std::memory_order_relaxed);
+      break;
+
+    default:
+      break;
+  }
+
+  return 0.0f;
 }
 
 void plMiniAudioEffect::Destroy()
@@ -1083,6 +1297,7 @@ void plMiniAudioEffect::Destroy()
 
     case plAudioEffectType::Compressor:
     case plAudioEffectType::Limiter:
+    case plAudioEffectType::Ducker:
       if (!m_Nodes.IsEmpty())
       {
         auto* pNode = reinterpret_cast<plMaCompressorNode*>(m_Nodes[0]);
@@ -1094,6 +1309,7 @@ void plMiniAudioEffect::Destroy()
 
   m_Nodes.Clear();
   m_pEngine = nullptr;
+  m_bHasKeyInput = false;
 }
 
 void plMiniAudioEffect::SetParameter(plUInt32 uiParamIndex, float fValue)
@@ -1152,6 +1368,16 @@ void plMiniAudioEffect::SetParameter(plUInt32 uiParamIndex, float fValue)
       auto* pNode = reinterpret_cast<plMaCompressorNode*>(m_Nodes[0]);
       pNode->m_fThresholdDb = m_fParams[0];
       pNode->m_fReleaseMs = m_fParams[1];
+      break;
+    }
+
+    case plAudioEffectType::Ducker:
+    {
+      auto* pNode = reinterpret_cast<plMaCompressorNode*>(m_Nodes[0]);
+      pNode->m_fDepthDb = m_fParams[0];
+      pNode->m_fThresholdDb = m_fParams[1];
+      pNode->m_fAttackMs = m_fParams[2];
+      pNode->m_fReleaseMs = m_fParams[3];
       break;
     }
   }

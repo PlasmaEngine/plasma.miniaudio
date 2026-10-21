@@ -454,8 +454,51 @@ void plAudioClipAssetProperties::PropertyMetaStateEventHandler(plPropertyMetaSta
 //////////////////////////////////////////////////////////////////////////
 
 plAudioClipAssetDocument::plAudioClipAssetDocument(plStringView sDocumentPath)
-  : plSimpleAssetDocument<plAudioClipAssetProperties>(sDocumentPath, plAssetDocEngineConnection::None)
+  : plSimpleAssetDocument<plAudioClipAssetProperties>(sDocumentPath, plAssetDocEngineConnection::Simple)
 {
+}
+
+void plAudioClipAssetDocument::HandleEngineMessage(const plEditorEngineDocumentMsg* pMsg)
+{
+  if (const auto* pStatus = plDynamicCast<const plAudioAuditionStatusMsgToEditor*>(pMsg))
+  {
+    m_AuditionStatus = *pStatus;
+    m_AuditionEvents.Broadcast(m_AuditionStatus);
+    return;
+  }
+
+  plSimpleAssetDocument<plAudioClipAssetProperties>::HandleEngineMessage(pMsg);
+}
+
+plStatus plAudioClipAssetDocument::WriteAuditionData(plStreamWriter& inout_stream, bool bLoop) const
+{
+  // what an event resource file holds: its path, the asset file header, then the event
+  plStringBuilder sPath = GetDocumentPath();
+  sPath.ChangeFileExtension("plAudioEvent");
+  inout_stream << sPath;
+
+  plAssetFileHeader header;
+  header.SetFileHashAndVersion(plAssetCurator::GetSingleton()->GetAssetTransformHash(GetGuid()), GetAssetTypeVersion());
+  PL_SUCCEED_OR_RETURN(header.Write(inout_stream));
+
+  // one instrument with one entry: the built clip, as the game plays it
+  plAudioEventDesc desc;
+  desc.m_bSpatialize = false;
+  desc.m_StopFadeOut = plTime::MakeFromMilliseconds(20);
+
+  plAudioEventInstrumentDesc& instrument = desc.m_Instruments.ExpandAndGetRef();
+  instrument.m_sName = "Clip";
+  instrument.m_bLoop = bLoop;
+
+  plStringBuilder sGuid;
+  plConversionUtils::ToString(GetGuid(), sGuid);
+  instrument.m_Playlist.ExpandAndGetRef().m_sClip = sGuid;
+
+  PL_SUCCEED_OR_RETURN(desc.Save(inout_stream));
+
+  // no embedded samples
+  inout_stream << plUInt32(0);
+  return plStatus(PL_SUCCESS);
 }
 
 void plAudioClipAssetDocument::UpdateAssetDocumentInfo(plAssetDocumentInfo* pInfo) const

@@ -2,6 +2,7 @@
 
 #include <AudioSystem/Core/AudioSystem.h>
 #include <AudioSystem/Core/AudioSystemRequests.h>
+#include <AudioSystem/Mixer/AudioMixerService.h>
 #include <Foundation/Threading/Lock.h>
 #include <PlasmaAudioPlugin/Events/AudioAudition.h>
 #include <PlasmaAudioPlugin/Events/MiniAudioAudioEvents.h>
@@ -110,6 +111,85 @@ bool plAudioAudition::GetStatus(plUInt64 uiKey, plAudioAuditionStatus& out_statu
   return true;
 }
 
+void plAudioAudition::SetMixerMonitor(bool bWatch)
+{
+  PL_LOCK(m_Mutex);
+
+  if (bWatch)
+  {
+    ++m_uiMixerMonitors;
+  }
+  else if (m_uiMixerMonitors > 0)
+  {
+    --m_uiMixerMonitors;
+  }
+}
+
+void plAudioAudition::GetMixerMonitor(plAudioMixerMonitorStatus& out_status) const
+{
+  PL_LOCK(m_Mutex);
+  out_status = m_MixerMonitor;
+}
+
+void plAudioAudition::SetTestSignal(bool bEnable)
+{
+  PL_LOCK(m_Mutex);
+  m_iTestSignalRequest = bEnable ? 1 : 0;
+}
+
+void plAudioAudition::UpdateMixerMonitor(const plMiniAudioBusGraph& busGraph, const plPlasmaAudioEventManager& events)
+{
+  plAudioMixerMonitorStatus& status = m_MixerMonitor;
+
+  ++status.m_uiRefreshCount;
+  status.m_bHasMixer = busGraph.IsBuilt();
+  status.m_bTestSignal = busGraph.IsTestSignalOn();
+  status.m_uiRealVoices = events.GetRealVoiceCount();
+
+  const plAudioMixerDesc& desc = busGraph.GetDesc();
+  const plUInt32 uiBusCount = busGraph.IsBuilt() ? desc.m_Buses.GetCount() : 0;
+
+  status.m_BusNames.SetCount(uiBusCount);
+  status.m_BusPeaks.SetCount(uiBusCount);
+  status.m_BusRms.SetCount(uiBusCount);
+  status.m_BusMuted.SetCount(uiBusCount);
+  status.m_BusSoloed.SetCount(uiBusCount);
+  status.m_EffectGainReductions.Clear();
+
+  const plAudioMixerService* pService = plAudioSystem::GetSingleton() != nullptr ? &plAudioSystem::GetSingleton()->GetMixerService() : nullptr;
+
+  for (plUInt32 i = 0; i < uiBusCount; ++i)
+  {
+    status.m_BusNames[i] = desc.m_Buses[i].m_sName;
+    busGraph.GetBusMeter(i, status.m_BusPeaks[i], status.m_BusRms[i]);
+    status.m_BusMuted[i] = pService != nullptr && pService->IsBusMuted(i);
+    status.m_BusSoloed[i] = pService != nullptr && pService->IsBusSoloed(i);
+
+    for (plUInt32 e = 0; e < desc.m_Buses[i].m_Effects.GetCount(); ++e)
+    {
+      status.m_EffectGainReductions.PushBack(busGraph.GetEffectGainReductionDb(i, e));
+    }
+  }
+
+  status.m_sMixerResourceId.Clear();
+  status.m_uiLayoutRebuilds = 0;
+  status.m_SnapshotNames.Clear();
+  status.m_SnapshotIntensities.Clear();
+
+  if (pService != nullptr && pService->IsLoaded())
+  {
+    status.m_sMixerResourceId = pService->GetMixerResourceId();
+    status.m_uiLayoutRebuilds = pService->GetLayoutRebuildCount();
+
+    const plAudioMixerDesc& serviceDesc = pService->GetDesc();
+    for (plUInt32 s = 0; s < serviceDesc.m_Snapshots.GetCount(); ++s)
+    {
+      status.m_SnapshotNames.PushBack(serviceDesc.m_Snapshots[s].m_sName);
+      status.m_SnapshotIntensities.PushBack(pService->GetSnapshotIntensity(s));
+    }
+  }
+}
+
 void plAudioAudition::Activate(Slot& ref_slot, plPlasmaAudioEventManager& ref_events, plMiniAudioBusGraph& ref_busGraph, ma_engine* pEngine)
 {
   ref_slot.m_bPendingStart = false;
@@ -137,9 +217,17 @@ void plAudioAudition::Activate(Slot& ref_slot, plPlasmaAudioEventManager& ref_ev
 void plAudioAudition::Update(plPlasmaAudioEventManager& ref_events, plMiniAudioBusGraph& ref_busGraph, ma_engine* pEngine, float fMasterPeak)
 {
   plDynamicArray<Command> commands;
+  plInt8 iTestSignal = -1;
   {
     PL_LOCK(m_Mutex);
     commands.Swap(m_Commands);
+    iTestSignal = m_iTestSignalRequest;
+    m_iTestSignalRequest = -1;
+  }
+
+  if (iTestSignal >= 0)
+  {
+    ref_busGraph.SetTestSignal(iTestSignal != 0);
   }
 
   const plTime tNow = plTime::Now();
@@ -229,6 +317,11 @@ void plAudioAudition::Update(plPlasmaAudioEventManager& ref_events, plMiniAudioB
 
   // the status of every audition
   PL_LOCK(m_Mutex);
+
+  if (m_uiMixerMonitors > 0)
+  {
+    UpdateMixerMonitor(ref_busGraph, ref_events);
+  }
 
   for (auto it = m_Slots.GetIterator(); it.IsValid(); ++it)
   {

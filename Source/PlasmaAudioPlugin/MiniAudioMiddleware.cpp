@@ -132,6 +132,12 @@ void plPlasmaAudioMiddleware::Update(plTime delta)
 
     m_pBackend->UpdateSound(delta);
 
+    // an in-place rebuild of the mixer happens once the output has faded out
+    if (m_bRebuildPending && m_pBackend->GetEngine() != nullptr && ma_engine_get_time_in_pcm_frames(m_pBackend->GetEngine()) >= m_uiRebuildFrame)
+    {
+      FinishMixerRebuild();
+    }
+
     {
       PL_LOCK(m_GlobalParameterMutex);
       if (m_bGlobalParametersDirty)
@@ -379,11 +385,13 @@ void plPlasmaAudioMiddleware::RecoverDevice()
   // held throughout, so no PCM stream node is created, fed or destroyed against a half-rebuilt engine
   PL_LOCK(m_PcmStreamMutex);
 
-  // after a failed attempt the graph is gone and the mixer waits in m_PendingMixerDesc
+  // after a failed attempt the graph is gone and the mixer waits in m_PendingMixerDesc; an in-place rebuild that was
+  // waiting for its fade-out is built on the new device instead
   const bool bHadMixer = m_BusGraph.IsBuilt() || m_bMixerPendingRecovery;
-  const plAudioMixerDesc mixerDesc = m_BusGraph.IsBuilt() ? m_BusGraph.GetDesc() : m_PendingMixerDesc;
-  const plDynamicArray<plMiniAudioBusGraph::BusValues> mixerValues = m_BusGraph.IsBuilt() ? m_BusGraph.GetBusValues() : m_PendingMixerValues;
+  const plAudioMixerDesc mixerDesc = m_bRebuildPending ? m_RebuildDesc : (m_BusGraph.IsBuilt() ? m_BusGraph.GetDesc() : m_PendingMixerDesc);
+  const plDynamicArray<plMiniAudioBusGraph::BusValues> mixerValues = m_bRebuildPending ? m_RebuildValues : (m_BusGraph.IsBuilt() ? m_BusGraph.GetBusValues() : m_PendingMixerValues);
   m_bMixerPendingRecovery = false;
+  m_bRebuildPending = false;
 
   // voices first (they feed the buses), then the bus graph, which also moves the stream nodes to the endpoint.
   // Stopping the voices releases their disk streams; the stream service itself does not depend on the device.
@@ -1250,29 +1258,7 @@ plResult plPlasmaAudioMiddleware::LoadMixer(const plAudioMixerDesc& desc)
     ReattachPcmStreams();
   }
 
-  // register the mixer's environment aux buses as ATL environments so the generic
-  // Box/Sphere environment components resolve their names
-  if (auto* pAudioSystem = plAudioSystem::GetSingleton())
-  {
-    for (const auto& busDesc : desc.m_Buses)
-    {
-      if (!busDesc.m_bIsAux || busDesc.m_sEnvironmentName.IsEmpty())
-        continue;
-
-      const plAudioSystemDataID uiEnvironmentId = plHashHelper<plStringView>::Hash(busDesc.m_sEnvironmentName.GetView());
-      plAudioSystemEnvironmentData* pData = PL_AUDIOSYSTEM_NEW(plAudioSystemStringEnvironmentData, uiEnvironmentId, busDesc.m_sEnvironmentName);
-
-      // an environment someone else registered stays theirs: it is neither tracked nor unregistered by this mixer
-      if (pAudioSystem->TryRegisterEnvironment(uiEnvironmentId, pData))
-      {
-        m_RegisteredEnvironmentIds.PushBack(uiEnvironmentId);
-      }
-      else
-      {
-        PL_AUDIOSYSTEM_DELETE(pData);
-      }
-    }
-  }
+  RegisterMixerEnvironments(desc);
 
   // the mixer service pushes the authored base state right after this returns; it also logs the load with the
   // resource id, which the middleware does not get
@@ -1285,14 +1271,36 @@ plResult plPlasmaAudioMiddleware::LoadMixer(const plAudioMixerDesc& desc)
   return PL_SUCCESS;
 }
 
-plResult plPlasmaAudioMiddleware::UnloadMixer()
+void plPlasmaAudioMiddleware::RegisterMixerEnvironments(const plAudioMixerDesc& desc)
 {
-  if (!m_BusGraph.IsBuilt())
-    return PL_SUCCESS;
+  // register the mixer's environment aux buses as ATL environments so the generic
+  // Box/Sphere environment components resolve their names
+  auto* pAudioSystem = plAudioSystem::GetSingleton();
+  if (pAudioSystem == nullptr)
+    return;
 
-  // voices attached to bus groups must not outlive the graph
-  m_EventManager.StopAll(true);
+  for (const auto& busDesc : desc.m_Buses)
+  {
+    if (!busDesc.m_bIsAux || busDesc.m_sEnvironmentName.IsEmpty())
+      continue;
 
+    const plAudioSystemDataID uiEnvironmentId = plHashHelper<plStringView>::Hash(busDesc.m_sEnvironmentName.GetView());
+    plAudioSystemEnvironmentData* pData = PL_AUDIOSYSTEM_NEW(plAudioSystemStringEnvironmentData, uiEnvironmentId, busDesc.m_sEnvironmentName);
+
+    // an environment someone else registered stays theirs: it is neither tracked nor unregistered by this mixer
+    if (pAudioSystem->TryRegisterEnvironment(uiEnvironmentId, pData))
+    {
+      m_RegisteredEnvironmentIds.PushBack(uiEnvironmentId);
+    }
+    else
+    {
+      PL_AUDIOSYSTEM_DELETE(pData);
+    }
+  }
+}
+
+void plPlasmaAudioMiddleware::UnregisterMixerEnvironments()
+{
   if (auto* pAudioSystem = plAudioSystem::GetSingleton())
   {
     for (const plAudioSystemDataID uiEnvironmentId : m_RegisteredEnvironmentIds)
@@ -1300,7 +1308,98 @@ plResult plPlasmaAudioMiddleware::UnloadMixer()
       pAudioSystem->UnregisterEnvironment(uiEnvironmentId);
     }
   }
+
   m_RegisteredEnvironmentIds.Clear();
+}
+
+plResult plPlasmaAudioMiddleware::UpdateMixer(const plAudioMixerDesc& desc, bool bLayoutChanged)
+{
+  if (!m_BusGraph.IsBuilt())
+    return LoadMixer(desc);
+
+  if (!bLayoutChanged && !m_bRebuildPending)
+    return PL_SUCCESS;
+
+  ma_engine* pEngine = m_pBackend != nullptr ? m_pBackend->GetEngine() : nullptr;
+  if (pEngine == nullptr)
+    return PL_FAILURE;
+
+  // the values the service sends next refer to the new desc, so they wait with it for the rebuild
+  m_RebuildDesc = desc;
+  plMiniAudioBusGraph::GetAuthoredValues(desc, m_RebuildValues);
+
+  if (!m_bRebuildPending)
+  {
+    m_bRebuildPending = true;
+
+    // the output fades to silence first, so the rebuild does not click
+    ma_sound_group_set_fade_in_milliseconds(m_BusGraph.GetBusInput(0), -1.0f, 0.0f, static_cast<ma_uint64>(MixerRebuildFade.GetMilliseconds()));
+
+    const ma_uint64 uiFadeFrames = static_cast<ma_uint64>(MixerRebuildFade.GetSeconds() * ma_engine_get_sample_rate(pEngine));
+    m_uiRebuildFrame = ma_engine_get_time_in_pcm_frames(pEngine) + uiFadeFrames;
+  }
+
+  return PL_SUCCESS;
+}
+
+void plPlasmaAudioMiddleware::FinishMixerRebuild()
+{
+  m_bRebuildPending = false;
+
+  ma_engine* pEngine = m_pBackend != nullptr ? m_pBackend->GetEngine() : nullptr;
+  if (pEngine == nullptr)
+    return;
+
+  // the voices keep playing, detached, while the graph is rebuilt underneath them
+  m_EventManager.DetachFromBusGraph(&m_BusGraph);
+  UnregisterMixerEnvironments();
+
+  {
+    PL_LOCK(m_PcmStreamMutex);
+
+    DetachPcmStreamsToEndpoint();
+
+    if (m_BusGraph.Build(m_RebuildDesc, pEngine).Failed())
+    {
+      plLog::Error("PlasmaAudio: the changed mixer could not be built; the output plays without a mixer.");
+      m_EventManager.ReattachToBusGraph(&m_BusGraph);
+      return;
+    }
+
+    // the new master starts silent and fades in once everything is attached again
+    ma_sound_group_set_fade_in_milliseconds(m_BusGraph.GetBusInput(0), 0.0f, 1.0f, static_cast<ma_uint64>(MixerRebuildFade.GetMilliseconds()));
+
+    m_BusGraph.ApplyBusValues(m_RebuildValues);
+    ReattachPcmStreams();
+  }
+
+  m_EventManager.ReattachToBusGraph(&m_BusGraph);
+  RegisterMixerEnvironments(m_RebuildDesc);
+
+  plStringBuilder sDetail;
+  sDetail.SetFormat("{} buses, rebuilt in place", m_RebuildDesc.m_Buses.GetCount());
+  m_EventManager.GetEventLog().Add(plAudioLogEventType::MixerLoaded, "mixer", sDetail);
+}
+
+plMiniAudioBusGraph::BusValues* plPlasmaAudioMiddleware::GetPendingRebuildValues(plUInt32 uiBusIndex)
+{
+  if (!m_bRebuildPending || uiBusIndex >= m_RebuildValues.GetCount())
+    return nullptr;
+
+  return &m_RebuildValues[uiBusIndex];
+}
+
+plResult plPlasmaAudioMiddleware::UnloadMixer()
+{
+  m_bRebuildPending = false;
+
+  if (!m_BusGraph.IsBuilt())
+    return PL_SUCCESS;
+
+  // voices attached to bus groups must not outlive the graph
+  m_EventManager.StopAll(true);
+
+  UnregisterMixerEnvironments();
 
   {
     // held across both steps, so CreatePcmStream cannot attach a new stream to a bus that is being torn down
@@ -1518,6 +1617,12 @@ void plPlasmaAudioMiddleware::FlushPcmStream(plUInt32 uiStreamId)
 
 plResult plPlasmaAudioMiddleware::SetBusVolume(plUInt32 uiBusIndex, float fLinearGain)
 {
+  if (plMiniAudioBusGraph::BusValues* pPending = GetPendingRebuildValues(uiBusIndex))
+  {
+    pPending->m_fGain = fLinearGain;
+    return PL_SUCCESS;
+  }
+
   if (!m_BusGraph.IsBuilt())
     return PL_FAILURE;
 
@@ -1527,6 +1632,12 @@ plResult plPlasmaAudioMiddleware::SetBusVolume(plUInt32 uiBusIndex, float fLinea
 
 plResult plPlasmaAudioMiddleware::SetBusPitch(plUInt32 uiBusIndex, float fPitch)
 {
+  if (plMiniAudioBusGraph::BusValues* pPending = GetPendingRebuildValues(uiBusIndex))
+  {
+    pPending->m_fPitch = fPitch;
+    return PL_SUCCESS;
+  }
+
   if (!m_BusGraph.IsBuilt())
     return PL_FAILURE;
 
@@ -1536,6 +1647,13 @@ plResult plPlasmaAudioMiddleware::SetBusPitch(plUInt32 uiBusIndex, float fPitch)
 
 plResult plPlasmaAudioMiddleware::SetBusSendLevel(plUInt32 uiBusIndex, plUInt32 uiSendIndex, float fLinearLevel)
 {
+  if (plMiniAudioBusGraph::BusValues* pPending = GetPendingRebuildValues(uiBusIndex))
+  {
+    if (uiSendIndex < pPending->m_SendLevels.GetCount())
+      pPending->m_SendLevels[uiSendIndex] = fLinearLevel;
+    return PL_SUCCESS;
+  }
+
   if (!m_BusGraph.IsBuilt())
     return PL_FAILURE;
 
@@ -1545,10 +1663,34 @@ plResult plPlasmaAudioMiddleware::SetBusSendLevel(plUInt32 uiBusIndex, plUInt32 
 
 plResult plPlasmaAudioMiddleware::SetBusEffectParameter(plUInt32 uiBusIndex, plUInt32 uiEffectIndex, plUInt32 uiParamIndex, float fValue)
 {
+  if (plMiniAudioBusGraph::BusValues* pPending = GetPendingRebuildValues(uiBusIndex))
+  {
+    const plUInt32 uiSlot = uiEffectIndex * plAudioEffectMaxParams + uiParamIndex;
+    if (uiParamIndex < plAudioEffectMaxParams && uiSlot < pPending->m_EffectParams.GetCount())
+      pPending->m_EffectParams[uiSlot] = fValue;
+    return PL_SUCCESS;
+  }
+
   if (!m_BusGraph.IsBuilt())
     return PL_FAILURE;
 
   m_BusGraph.SetBusEffectParameter(uiBusIndex, uiEffectIndex, uiParamIndex, fValue);
+  return PL_SUCCESS;
+}
+
+plResult plPlasmaAudioMiddleware::SetBusEffectBypass(plUInt32 uiBusIndex, plUInt32 uiEffectIndex, bool bBypass)
+{
+  if (plMiniAudioBusGraph::BusValues* pPending = GetPendingRebuildValues(uiBusIndex))
+  {
+    if (uiEffectIndex < pPending->m_EffectBypass.GetCount())
+      pPending->m_EffectBypass[uiEffectIndex] = bBypass;
+    return PL_SUCCESS;
+  }
+
+  if (!m_BusGraph.IsBuilt())
+    return PL_FAILURE;
+
+  m_BusGraph.SetBusEffectBypass(uiBusIndex, uiEffectIndex, bBypass);
   return PL_SUCCESS;
 }
 

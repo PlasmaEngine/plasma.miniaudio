@@ -91,11 +91,26 @@ public:
   // pushes the final per-bus values; they land on the plMiniAudioBusGraph built from the desc
   plResult LoadMixer(const plAudioMixerDesc& desc) override;
   plResult UnloadMixer() override;
+
+  /// \brief A changed layout is rebuilt without stopping the voices: the output fades out for MixerRebuildFade, the
+  /// graph is rebuilt and the voices and PCM streams move onto it, then the output fades back in. Values set while the
+  /// rebuild waits for the fade apply to the new graph.
+  plResult UpdateMixer(const plAudioMixerDesc& desc, bool bLayoutChanged) override;
   plResult SetBusVolume(plUInt32 uiBusIndex, float fLinearGain) override;
   plResult SetBusPitch(plUInt32 uiBusIndex, float fPitch) override;
   plResult SetBusSendLevel(plUInt32 uiBusIndex, plUInt32 uiSendIndex, float fLinearLevel) override;
   plResult SetBusEffectParameter(plUInt32 uiBusIndex, plUInt32 uiEffectIndex, plUInt32 uiParamIndex, float fValue) override;
+  plResult SetBusEffectBypass(plUInt32 uiBusIndex, plUInt32 uiEffectIndex, bool bBypass) override;
   void GetBusMeterInfo(plUInt32 uiBusIndex, plAudioBusMeterInfo& out_info) const override;
+
+  /// \brief How long the output fades out, and then in again, around an in-place rebuild of the mixer graph.
+  static constexpr plTime MixerRebuildFade = plTime::MakeFromMilliseconds(25);
+
+  /// \brief The loaded mixer graph. Audio thread only.
+  PL_NODISCARD const plMiniAudioBusGraph& GetBusGraph() const { return m_BusGraph; }
+
+  /// \brief Whether an in-place rebuild of the mixer graph waits for its fade-out. Audio thread only.
+  PL_NODISCARD bool IsMixerRebuildPending() const { return m_bRebuildPending; }
   plResult SetEventParameter(plAudioSystemEntityData* pEntityData, plStringView sParamName, float fValue) override;
   void GetProfilingInfo(plAudioSystemProfilingInfo& out_info) const override;
 
@@ -158,6 +173,16 @@ private:
   /// \brief Recreates the miniaudio engine on the requested / default output device and rebuilds what hangs off it.
   void RecoverDevice();
 
+  /// \brief Rebuilds the graph from m_RebuildDesc once the fade-out of UpdateMixer is over.
+  void FinishMixerRebuild();
+
+  /// \brief The values the SetBus... functions change: those of the pending rebuild while one waits, else nullptr.
+  plMiniAudioBusGraph::BusValues* GetPendingRebuildValues(plUInt32 uiBusIndex);
+
+  /// \brief Registers the mixer's environment aux buses as ATL environments, and unregisters them again.
+  void RegisterMixerEnvironments(const plAudioMixerDesc& desc);
+  void UnregisterMixerEnvironments();
+
   plMiniAudioSingleton* m_pBackend = nullptr;
 
   /// duration of the last Update(), written by the audio thread
@@ -173,6 +198,12 @@ private:
   plAudioMixerDesc m_PendingMixerDesc;
   plDynamicArray<plMiniAudioBusGraph::BusValues> m_PendingMixerValues;
   bool m_bMixerPendingRecovery = false;
+
+  /// an in-place rebuild (UpdateMixer) waiting for the output's fade-out
+  plAudioMixerDesc m_RebuildDesc;
+  plDynamicArray<plMiniAudioBusGraph::BusValues> m_RebuildValues;
+  bool m_bRebuildPending = false;
+  plUInt64 m_uiRebuildFrame = 0; ///< engine time at which the fade-out is over
 
   /// declared before the event manager: voices of streamed clips release their streams into it
   plAudioStreamService m_StreamService;

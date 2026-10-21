@@ -10,7 +10,6 @@
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAsset.h>
 #include <EditorPluginPlasmaAudio/Preferences/MiniAudioPreferences.h>
-#include <EditorPluginPlasmaAudio/Preview/AudioPreviewService.h>
 #include <EditorPluginPlasmaAudio/Preview/AudioEnumRegistry.h>
 #include <EditorPluginPlasmaAudio/Profiler/AudioProfilerPanel.moc.h>
 #include <GuiFoundation/ContainerWindow/ContainerWindow.moc.h>
@@ -254,10 +253,6 @@ void OnUnloadPlugin()
   {
     delete pPanel;
   }
-
-  // the preview device stops here, while its thread still runs; stopped by the static destructor during the DLL unload,
-  // miniaudio waits for a thread that no longer answers and the editor hangs on exit
-  plAudioPreviewService::GetSingleton().Shutdown();
 
   plAudioShellPanels::Unregister();
   plPlasmaAudioActions::UnregisterActions();

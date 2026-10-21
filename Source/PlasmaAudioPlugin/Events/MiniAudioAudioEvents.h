@@ -193,6 +193,17 @@ public:
   /// The instance no longer reads it and finishes in the next Update.
   void OnEventUnloading();
 
+  /// \brief The bus graph the instance outputs to is about to be rebuilt: detaches the voices' outputs from its buses.
+  /// The voices keep playing into nothing until ReattachToBusGraph.
+  void DetachFromBusGraph();
+
+  /// \brief The bus graph was rebuilt: resolves the output bus again and attaches the voices to it. Environment sends
+  /// are attached again by the next Update.
+  void ReattachToBusGraph();
+
+  /// \brief The bus graph the voices attach to; null without one.
+  PL_NODISCARD const plMiniAudioBusGraph* GetBusGraph() const { return m_pBusGraph; }
+
   plPlasmaAudioEntityData* m_pEntity = nullptr;
   plPlasmaAudioEventData* m_pEventData = nullptr;
   plUInt64 m_uiEventGroupHash = 0; ///< hash of the event resource id, for polyphony grouping
@@ -482,6 +493,12 @@ public:
 
   void StopAllOnEntity(const plPlasmaAudioEntityData* pEntity, bool bImmediate);
   void StopAll(bool bImmediate);
+
+  /// \brief Detaches every instance playing on the bus graph from its buses, before the graph is rebuilt in place.
+  void DetachFromBusGraph(const plMiniAudioBusGraph* pBusGraph);
+
+  /// \brief Attaches every instance playing on the bus graph to the rebuilt graph's buses again.
+  void ReattachToBusGraph(const plMiniAudioBusGraph* pBusGraph);
 
   void SetEventParameter(const plPlasmaAudioEntityData* pEntity, plStringView sParamName, float fValue);
 

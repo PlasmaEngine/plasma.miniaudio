@@ -9,12 +9,7 @@
 
 #include <atomic>
 
-class QLabel;
-class QListWidget;
-class QMenu;
-class QTabBar;
 class QTimer;
-class QToolButton;
 class QVBoxLayout;
 class plEditorUiAudioClipUsedBy;
 class plEditorUiAudioClipWaveform;
@@ -51,72 +46,10 @@ struct plAudioClipPreviewJob : public plRefCounted
   void Run();
 };
 
-/// \brief Waveform of a clip preview with draggable loop markers and the audition play cursor.
-///
-/// Dragging a marker, or dragging across the waveform to create a loop, writes LoopStart, LoopEnd and OverrideLoop to
-/// the document when the mouse is released. Loop points are stored in source seconds, so the trimmed leading silence
-/// is added back.
-class plQtAudioWaveformWidget : public QWidget
-{
-  Q_OBJECT
-
-public:
-  plQtAudioWaveformWidget(QWidget* pParent, plDocument* pDocument, const QColor& accent);
-
-  void SetPreview(const plSharedPtr<plAudioClipPreview>& pPreview);
-  void SetMessage(const QString& sMessage);
-  void SetPlayCursor(plInt64 iFrame);
-
-  virtual QSize sizeHint() const override { return QSize(600, 220); }
-  virtual QSize minimumSizeHint() const override { return QSize(200, 120); }
-
-protected:
-  virtual void paintEvent(QPaintEvent* pEvent) override;
-  virtual void mousePressEvent(QMouseEvent* pEvent) override;
-  virtual void mouseMoveEvent(QMouseEvent* pEvent) override;
-  virtual void mouseReleaseEvent(QMouseEvent* pEvent) override;
-
-private:
-  enum class Drag
-  {
-    None,
-    LoopStart,
-    LoopEnd,
-    Create
-  };
-
-  QRect GetPlotRect() const;
-  double FrameToX(plUInt64 uiFrame) const;
-  plUInt64 XToFrame(int x) const;
-  bool GetLoop(plUInt64& out_uiStart, plUInt64& out_uiEnd) const;
-
-  plDocument* m_pDocument = nullptr;
-  QColor m_Accent;
-  plSharedPtr<plAudioClipPreview> m_pPreview;
-  QString m_sMessage;
-  plInt64 m_iPlayCursor = -1;
-
-  Drag m_Drag = Drag::None;
-  plUInt64 m_uiDragAnchor = 0;
-  plUInt64 m_uiDragStart = 0;
-  plUInt64 m_uiDragEnd = 0;
-
-  /// \brief Recomputes m_Bars when the preview or the plot width changed.
-  void UpdateBars(int iPlotWidth);
-
-  /// Bar heights (peak, 0..1) for the current preview and plot width: m_uiBarCount per channel, channel after channel.
-  plDynamicArray<float> m_Bars;
-  plUInt32 m_uiBarCount = 0;
-  const plAudioClipPreview* m_pBarsPreview = nullptr;
-  plUInt64 m_uiBarsHash = 0;
-  int m_iBarsWidth = 0;
-};
-
 /// \brief Audio Clip editor: waveform with loop markers, info and cost estimates for each platform tab, the property grid
 /// of the default settings or of the selected platform override, and the assets that use the clip.
 ///
-/// The toolbar row, waveform dock body, platform label and "Used by" list are engine-drawn; "-engineAudioEditors false"
-/// creates the Qt widgets instead.
+/// The toolbar row, waveform dock body, platform label and "Used by" list are engine-drawn.
 class plAudioClipAssetDocumentWindow : public plQtDocumentWindow
 {
   Q_OBJECT
@@ -135,13 +68,10 @@ private:
   const plDocumentObject* GetPropertiesObject() const;
   const plDocumentObject* GetActiveOverrideObject() const;
 
-  void CreateQtCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout);
   void CreateEngineCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout);
 
   void RebuildTabs();
   void OnTabChanged(int iIndex);
-  void OnFillAddOverrideMenu();
-  void OnTabContextMenu(const QPoint& pos);
   void UpdatePropertyGridSelection();
 
   /// The asset profiles an override can be added for, and whether each one already has an override.
@@ -169,12 +99,17 @@ private:
   void SetPlatformText(const QString& sText);
   bool IsLoopEnabled() const;
 
+  /// \brief Auditions the built clip in the editor's engine process, through the game's event manager and mixer.
   void OnPlay();
   void OnStop();
+  void OnAuditionStatus(const plAudioAuditionStatusMsgToEditor& status);
+
+  /// \brief The waveform frame the audition plays at, from its position in seconds; -1 while nothing plays.
+  plInt64 GetAuditionCursor() const;
 
   plAudioClipAssetDocument* m_pAssetDoc = nullptr;
-  QColor m_Accent;
-  bool m_bEngineViews = true;
+  bool m_bAuditioning = false;
+  plEventSubscriptionID m_AuditionSubscription = 0;
 
   // engine-drawn views
   plQtEngineControlStrip* m_pToolStrip = nullptr;
@@ -188,20 +123,7 @@ private:
   plEditorUiAudioClipWaveform* m_pWaveView = nullptr;
   plEditorUiAudioClipUsedBy* m_pUsedByView = nullptr;
 
-  plQtAudioWaveformWidget* m_pWaveform = nullptr;
-  QTabBar* m_pTabBar = nullptr;
-  QToolButton* m_pAddTabButton = nullptr;
-  QMenu* m_pAddTabMenu = nullptr;
-  QToolButton* m_pLoopButton = nullptr;
-  QLabel* m_pInfoLabel = nullptr;
-  QLabel* m_pLoopLabel = nullptr;
-  QLabel* m_pResidentLabel = nullptr;
-  QLabel* m_pDiskLabel = nullptr;
-  QLabel* m_pDecodeLabel = nullptr;
-  QLabel* m_pLoudnessLabel = nullptr;
-  QLabel* m_pPlatformLabel = nullptr;
   plQtPropertyGridWidget* m_pPropertyGrid = nullptr;
-  QListWidget* m_pUsedByList = nullptr;
   QTimer* m_pTimer = nullptr;
 
   plUuid m_ActiveOverrideGuid;              ///< invalid: the Default tab

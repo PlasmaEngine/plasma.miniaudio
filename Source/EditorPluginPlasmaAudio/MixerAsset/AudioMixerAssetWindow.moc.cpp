@@ -1,53 +1,36 @@
 ﻿#include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
+#include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
+#include <EditorFramework/EditorApp/EditorApp.moc.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineViews.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAssetWindow.moc.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerViews.h>
-#include <GuiFoundation/EngineUi/EngineUiControlStrip.h>
 #include <EditorPluginPlasmaAudio/Preview/AudioEnumRegistry.h>
-#include <EditorPluginPlasmaAudio/Preview/AudioPreviewService.h>
-#include <Foundation/Math/ColorScheme.h>
+#include <Foundation/IO/FileSystem/FileReader.h>
+#include <Foundation/IO/MemoryStream.h>
 #include <GuiFoundation/ActionViews/MenuBarActionMapView.moc.h>
 #include <GuiFoundation/ActionViews/ToolBarActionMapView.moc.h>
 #include <GuiFoundation/DockPanels/DocumentPanel.moc.h>
+#include <GuiFoundation/EngineUi/EngineUiControlStrip.h>
 #include <ToolsFoundation/Object/ObjectCommandAccessor.h>
 
-#include <QListWidget>
-#include <QMouseEvent>
-#include <QPainter>
-#include <QPainterPath>
-#include <QScrollArea>
 #include <QTimer>
-#include <QToolButton>
-#include <QTreeWidget>
 
 namespace
 {
-  constexpr int kStripWidth = 128;
-  constexpr int kStripGap = 8;
-  constexpr int kStripHeight = 430;
-  constexpr int kHeaderHeight = 24;
-  constexpr float kFaderMinDb = -60.0f;
-  constexpr float kFaderMaxDb = 12.0f;
+  /// How often the console asks the engine process for its meters.
+  constexpr int s_iPollMs = 50;
 
-  QColor ToQt(const plColor& c)
-  {
-    return plToQtColor(plColorGammaUB(c));
-  }
+  /// How often a dragged value is sent to the engine process at most.
+  constexpr plTime s_LiveEditInterval = plTime::MakeFromMilliseconds(40);
 
-  QColor AccentColor(const plDocument* pDocument)
-  {
-    plStringView sCategory = "Audio";
-    if (pDocument != nullptr && pDocument->GetDocumentTypeDescriptor() != nullptr && !pDocument->GetDocumentTypeDescriptor()->m_sAssetCategory.IsEmpty())
-    {
-      sCategory = pDocument->GetDocumentTypeDescriptor()->m_sAssetCategory;
-    }
-    return ToQt(plColorScheme::GetCategoryColor(sCategory, plColorScheme::CategoryColorUsage::BorderColor));
-  }
+  /// How long a status message stays in the status row.
+  constexpr plTime s_ToastDuration = plTime::MakeFromSeconds(6);
 
-  void GatherChildrenOfProperty(const plDocumentObject* pParent, const char* szProperty, plHybridArray<const plDocumentObject*, 12>& out_children)
+  template <typename ARRAY>
+  void GatherChildren(const plDocumentObject* pParent, const char* szProperty, ARRAY& out_children)
   {
     out_children.Clear();
 
@@ -57,564 +40,86 @@ namespace
     for (const plDocumentObject* pChild : pParent->GetChildren())
     {
       if (pChild->GetParentProperty().IsEqual(szProperty))
-      {
         out_children.PushBack(pChild);
-      }
     }
   }
 
-  void GatherChildrenOfProperty4(const plDocumentObject* pParent, const char* szProperty, plHybridArray<const plDocumentObject*, 4>& out_children)
+  plString GetName(const plDocumentObject* pObject)
   {
-    out_children.Clear();
+    return pObject->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
+  }
 
-    if (pParent == nullptr)
-      return;
+  /// Changes every string property (or string array entry) of the objects that equals sOld. Returns how many changed.
+  plUInt32 RenameStrings(plObjectCommandAccessor& ref_accessor, plArrayPtr<const plDocumentObject* const> objects, const char* szProperty, plStringView sOld, plStringView sNew, bool bArray = false)
+  {
+    plUInt32 uiChanged = 0;
 
-    for (const plDocumentObject* pChild : pParent->GetChildren())
+    for (const plDocumentObject* pObject : objects)
     {
-      if (pChild->GetParentProperty().IsEqual(szProperty))
+      const auto& accessor = pObject->GetTypeAccessor();
+
+      if (bArray)
       {
-        out_children.PushBack(pChild);
-      }
-    }
-  }
-
-  const char* EffectTypeName(plInt64 iType)
-  {
-    switch (iType)
-    {
-      case plAudioEffectType::LowPass:
-        return "LowPass";
-      case plAudioEffectType::HighPass:
-        return "HighPass";
-      case plAudioEffectType::Eq3:
-        return "EQ3";
-      case plAudioEffectType::Delay:
-        return "Delay";
-      case plAudioEffectType::Reverb:
-        return "Reverb";
-      case plAudioEffectType::Compressor:
-        return "Compressor";
-      case plAudioEffectType::Limiter:
-        return "Limiter";
-      default:
-        return "?";
-    }
-  }
-
-  QString ButtonRowStyle(const QColor& accent)
-  {
-    return QString(
-      "QToolButton { background: #333333; border: 1px solid #3c3c3c; border-radius: 3px; padding: 3px 10px; color: #cccccc; }"
-      "QToolButton:hover { border-color: %1; color: #ffffff; }"
-      "QToolButton:pressed { background: #2a2a2a; }")
-      .arg(accent.name());
-  }
-
-  QString PanelListStyle(const QColor& accent)
-  {
-    return QString(
-      "QListWidget, QTreeWidget { background: #202020; border: none; color: #cccccc; font-size: 11px; outline: none; }"
-      "QListWidget::item, QTreeWidget::item { padding: 3px 4px; }"
-      "QListWidget::item:selected, QTreeWidget::item:selected { background: #2d7f69; color: #ffffff; }"
-      "QListWidget::item:hover, QTreeWidget::item:hover { color: %1; }")
-      .arg(accent.name());
-  }
-
-  QString DockHeaderStyle(const QColor& accent)
-  {
-    return QString("color: %1; font-size: 10px; font-weight: bold; letter-spacing: 1px; background: #191919; padding: 5px; border-bottom: 1px solid #303030;").arg(accent.name());
-  }
-
-  void SetGuidData(QTreeWidgetItem* pItem, const plUuid& guid)
-  {
-    plStringBuilder sGuid;
-    plConversionUtils::ToString(guid, sGuid);
-    pItem->setData(0, Qt::UserRole, QVariant(QString::fromUtf8(sGuid.GetData())));
-  }
-} // namespace
-
-//////////////////////////////////////////////////////////////////////////
-// plQtAudioMixerStripsWidget
-//////////////////////////////////////////////////////////////////////////
-
-plQtAudioMixerStripsWidget::plQtAudioMixerStripsWidget(QWidget* pParent, plDocument* pDocument, const QColor& accent)
-  : QWidget(pParent)
-  , m_pDocument(pDocument)
-  , m_Accent(accent)
-{
-}
-
-const plDocumentObject* plQtAudioMixerStripsWidget::GetPropertiesObject() const
-{
-  const auto& children = m_pDocument->GetObjectManager()->GetRootObject()->GetChildren();
-  return children.IsEmpty() ? nullptr : children[0];
-}
-
-void plQtAudioMixerStripsWidget::GatherStrips(plHybridArray<const plDocumentObject*, 12>& out_buses, plHybridArray<const plDocumentObject*, 4>& out_vcas) const
-{
-  GatherChildrenOfProperty(GetPropertiesObject(), "Buses", out_buses);
-  GatherChildrenOfProperty4(GetPropertiesObject(), "VCAs", out_vcas);
-}
-
-QSize plQtAudioMixerStripsWidget::sizeHint() const
-{
-  plHybridArray<const plDocumentObject*, 12> buses;
-  plHybridArray<const plDocumentObject*, 4> vcas;
-  GatherStrips(buses, vcas);
-
-  const plUInt32 uiStrips = plMath::Max<plUInt32>(1, buses.GetCount() + vcas.GetCount());
-  return QSize(12 + uiStrips * (kStripWidth + kStripGap), kStripHeight + 16);
-}
-
-void plQtAudioMixerStripsWidget::GetLiveMeter(plUInt32 uiBusIndex, float& out_fPeak, float& out_fRms) const
-{
-  out_fPeak = 0.0f;
-  out_fRms = 0.0f;
-
-  if (uiBusIndex == plInvalidIndex)
-    return;
-
-  plAudioPreviewService::GetSingleton().GetBusMeter(uiBusIndex, out_fPeak, out_fRms);
-}
-
-float plQtAudioMixerStripsWidget::PosToDb(const QRect& faderRect, int y)
-{
-  const float fT = plMath::Clamp(static_cast<float>(y - faderRect.top()) / static_cast<float>(plMath::Max(1, faderRect.height())), 0.0f, 1.0f);
-  return kFaderMaxDb + fT * (kFaderMinDb - kFaderMaxDb);
-}
-
-int plQtAudioMixerStripsWidget::DbToPos(const QRect& faderRect, float fDb)
-{
-  const float fT = plMath::Clamp((kFaderMaxDb - fDb) / (kFaderMaxDb - kFaderMinDb), 0.0f, 1.0f);
-  return faderRect.top() + static_cast<int>(fT * faderRect.height());
-}
-
-void plQtAudioMixerStripsWidget::DrawStrip(QPainter& p, const QRect& stripRect, const plDocumentObject* pObject, plUInt32 uiBusIndex, bool bVca, bool bMaster, bool bSelected)
-{
-  const auto& accessor = pObject->GetTypeAccessor();
-
-  const QColor panelColor(32, 32, 32);
-  const QColor lineColor(60, 60, 60);
-  const QColor textColor(204, 204, 204);
-  const QColor dimColor(142, 142, 142);
-
-  const bool bAux = !bVca && accessor.GetValue("IsAux").ConvertTo<bool>();
-
-  // frame
-  p.setBrush(panelColor);
-  QPen framePen(bSelected ? m_Accent : lineColor, bSelected ? 2 : 1);
-  if (bVca)
-    framePen.setStyle(Qt::DashLine);
-  p.setPen(framePen);
-  p.drawRoundedRect(stripRect, 5, 5);
-
-  // header
-  QColor headerColor = bMaster ? m_Accent : (bVca ? QColor(160, 160, 160) : (bAux ? QColor(170, 130, 210) : QColor(127, 178, 217)));
-  {
-    QPainterPath headerPath;
-    headerPath.addRoundedRect(QRectF(stripRect.left(), stripRect.top(), stripRect.width(), kHeaderHeight), 5, 5);
-    headerPath.addRect(QRectF(stripRect.left(), stripRect.top() + kHeaderHeight - 6, stripRect.width(), 6));
-    p.fillPath(headerPath.simplified(), headerColor);
-  }
-
-  plString sName = accessor.GetValue("Name").ConvertTo<plString>();
-  if (sName.IsEmpty())
-    sName = bVca ? "VCA" : "Bus";
-
-  QFont nameFont = font();
-  nameFont.setBold(true);
-  p.setFont(nameFont);
-  p.setPen(QColor(16, 22, 20));
-
-  QString sHeader = QString::fromUtf8(sName.GetData());
-  if (bVca)
-    sHeader = QString::fromUtf8("VCA \xC2\xB7 ") + sHeader;
-  if (bAux)
-    sHeader += QString::fromUtf8(" \xE2\xA4\xBA");
-  p.drawText(QRect(stripRect.left() + 4, stripRect.top(), stripRect.width() - 8, kHeaderHeight), Qt::AlignCenter, sHeader);
-
-  QFont smallFont = font();
-  smallFont.setPointSizeF(7.5);
-
-  int y = stripRect.top() + kHeaderHeight + 6;
-
-  // inserts (buses) / controlled buses (VCAs)
-  {
-    p.setFont(smallFont);
-    p.setPen(dimColor);
-    p.drawText(QRect(stripRect.left() + 8, y, stripRect.width() - 16, 12), Qt::AlignLeft, bVca ? "CONTROLS" : "INSERTS");
-    y += 14;
-
-    plHybridArray<QString, 4> chips;
-    bool bChipsActive = false;
-
-    if (bVca)
-    {
-      // "Buses" is a string array value, not child objects
-      const plInt32 iCount = pObject->GetTypeAccessor().GetCount("Buses");
-      bChipsActive = iCount > 0;
-      for (plInt32 i = 0; i < plMath::Min<plInt32>(iCount, 3); ++i)
-      {
-        const plString sBus = pObject->GetTypeAccessor().GetValue("Buses", i).ConvertTo<plString>();
-        chips.PushBack(QString::fromUtf8(sBus.GetData()));
-      }
-      if (iCount > 3)
-        chips.PushBack(QString::asprintf("+%d more", iCount - 3));
-      if (iCount == 0)
-        chips.PushBack("- none -");
-    }
-    else
-    {
-      plHybridArray<const plDocumentObject*, 12> effects;
-      GatherChildrenOfProperty(pObject, "Effects", effects);
-      bChipsActive = !effects.IsEmpty();
-
-      for (plUInt32 i = 0; i < plMath::Min<plUInt32>(effects.GetCount(), 3); ++i)
-      {
-        const plInt64 iType = effects[i]->GetTypeAccessor().GetValue("Type").ConvertTo<plInt64>();
-        chips.PushBack(QString::fromUtf8(EffectTypeName(iType)));
-      }
-      if (effects.GetCount() > 3)
-        chips.PushBack(QString::asprintf("+%u more", effects.GetCount() - 3));
-      if (effects.IsEmpty())
-        chips.PushBack("+ effect");
-    }
-
-    for (const QString& sChip : chips)
-    {
-      const QRect chipRect(stripRect.left() + 8, y, stripRect.width() - 16, 15);
-      p.setPen(QPen(lineColor, 1));
-      p.setBrush(QColor(45, 45, 45));
-      p.drawRoundedRect(chipRect, 3, 3);
-
-      if (bChipsActive)
-      {
-        // accent bar like the mockup's active insert slots
-        p.fillRect(QRect(chipRect.left(), chipRect.top() + 2, 3, chipRect.height() - 4), m_Accent);
-      }
-
-      p.setPen(bChipsActive ? textColor : dimColor);
-      p.drawText(chipRect.adjusted(8, 0, -4, 0), Qt::AlignLeft | Qt::AlignVCenter, sChip);
-      y += 18;
-    }
-  }
-
-  // sends (buses only) / environment (aux)
-  if (!bVca)
-  {
-    y += 2;
-    p.setPen(dimColor);
-    p.drawText(QRect(stripRect.left() + 8, y, stripRect.width() - 16, 12), Qt::AlignLeft, bAux ? "ENVIRONMENT" : "SENDS");
-    y += 14;
-
-    if (bAux)
-    {
-      const plString sEnv = accessor.GetValue("Environment").ConvertTo<plString>();
-      p.setPen(sEnv.IsEmpty() ? dimColor : textColor);
-      p.drawText(QRect(stripRect.left() + 8, y, stripRect.width() - 16, 12), Qt::AlignLeft, sEnv.IsEmpty() ? "- none -" : QString::fromUtf8(sEnv.GetData()));
-      y += 14;
-    }
-    else
-    {
-      plHybridArray<const plDocumentObject*, 12> sends;
-      GatherChildrenOfProperty(pObject, "Sends", sends);
-
-      if (sends.IsEmpty())
-      {
-        p.setPen(dimColor);
-        p.drawText(QRect(stripRect.left() + 8, y, stripRect.width() - 16, 12), Qt::AlignLeft, "-");
-        y += 14;
-      }
-      else
-      {
-        for (plUInt32 i = 0; i < plMath::Min<plUInt32>(sends.GetCount(), 2); ++i)
+        for (plInt32 i = 0; i < accessor.GetCount(szProperty); ++i)
         {
-          const plString sTarget = sends[i]->GetTypeAccessor().GetValue("TargetBus").ConvertTo<plString>();
-          const double fLevel = sends[i]->GetTypeAccessor().GetValue("Level").ConvertTo<double>();
-          p.setPen(textColor);
-          p.drawText(QRect(stripRect.left() + 8, y, stripRect.width() - 16, 12), Qt::AlignLeft, QString::asprintf("%s  %.0f dB", sTarget.GetData(), fLevel));
-          y += 14;
+          if (accessor.GetValue(szProperty, i).ConvertTo<plString>().IsEqual_NoCase(sOld))
+          {
+            ref_accessor.SetValueByName(pObject, szProperty, sNew, i).IgnoreResult();
+            ++uiChanged;
+          }
         }
       }
-    }
-  }
-  else
-  {
-    y += 16;
-  }
-
-  // fader + groove + meter placeholder
-  const double fVolumeDb = accessor.GetValue("Volume").ConvertTo<double>();
-  const bool bDraggingThis = m_bDragging && pObject->GetGuid() == m_DragGuid;
-  const float fShownDb = bDraggingThis ? m_fDragValueDb : static_cast<float>(fVolumeDb);
-
-  const QRect faderRect(stripRect.left() + stripRect.width() / 2 - 20, y + 8, 12, stripRect.bottom() - y - 50);
-
-  // scale marks
-  p.setFont(smallFont);
-  p.setPen(dimColor);
-  for (float fMark : {12.0f, 0.0f, -12.0f, -36.0f, -60.0f})
-  {
-    const int iMarkY = DbToPos(faderRect, fMark);
-    p.drawLine(faderRect.left() - 12, iMarkY, faderRect.left() - 4, iMarkY);
-    p.drawText(QRect(faderRect.left() - 40, iMarkY - 6, 26, 12), Qt::AlignRight | Qt::AlignVCenter, fMark <= kFaderMinDb ? QString::fromUtf8("-\xE2\x88\x9E") : QString::asprintf("%+.0f", fMark));
-  }
-
-  // 0 dB line across the groove
-  {
-    const int iZeroY = DbToPos(faderRect, 0.0f);
-    p.setPen(QPen(QColor(80, 80, 80), 1, Qt::DotLine));
-    p.drawLine(faderRect.left() - 2, iZeroY, faderRect.right() + (bVca ? 2 : 26), iZeroY);
-  }
-
-  // groove
-  p.setPen(QPen(QColor(10, 10, 10), 1));
-  p.setBrush(QColor(18, 18, 18));
-  p.drawRoundedRect(faderRect, 5, 5);
-
-  // gain fill inside the groove up to the cap
-  {
-    const int iCapY = DbToPos(faderRect, fShownDb);
-    QColor fillColor = bMaster ? m_Accent : QColor(63, 174, 124);
-    fillColor.setAlpha(120);
-    p.setPen(Qt::NoPen);
-    p.setBrush(fillColor);
-    p.drawRoundedRect(QRect(faderRect.left() + 2, iCapY, faderRect.width() - 4, faderRect.bottom() - iCapY - 1), 3, 3);
-  }
-
-  // live meter, fed by the editor preview engine (VCAs are pure gain and have no signal)
-  if (!bVca)
-  {
-    const QRect meterRect(faderRect.right() + 14, faderRect.top(), 10, faderRect.height());
-    p.setPen(QPen(QColor(10, 10, 10), 1));
-    p.setBrush(QColor(14, 14, 14));
-    p.drawRect(meterRect);
-
-    float fPeak = 0.0f;
-    float fRms = 0.0f;
-    GetLiveMeter(uiBusIndex, fPeak, fRms);
-
-    const QRect inner = meterRect.adjusted(1, 1, -1, -1);
-
-    // RMS body with the classic green/amber/red scale, plus a peak line
-    if (fRms > 0.0001f)
-    {
-      const int iHeight = static_cast<int>(inner.height() * plMath::Clamp(fRms, 0.0f, 1.0f));
-
-      QLinearGradient gradient(inner.bottomLeft(), inner.topLeft());
-      gradient.setColorAt(0.0, QColor(63, 174, 124));
-      gradient.setColorAt(0.7, QColor(63, 174, 124));
-      gradient.setColorAt(0.88, QColor(217, 195, 74));
-      gradient.setColorAt(1.0, QColor(217, 93, 93));
-
-      p.fillRect(QRect(inner.left(), inner.bottom() - iHeight, inner.width(), iHeight), gradient);
-    }
-
-    if (fPeak > 0.0001f)
-    {
-      const int iPeakY = inner.bottom() - static_cast<int>(inner.height() * plMath::Clamp(fPeak, 0.0f, 1.0f));
-      p.setPen(QPen(fPeak >= 0.99f ? QColor(255, 120, 120) : QColor(220, 220, 220), 1));
-      p.drawLine(inner.left(), iPeakY, inner.right(), iPeakY);
-    }
-
-    // idle tick marks so the meter still reads as a meter when silent
-    if (fRms <= 0.0001f)
-    {
-      p.setPen(QColor(40, 40, 40));
-      for (int my = meterRect.top() + 4; my < meterRect.bottom() - 2; my += 5)
+      else if (accessor.GetValue(szProperty).ConvertTo<plString>().IsEqual_NoCase(sOld))
       {
-        p.drawLine(meterRect.left() + 2, my, meterRect.right() - 2, my);
+        ref_accessor.SetValueByName(pObject, szProperty, sNew).IgnoreResult();
+        ++uiChanged;
       }
     }
+
+    return uiChanged;
   }
 
-  // cap
-  const int iCapY = DbToPos(faderRect, fShownDb);
-  const QRect capRect(faderRect.left() - 6, iCapY - 7, faderRect.width() + 12, 14);
-
-  QLinearGradient capGradient(capRect.topLeft(), capRect.bottomLeft());
-  if (bDraggingThis)
+  /// Points every reference to the bus sOld in the mixer at sNew: parents, sends, sidechain keys, VCAs and snapshot
+  /// overrides. Returns how many references changed.
+  plUInt32 RenameBusReferences(plObjectCommandAccessor& ref_accessor, const plDocumentObject* pProps, plStringView sOld, plStringView sNew)
   {
-    capGradient.setColorAt(0.0, m_Accent.lighter(125));
-    capGradient.setColorAt(1.0, m_Accent.darker(120));
-  }
-  else
-  {
-    capGradient.setColorAt(0.0, QColor(229, 229, 229));
-    capGradient.setColorAt(0.45, QColor(154, 154, 154));
-    capGradient.setColorAt(0.55, QColor(120, 120, 120));
-    capGradient.setColorAt(1.0, QColor(154, 154, 154));
-  }
+    plHybridArray<const plDocumentObject*, 12> buses, vcas, snapshots;
+    GatherChildren(pProps, "Buses", buses);
+    GatherChildren(pProps, "VCAs", vcas);
+    GatherChildren(pProps, "Snapshots", snapshots);
 
-  p.setPen(QPen(QColor(0, 0, 0), 1));
-  p.setBrush(capGradient);
-  p.drawRoundedRect(capRect, 3, 3);
-
-  // center line on the cap
-  p.setPen(QPen(QColor(40, 40, 40), 1));
-  p.drawLine(capRect.left() + 3, capRect.center().y(), capRect.right() - 3, capRect.center().y());
-
-  // dB label
-  p.setFont(nameFont);
-  p.setPen(textColor);
-  p.drawText(QRect(stripRect.left(), stripRect.bottom() - 38, stripRect.width(), 14), Qt::AlignCenter, fShownDb <= kFaderMinDb ? QString::fromUtf8("-\xE2\x88\x9E dB") : QString::asprintf("%+.1f dB", fShownDb));
-
-  // routing label
-  p.setFont(smallFont);
-  p.setPen(dimColor);
-  QString sRouting;
-  if (bVca)
-  {
-    sRouting = "options-menu group";
-  }
-  else if (bMaster)
-  {
-    sRouting = QString::fromUtf8("\xE2\x86\x92 output device");
-  }
-  else
-  {
-    const plString sParent = accessor.GetValue("Parent").ConvertTo<plString>();
-    sRouting = QString::fromUtf8("\xE2\x86\x92 ") + (sParent.IsEmpty() ? QString("Master") : QString::fromUtf8(sParent.GetData()));
-  }
-  p.drawText(QRect(stripRect.left(), stripRect.bottom() - 20, stripRect.width(), 12), Qt::AlignCenter, sRouting);
-
-  auto& hit = m_HitRects.ExpandAndGetRef();
-  hit.m_Guid = pObject->GetGuid();
-  hit.m_StripRect = stripRect;
-  hit.m_FaderRect = faderRect.adjusted(-10, -10, 26, 10);
-  hit.m_FaderTrack = faderRect;
-}
-
-void plQtAudioMixerStripsWidget::paintEvent(QPaintEvent* pEvent)
-{
-  PL_IGNORE_UNUSED(pEvent);
-
-  QPainter p(this);
-  p.setRenderHint(QPainter::Antialiasing, true);
-
-  p.fillRect(rect(), QColor(30, 30, 30));
-
-  m_HitRects.Clear();
-
-  plHybridArray<const plDocumentObject*, 12> buses;
-  plHybridArray<const plDocumentObject*, 4> vcas;
-  GatherStrips(buses, vcas);
-
-  if (buses.IsEmpty() && vcas.IsEmpty())
-  {
-    p.setPen(QColor(142, 142, 142));
-    p.drawText(rect(), Qt::AlignCenter, "No buses yet.\nUse '+ Bus' to create the mixer - the first bus is the Master bus.");
-    return;
-  }
-
-  const plUuid selectedGuid = (m_pDocument->GetSelectionManager()->GetCurrentObject() != nullptr)
-                                ? m_pDocument->GetSelectionManager()->GetCurrentObject()->GetGuid()
-                                : plUuid();
-
-  int x = 8;
-
-  for (plUInt32 i = 0; i < buses.GetCount(); ++i)
-  {
-    const QRect stripRect(x, 8, kStripWidth, kStripHeight);
-    DrawStrip(p, stripRect, buses[i], i, false, i == 0, buses[i]->GetGuid() == selectedGuid);
-    x += kStripWidth + kStripGap;
-  }
-
-  if (!vcas.IsEmpty())
-  {
-    // subtle divider between buses and VCAs
-    p.setPen(QPen(QColor(60, 60, 60), 1, Qt::DashLine));
-    p.drawLine(x - kStripGap / 2, 12, x - kStripGap / 2, kStripHeight);
-  }
-
-  for (plUInt32 i = 0; i < vcas.GetCount(); ++i)
-  {
-    const QRect stripRect(x, 8, kStripWidth, kStripHeight);
-    DrawStrip(p, stripRect, vcas[i], plInvalidIndex, true, false, vcas[i]->GetGuid() == selectedGuid);
-    x += kStripWidth + kStripGap;
-  }
-}
-
-void plQtAudioMixerStripsWidget::mousePressEvent(QMouseEvent* pEvent)
-{
-  if (pEvent->button() == Qt::LeftButton)
-  {
-    for (const auto& hit : m_HitRects)
+    plHybridArray<const plDocumentObject*, 16> sends, effects, overrides;
+    for (const plDocumentObject* pBus : buses)
     {
-      if (!hit.m_StripRect.contains(pEvent->pos()))
-        continue;
-
-      if (const plDocumentObject* pObject = m_pDocument->GetObjectManager()->GetObject(hit.m_Guid))
-      {
-        m_pDocument->GetSelectionManager()->SetSelection(pObject);
-      }
-
-      if (hit.m_FaderRect.contains(pEvent->pos()))
-      {
-        m_bDragging = true;
-        m_DragGuid = hit.m_Guid;
-        m_DragFaderTrack = hit.m_FaderTrack;
-        m_fDragValueDb = PosToDb(m_DragFaderTrack, pEvent->pos().y());
-      }
-
-      update();
-      return;
-    }
-  }
-
-  QWidget::mousePressEvent(pEvent);
-}
-
-void plQtAudioMixerStripsWidget::mouseMoveEvent(QMouseEvent* pEvent)
-{
-  if (m_bDragging)
-  {
-    m_fDragValueDb = PosToDb(m_DragFaderTrack, pEvent->pos().y());
-    update();
-    return;
-  }
-
-  QWidget::mouseMoveEvent(pEvent);
-}
-
-void plQtAudioMixerStripsWidget::mouseReleaseEvent(QMouseEvent* pEvent)
-{
-  if (m_bDragging && pEvent->button() == Qt::LeftButton)
-  {
-    m_bDragging = false;
-
-    if (const plDocumentObject* pObject = m_pDocument->GetObjectManager()->GetObject(m_DragGuid))
-    {
-      // snap near common values
-      float fValue = m_fDragValueDb;
-      if (plMath::Abs(fValue) < 0.75f)
-        fValue = 0.0f;
-      fValue = plMath::RoundToMultiple(fValue, 0.5f);
-
-      plObjectCommandAccessor accessor(m_pDocument->GetCommandHistory());
-      accessor.StartTransaction("Set Volume");
-      accessor.SetValueByName(pObject, "Volume", fValue).IgnoreResult();
-      accessor.FinishTransaction();
+      plHybridArray<const plDocumentObject*, 4> children;
+      GatherChildren(pBus, "Sends", children);
+      sends.PushBackRange(children);
+      GatherChildren(pBus, "Effects", children);
+      effects.PushBackRange(children);
     }
 
-    update();
-    return;
+    for (const plDocumentObject* pSnapshot : snapshots)
+    {
+      plHybridArray<const plDocumentObject*, 8> children;
+      GatherChildren(pSnapshot, "Overrides", children);
+      overrides.PushBackRange(children);
+    }
+
+    plUInt32 uiChanged = 0;
+    uiChanged += RenameStrings(ref_accessor, buses, "Parent", sOld, sNew);
+    uiChanged += RenameStrings(ref_accessor, sends, "TargetBus", sOld, sNew);
+    uiChanged += RenameStrings(ref_accessor, effects, "SidechainBus", sOld, sNew);
+    uiChanged += RenameStrings(ref_accessor, vcas, "Buses", sOld, sNew, true);
+    uiChanged += RenameStrings(ref_accessor, overrides, "Bus", sOld, sNew);
+    uiChanged += RenameStrings(ref_accessor, overrides, "Send", sOld, sNew);
+    return uiChanged;
   }
-
-  QWidget::mouseReleaseEvent(pEvent);
-}
-
-//////////////////////////////////////////////////////////////////////////
-// plAudioMixerAssetDocumentWindow
-//////////////////////////////////////////////////////////////////////////
+} // namespace
 
 plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDocument)
   : plQtDocumentWindow(pDocument)
 {
   m_pAssetDoc = static_cast<plAudioMixerAssetDocument*>(pDocument);
-  m_Accent = AccentColor(pDocument);
-  m_bEngineViews = plAudioEngineUi::UseEngineViews();
 
   // Menu Bar
   {
@@ -638,48 +143,58 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
     addToolBar(pToolBar);
   }
 
-  if (m_bEngineViews)
-    CreateEngineViews();
-  else
-    CreateQtViews();
-
+  CreateViews();
   CreatePropertyDock();
 
-  // the snapshot list is the right column's first tab
-  if (m_pSnapshotPanel != nullptr)
-    m_pSnapshotPanel->setAsCurrentTab();
+  // the insert editor is the right column's first tab
+  if (m_pInsertPanel != nullptr)
+    m_pInsertPanel->setAsCurrentTab();
 
   pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
 
   GetDocument()->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::PropertyEventHandler, this));
   GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::StructureEventHandler, this));
   GetDocument()->GetSelectionManager()->m_Events.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::SelectionEventHandler, this));
+  GetDocument()->m_EventsOne.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::DocumentEventHandler, this));
+  m_ConsoleSubscription = m_pAssetDoc->m_ConsoleEvents.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnConsoleStatus, this));
 
-  // redraw the strips while anything is auditioning, so the meters animate
-  m_pMeterTimer = new QTimer(this);
-  m_pMeterTimer->setInterval(50);
-  connect(m_pMeterTimer, &QTimer::timeout, this, [this]()
+  // the engine process answers every request with its meters; a dragged value waits here for its turn
+  m_pPollTimer = new QTimer(this);
+  m_pPollTimer->setInterval(s_iPollMs);
+  connect(m_pPollTimer, &QTimer::timeout, this, [this]()
     {
-      if (!plAudioPreviewService::GetSingleton().HasMixer())
-        return;
+      if (m_bApplyPending && plTime::Now() - m_LastApply >= s_LiveEditInterval)
+        ApplyToEngine(true);
+      else
+        SendConsoleCommand(plAudioMixerConsoleCommand::Poll);
 
-      if (m_pStrips != nullptr)
-        m_pStrips->update();
-
-      if (m_pStripsView != nullptr && m_bLiveMeters)
-        m_pStripsView->UpdateMeters(); });
-  m_pMeterTimer->start();
+      if (!m_sToast.IsEmpty() && plTime::Now() - m_ToastTime > s_ToastDuration)
+      {
+        m_sToast.Clear();
+        UpdateStatusRow();
+      } });
+  m_pPollTimer->start();
 
   FinishWindowCreation();
 
+  TakeBaseline();
   QueueRefresh();
 }
 
-void plAudioMixerAssetDocumentWindow::CreateEngineViews()
+plAudioMixerAssetDocumentWindow::~plAudioMixerAssetDocumentWindow()
+{
+  m_pAssetDoc->m_ConsoleEvents.RemoveEventHandler(m_ConsoleSubscription);
+  GetDocument()->m_EventsOne.RemoveEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::DocumentEventHandler, this));
+  GetDocument()->GetObjectManager()->m_PropertyEvents.RemoveEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::PropertyEventHandler, this));
+  GetDocument()->GetObjectManager()->m_StructureEvents.RemoveEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::StructureEventHandler, this));
+  GetDocument()->GetSelectionManager()->m_Events.RemoveEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::SelectionEventHandler, this));
+}
+
+void plAudioMixerAssetDocumentWindow::CreateViews()
 {
   using plEditorUi::Icon;
 
-  // Central: add buttons and the live toggle, the strips, the status row
+  // Central: the add buttons, the source and the validation, the strips, the snapshot rail, the status row
   {
     QWidget* pCentralWidget = new QWidget(this);
     QVBoxLayout* pCentralLayout = new QVBoxLayout(pCentralWidget);
@@ -694,8 +209,13 @@ void plAudioMixerAssetDocumentWindow::CreateEngineViews()
     m_uiAddSnapshot = m_pToolStrip->AddIconTextButton(Icon::Add, "Snapshot", "Adds a blendable mixer snapshot");
     m_uiRemoveSelected = m_pToolStrip->AddIconTextButton(Icon::Remove, "Remove Selected", "Removes the selected bus / VCA / snapshot");
     m_pToolStrip->AddSpacer();
-    m_uiLiveMeters = m_pToolStrip->AddIconButton(Icon::Volume, "Preview the mixer in the editor (meters)", true);
-    m_pToolStrip->SetChecked(m_uiLiveMeters, m_bLiveMeters);
+    m_pToolStrip->AddLabel("Source");
+    m_uiSourcePreview = m_pToolStrip->AddIconTextButton(Icon::Play, "Preview", "Loads this mixer into the editor's engine process, so event auditions and the test signal play through it", true);
+    m_uiSourceEngine = m_pToolStrip->AddIconTextButton(Icon::Render, "Engine process", "Shows the mixer the engine process plays (a running scene's); edits apply live when that is this mixer", true);
+    m_uiTestSignal = m_pToolStrip->AddIconTextButton(Icon::Volume, "Test signal", "Plays noise in bursts into every bus without child buses, each in its own rhythm", true);
+    m_pToolStrip->AddSeparator();
+    m_uiValidation = m_pToolStrip->AddChip("Validation: 0 issues", plAudioEngineUi::AudioColor(), "Routing, sidechain and reference checks; a mixer with issues does not transform and is not applied");
+    m_pToolStrip->SetChecked(m_uiSourcePreview, true);
 
     m_pToolStrip->m_OnChanged = [this](plUInt32 uiControl, plInt32 iValue)
     {
@@ -709,19 +229,36 @@ void plAudioMixerAssetDocumentWindow::CreateEngineViews()
         OnAddSnapshot();
       else if (uiControl == m_uiRemoveSelected)
         OnRemoveSelected();
-      else if (uiControl == m_uiLiveMeters)
+      else if (uiControl == m_uiSourcePreview)
+        SetSource(Source::Preview);
+      else if (uiControl == m_uiSourceEngine)
+        SetSource(Source::EngineProcess);
+      else if (uiControl == m_uiTestSignal)
       {
-        m_bLiveMeters = iValue != 0;
-        m_pStripsView->SetLiveMeters(m_bLiveMeters);
-        QueueRefresh();
+        m_bTestSignal = iValue != 0;
+        SendConsoleCommand(plAudioMixerConsoleCommand::SetTestSignal, {}, m_bTestSignal ? 1.0f : 0.0f);
+        ShowToast(m_bTestSignal ? "Test signal: noise bursts play into the buses without child buses" : "Test signal off");
       }
     };
 
     pCentralLayout->addWidget(m_pToolStrip);
 
     plQtEngineUiContentWidget* pStripsWidget = nullptr;
-    m_pStripsView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerStrips>(pCentralWidget, "AudioMixerStrips", &pStripsWidget, GetDocument());
+    m_pStripsView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerStrips>(pCentralWidget, "AudioMixerStrips", &pStripsWidget, GetDocument(), &m_State);
     pCentralLayout->addWidget(pStripsWidget, 1);
+
+    m_pStripsView->m_OnLiveEdit = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnLiveEdit, this);
+    m_pStripsView->m_OnMute = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnMute, this);
+    m_pStripsView->m_OnSolo = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnSolo, this);
+    m_pStripsView->m_OnSelectInsert = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnSelectInsert, this);
+
+    plQtEngineUiContentWidget* pRailWidget = nullptr;
+    m_pRailView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerSnapshotRail>(pCentralWidget, "AudioMixerSnapshotRail", &pRailWidget, GetDocument(), &m_State);
+    pRailWidget->SetFixedLogicalHeight(plEditorUiAudioMixerSnapshotRail::GetHeight());
+    pCentralLayout->addWidget(pRailWidget);
+
+    m_pRailView->m_OnIntensity = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnSnapshotIntensity, this);
+    m_pRailView->m_OnCapture = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnCapture, this);
 
     plQtEngineUiContentWidget* pStatusWidget = nullptr;
     m_pStatusView = plQtEngineUiContentWidget::Create<plEditorUiAudioStatusRow>(pCentralWidget, "AudioMixerStatus", &pStatusWidget);
@@ -748,177 +285,44 @@ void plAudioMixerAssetDocumentWindow::CreateEngineViews()
     m_pDockManager->addDockWidget(ads::LeftDockWidgetArea, pRoutingPanel);
   }
 
-  // Right dock 1: snapshots
+  // Right dock 1: the insert editor
   {
-    plQtDocumentPanel* pSnapshotPanel = new plQtDocumentPanel(this, GetDocument());
-    pSnapshotPanel->setObjectName("AudioMixerSnapshotsDockWidget");
-    pSnapshotPanel->setWindowTitle("Snapshots");
-    pSnapshotPanel->show();
-    m_pSnapshotPanel = pSnapshotPanel;
+    m_pInsertPanel = new plQtDocumentPanel(this, GetDocument());
+    m_pInsertPanel->setObjectName("AudioMixerInsertDockWidget");
+    m_pInsertPanel->setWindowTitle("Insert");
+    m_pInsertPanel->show();
 
-    plQtEngineUiContentWidget* pSnapshotsWidget = nullptr;
-    m_pSnapshotsView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerSnapshots>(pSnapshotPanel, "AudioMixerSnapshots", &pSnapshotsWidget, GetDocument());
-    pSnapshotPanel->setWidget(pSnapshotsWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pSnapshotPanel);
+    plQtEngineUiContentWidget* pInsertWidget = nullptr;
+    m_pInsertView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerInsertEditor>(m_pInsertPanel, "AudioMixerInsert", &pInsertWidget, GetDocument(), &m_State);
+    m_pInsertPanel->setWidget(pInsertWidget, ads::CDockWidget::ForceNoScrollArea);
+    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, m_pInsertPanel);
+
+    m_pInsertView->m_OnLiveEdit = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnLiveEdit, this);
+    m_pInsertView->m_OnRename = plMakeDelegate(&plAudioMixerAssetDocumentWindow::RenameBus, this);
   }
-}
-
-void plAudioMixerAssetDocumentWindow::CreateQtViews()
-{
-  // Central: add-button row + strips + status bar
-  {
-    QWidget* pCentralWidget = new QWidget(this);
-    QVBoxLayout* pCentralLayout = new QVBoxLayout(pCentralWidget);
-    pCentralLayout->setContentsMargins(0, 0, 0, 0);
-    pCentralLayout->setSpacing(0);
-
-    {
-      QWidget* pButtonRow = new QWidget(pCentralWidget);
-      pButtonRow->setStyleSheet(ButtonRowStyle(m_Accent));
-
-      QHBoxLayout* pButtonLayout = new QHBoxLayout(pButtonRow);
-      pButtonLayout->setContentsMargins(6, 5, 6, 5);
-      pButtonLayout->setSpacing(6);
-
-      auto addButton = [&](const char* szText, const char* szToolTip, std::function<void()> func)
-      {
-        QToolButton* pButton = new QToolButton(pButtonRow);
-        pButton->setText(QString::fromUtf8(szText));
-        pButton->setToolTip(QString::fromUtf8(szToolTip));
-        connect(pButton, &QToolButton::clicked, this, [func]()
-          { func(); });
-        pButtonLayout->addWidget(pButton);
-      };
-
-      addButton("+ Bus", "Adds a mixer bus (the first bus is the Master bus)", [this]()
-        { OnAddBus(false); });
-      addButton("+ Aux Bus", "Adds an aux/return bus (reverb; set its Environment name to feed it from environment components)", [this]()
-        { OnAddBus(true); });
-      addButton("+ VCA", "Adds a VCA (options-menu volume group over a set of buses)", [this]()
-        { OnAddVca(); });
-      addButton("+ Snapshot", "Adds a blendable mixer snapshot", [this]()
-        { OnAddSnapshot(); });
-      pButtonLayout->addSpacing(18);
-      addButton("Remove Selected", "Removes the selected bus / VCA / snapshot", [this]()
-        { OnRemoveSelected(); });
-
-      pButtonLayout->addStretch();
-
-      pCentralLayout->addWidget(pButtonRow);
-    }
-
-    QScrollArea* pScroll = new QScrollArea(pCentralWidget);
-    pScroll->setWidgetResizable(true);
-    pScroll->setFrameShape(QFrame::NoFrame);
-
-    m_pStrips = new plQtAudioMixerStripsWidget(pScroll, GetDocument(), m_Accent);
-    pScroll->setWidget(m_pStrips);
-    pCentralLayout->addWidget(pScroll);
-
-    // profiler-style status bar
-    {
-      m_pStatusLabel = new QLabel(pCentralWidget);
-      m_pStatusLabel->setStyleSheet("color: #8e8e8e; font-size: 10px; background: #181818; padding: 4px 10px; border-top: 1px solid #000000;");
-      pCentralLayout->addWidget(m_pStatusLabel);
-    }
-
-    plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, GetDocument());
-    pCentral->setObjectName("AudioMixerConsoleDockWidget");
-    pCentral->setWindowTitle("Mixer Console");
-    pCentral->setWidget(pCentralWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->setCentralWidget(pCentral);
-  }
-
-  // Left dock: routing tree
-  {
-    plQtDocumentPanel* pRoutingPanel = new plQtDocumentPanel(this, GetDocument());
-    pRoutingPanel->setObjectName("AudioMixerRoutingDockWidget");
-    pRoutingPanel->setWindowTitle("Routing");
-    pRoutingPanel->show();
-
-    QWidget* pWidget = new QWidget();
-    pWidget->setObjectName("Group");
-    QVBoxLayout* pLayout = new QVBoxLayout(pWidget);
-    pLayout->setContentsMargins(0, 0, 0, 0);
-    pLayout->setSpacing(0);
-
-    QLabel* pHeader = new QLabel("  ROUTING", pWidget);
-    pHeader->setStyleSheet(DockHeaderStyle(m_Accent));
-    pLayout->addWidget(pHeader);
-
-    m_pRoutingTree = new QTreeWidget(pWidget);
-    m_pRoutingTree->setHeaderHidden(true);
-    m_pRoutingTree->setStyleSheet(PanelListStyle(m_Accent));
-    m_pRoutingTree->setIndentation(14);
-    connect(m_pRoutingTree, &QTreeWidget::itemClicked, this, &plAudioMixerAssetDocumentWindow::OnRoutingItemClicked);
-    pLayout->addWidget(m_pRoutingTree);
-
-    pRoutingPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->addDockWidget(ads::LeftDockWidgetArea, pRoutingPanel);
-  }
-
-  // Right dock 1: snapshots
-  {
-    plQtDocumentPanel* pSnapshotPanel = new plQtDocumentPanel(this, GetDocument());
-    pSnapshotPanel->setObjectName("AudioMixerSnapshotsDockWidget");
-    pSnapshotPanel->setWindowTitle("Snapshots");
-    pSnapshotPanel->show();
-
-    QWidget* pWidget = new QWidget();
-    pWidget->setObjectName("Group");
-    QVBoxLayout* pLayout = new QVBoxLayout(pWidget);
-    pLayout->setContentsMargins(0, 0, 0, 0);
-    pLayout->setSpacing(0);
-
-    QLabel* pHeader = new QLabel("  SNAPSHOTS", pWidget);
-    pHeader->setStyleSheet(DockHeaderStyle(m_Accent));
-    pLayout->addWidget(pHeader);
-
-    m_pSnapshotList = new QListWidget(pWidget);
-    m_pSnapshotList->setFrameShape(QFrame::NoFrame);
-    m_pSnapshotList->setStyleSheet(PanelListStyle(m_Accent));
-    connect(m_pSnapshotList, &QListWidget::itemClicked, this, &plAudioMixerAssetDocumentWindow::OnSnapshotItemClicked);
-    pLayout->addWidget(m_pSnapshotList);
-
-    pSnapshotPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pSnapshotPanel);
-  }
-
 }
 
 void plAudioMixerAssetDocumentWindow::CreatePropertyDock()
 {
   // Right dock 2: properties of the current selection
-  {
-    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, GetDocument());
-    pPropertyPanel->setObjectName("AudioMixerAssetDockWidget");
-    pPropertyPanel->setWindowTitle("Properties");
-    pPropertyPanel->show();
+  plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, GetDocument());
+  pPropertyPanel->setObjectName("AudioMixerAssetDockWidget");
+  pPropertyPanel->setWindowTitle("Properties");
+  pPropertyPanel->show();
 
-    plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, GetDocument());
+  plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, GetDocument());
 
-    QWidget* pWidget = new QWidget();
-    pWidget->setObjectName("Group");
-    pWidget->setLayout(new QVBoxLayout());
-    pWidget->setContentsMargins(0, 0, 0, 0);
-    pWidget->layout()->setContentsMargins(0, 0, 0, 0);
-    pWidget->layout()->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
-    pWidget->layout()->addWidget(pPropertyGrid);
+  QWidget* pWidget = new QWidget();
+  pWidget->setObjectName("Group");
+  pWidget->setLayout(new QVBoxLayout());
+  pWidget->setContentsMargins(0, 0, 0, 0);
+  pWidget->layout()->setContentsMargins(0, 0, 0, 0);
+  pWidget->layout()->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
+  pWidget->layout()->addWidget(pPropertyGrid);
 
-    pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
+  pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
 
-    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
-  }
-}
-
-plAudioMixerAssetDocumentWindow::~plAudioMixerAssetDocumentWindow()
-{
-  // the preview graph mirrors this document, so it must not outlive the window
-  plAudioPreviewService::GetSingleton().ClearMixer();
-
-  GetDocument()->GetObjectManager()->m_PropertyEvents.RemoveEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::PropertyEventHandler, this));
-  GetDocument()->GetObjectManager()->m_StructureEvents.RemoveEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::StructureEventHandler, this));
-  GetDocument()->GetSelectionManager()->m_Events.RemoveEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::SelectionEventHandler, this));
+  m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
 }
 
 const plDocumentObject* plAudioMixerAssetDocumentWindow::GetPropertiesObject() const
@@ -929,7 +333,19 @@ const plDocumentObject* plAudioMixerAssetDocumentWindow::GetPropertiesObject() c
 
 void plAudioMixerAssetDocumentWindow::PropertyEventHandler(const plDocumentObjectPropertyEvent& e)
 {
-  PL_IGNORE_UNUSED(e);
+  // a bus renamed in the property grid: its references follow once the rename's step is done
+  if (e.m_sProperty == "Name" && e.m_pObject->GetTypeAccessor().GetType() == plGetStaticRTTI<plAudioMixerBus>() && !m_bUpdatingReferences && !GetDocument()->GetCommandHistory()->IsInUndoRedo())
+  {
+    const plString sOld = e.m_OldValue.ConvertTo<plString>();
+    const plString sNew = e.m_NewValue.ConvertTo<plString>();
+
+    if (!sOld.IsEmpty() && !sNew.IsEmpty() && !sOld.IsEqual_NoCase(sNew))
+    {
+      m_sPendingRenameFrom = sOld;
+      m_sPendingRenameTo = sNew;
+    }
+  }
+
   QueueRefresh();
 }
 
@@ -942,7 +358,31 @@ void plAudioMixerAssetDocumentWindow::StructureEventHandler(const plDocumentObje
 void plAudioMixerAssetDocumentWindow::SelectionEventHandler(const plSelectionManagerEvent& e)
 {
   PL_IGNORE_UNUSED(e);
+
+  // selecting a bus edits the bus in the insert panel; an insert stays selected while its bus is
+  const plDocumentObject* pSelected = GetDocument()->GetSelectionManager()->GetCurrentObject();
+  if (pSelected != nullptr && pSelected->GetTypeAccessor().GetType() == plGetStaticRTTI<plAudioMixerBus>())
+  {
+    if (m_State.m_SelectedBus != pSelected->GetGuid())
+    {
+      m_State.m_SelectedBus = pSelected->GetGuid();
+      m_State.m_iSelectedEffect = -1;
+    }
+  }
+  else
+  {
+    m_State.m_SelectedBus = plUuid();
+    m_State.m_iSelectedEffect = -1;
+  }
+
   QueueRefresh();
+}
+
+void plAudioMixerAssetDocumentWindow::DocumentEventHandler(const plDocumentEvent& e)
+{
+  // the saved mix is what Capture compares against
+  if (e.m_Type == plDocumentEvent::Type::DocumentSaved)
+    TakeBaseline();
 }
 
 void plAudioMixerAssetDocumentWindow::QueueRefresh()
@@ -956,261 +396,594 @@ void plAudioMixerAssetDocumentWindow::QueueRefresh()
     {
       m_bRefreshQueued = false;
 
-      if (m_bEngineViews)
+      if (!m_sPendingRenameFrom.IsEmpty())
       {
-        m_pStripsView->Refresh();
-        m_pRoutingView->Refresh();
-        m_pSnapshotsView->Refresh();
+        const plString sFrom = m_sPendingRenameFrom;
+        const plString sTo = m_sPendingRenameTo;
+        m_sPendingRenameFrom.Clear();
+        m_sPendingRenameTo.Clear();
+        UpdateReferencesAfterRename(sFrom, sTo);
       }
+
+      RebuildDesc();
+      UpdateConsoleState();
+
+      m_pStripsView->Refresh();
+      m_pRailView->Refresh();
+      m_pRoutingView->Refresh();
+      m_pInsertView->Refresh();
+
+      // the engine process hears every edit right away
+      ApplyToEngine(true);
+
+      // offer these names as dropdown choices on the audio components
+      if (m_bDescValid)
+        plAudioEnumRegistry::RegisterMixerNames(m_Desc);
+
+      const plUInt32 uiIssues = m_State.m_Issues.GetCount();
+      plStringBuilder sValidation;
+      if (uiIssues == 0)
+        sValidation = "Validation: 0 issues";
       else
-      {
-        if (m_pStrips != nullptr)
-        {
-          m_pStrips->updateGeometry();
-          m_pStrips->update();
-        }
+        sValidation.SetFormat("Validation: {} {}", uiIssues, uiIssues == 1 ? "error" : "errors");
+      m_pToolStrip->SetText(m_uiValidation, sValidation);
+      m_pToolStrip->SetColor(m_uiValidation, uiIssues == 0 ? plAudioEngineUi::AudioColor() : plEditorUi::Danger());
 
-        RebuildSnapshotList();
-        RebuildRoutingTree();
-      }
-
-      // keep the preview graph in step with edits, so meters and audible bus volumes match the asset
-      PushMixerToPreview();
-
-      plHybridArray<const plDocumentObject*, 12> buses, snapshots;
-      plHybridArray<const plDocumentObject*, 4> vcas;
-      GatherChildrenOfProperty(GetPropertiesObject(), "Buses", buses);
-      GatherChildrenOfProperty4(GetPropertiesObject(), "VCAs", vcas);
-      GatherChildrenOfProperty(GetPropertiesObject(), "Snapshots", snapshots);
-
-      plUInt32 uiEffects = 0;
-      plUInt32 uiAux = 0;
-      for (const plDocumentObject* pBus : buses)
-      {
-        plHybridArray<const plDocumentObject*, 12> effects;
-        GatherChildrenOfProperty(pBus, "Effects", effects);
-        uiEffects += effects.GetCount();
-        if (pBus->GetTypeAccessor().GetValue("IsAux").ConvertTo<bool>())
-          ++uiAux;
-      }
-
-      if (m_pStatusView != nullptr)
-      {
-        plStringBuilder sBuses, sAux, sVcas, sSnapshots, sEffects;
-        sBuses.SetFormat("{}", buses.GetCount());
-        sAux.SetFormat("({} aux)", uiAux);
-        sVcas.SetFormat("{}", vcas.GetCount());
-        sSnapshots.SetFormat("{}", snapshots.GetCount());
-        sEffects.SetFormat("{}", uiEffects);
-
-        const plEditorUiAudioStatusRow::Part parts[] = {{sBuses, "buses"}, {sAux, ""}, {sVcas, "VCAs"}, {sSnapshots, "snapshots"}, {sEffects, "insert effects"}};
-        m_pStatusView->SetParts(parts);
-        m_pStatusView->SetRight(m_bLiveMeters ? "backend: MiniAudio \xC2\xB7 preview meters" : "backend: MiniAudio \xC2\xB7 live meters need a running engine");
-      }
-
-      if (m_pStatusLabel != nullptr)
-      {
-        m_pStatusLabel->setText(QString::asprintf("%u buses (%u aux) \xC2\xB7 %u VCAs \xC2\xB7 %u snapshots \xC2\xB7 %u insert effects \xC2\xB7 backend: MiniAudio \xC2\xB7 live meters need a running engine",
-          buses.GetCount(), uiAux, vcas.GetCount(), snapshots.GetCount(), uiEffects));
-      } });
+      UpdateStatusRow(); });
 }
 
-void plAudioMixerAssetDocumentWindow::PushMixerToPreview()
+void plAudioMixerAssetDocumentWindow::RebuildDesc()
 {
-  const plAudioMixerAssetProperties* pProps = m_pAssetDoc != nullptr ? m_pAssetDoc->GetProperties() : nullptr;
-  if (pProps == nullptr)
-    return;
+  m_State.m_Issues.Clear();
+  m_bDescValid = plAudioMixerAssetProperties::BuildRuntimeDesc(*m_pAssetDoc->GetProperties(), m_Desc, &m_State.m_Issues).Succeeded();
 
-  plAudioMixerDesc desc;
-
-  // an invalid mixer (dangling bus names) simply is not previewed
-  if (plAudioMixerAssetProperties::BuildRuntimeDesc(*pProps, desc).Failed())
-    return;
-
-  plAudioPreviewService::GetSingleton().SetMixer(desc);
-
-  // offer these names as dropdown choices on the audio components
-  plAudioEnumRegistry::RegisterMixerNames(desc);
+  // a value dragged before this edit is part of the document now
+  m_LiveEdit = plAudioMixerLiveEdit();
 }
 
-void plAudioMixerAssetDocumentWindow::RebuildRoutingTree()
+void plAudioMixerAssetDocumentWindow::ApplyToEngine(bool bForce)
 {
-  if (m_pRoutingTree == nullptr)
+  if (!m_bDescValid)
+  {
+    // the engine process keeps the last valid mixer; the banner says why
+    SendConsoleCommand(plAudioMixerConsoleCommand::Poll);
     return;
+  }
 
-  m_pRoutingTree->clear();
-
-  const plDocumentObject* pProps = GetPropertiesObject();
-
-  plHybridArray<const plDocumentObject*, 12> buses, snapshots;
-  plHybridArray<const plDocumentObject*, 4> vcas;
-  GatherChildrenOfProperty(pProps, "Buses", buses);
-  GatherChildrenOfProperty4(pProps, "VCAs", vcas);
-  GatherChildrenOfProperty(pProps, "Snapshots", snapshots);
-
-  auto makeGroup = [&](const char* szName) -> QTreeWidgetItem*
+  if (!bForce && plTime::Now() - m_LastApply < s_LiveEditInterval)
   {
-    QTreeWidgetItem* pGroup = new QTreeWidgetItem(m_pRoutingTree, QStringList(QString::fromUtf8(szName)));
-    pGroup->setFlags(Qt::ItemIsEnabled);
-    QFont groupFont = m_pRoutingTree->font();
-    groupFont.setBold(true);
-    groupFont.setPointSizeF(7.5);
-    pGroup->setFont(0, groupFont);
-    pGroup->setForeground(0, QBrush(m_Accent));
-    return pGroup;
-  };
+    m_bApplyPending = true;
+    return;
+  }
 
-  // buses as a hierarchy (parent resolution by name; unknown parents land under the master bus)
+  plAudioMixerDesc desc = m_Desc;
+
+  // the dragged value, heard before it is written to the document
+  const plAudioMixerLiveEdit& edit = m_LiveEdit;
+  if (edit.m_Type != plAudioMixerLiveEdit::Type::None && edit.m_uiBus < desc.m_Buses.GetCount())
   {
-    QTreeWidgetItem* pGroup = makeGroup("BUSES");
+    plAudioBusDesc& bus = desc.m_Buses[edit.m_uiBus];
 
-    plHybridArray<QTreeWidgetItem*, 12> busItems;
-    busItems.SetCount(buses.GetCount());
-
-    auto findBusIndex = [&](plStringView sName) -> plUInt32
+    switch (edit.m_Type)
     {
-      for (plUInt32 i = 0; i < buses.GetCount(); ++i)
-      {
-        const plString sBusName = buses[i]->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
-        if (sBusName.IsEqual_NoCase(sName))
-          return i;
-      }
-      return plInvalidIndex;
-    };
+      case plAudioMixerLiveEdit::Type::BusVolume:
+        bus.m_fVolumeDb = edit.m_fValue;
+        break;
 
-    for (plUInt32 i = 0; i < buses.GetCount(); ++i)
-    {
-      plString sName = buses[i]->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
-      if (sName.IsEmpty())
-        sName = "<unnamed>";
+      case plAudioMixerLiveEdit::Type::SendLevel:
+        if (edit.m_uiIndex < bus.m_Sends.GetCount())
+          bus.m_Sends[edit.m_uiIndex].m_fLevelDb = edit.m_fValue;
+        break;
 
-      const bool bAux = buses[i]->GetTypeAccessor().GetValue("IsAux").ConvertTo<bool>();
+      case plAudioMixerLiveEdit::Type::EffectParam:
+        if (edit.m_uiIndex < bus.m_Effects.GetCount() && edit.m_uiParam < plAudioEffectMaxParams)
+          bus.m_Effects[edit.m_uiIndex].m_fParams[edit.m_uiParam] = edit.m_fValue;
+        break;
 
-      QTreeWidgetItem* pParentItem = pGroup;
-      if (i > 0)
-      {
-        const plString sParent = buses[i]->GetTypeAccessor().GetValue("Parent").ConvertTo<plString>();
-        const plUInt32 uiParent = sParent.IsEmpty() ? 0 : findBusIndex(sParent);
-        if (uiParent != plInvalidIndex && uiParent < i && busItems[uiParent] != nullptr)
-        {
-          pParentItem = busItems[uiParent];
-        }
-        else if (busItems[0] != nullptr)
-        {
-          pParentItem = busItems[0];
-        }
-      }
-
-      QString sLabel = QString::fromUtf8(sName.GetData());
-      if (bAux)
-        sLabel += QString::fromUtf8("  \xE2\xA4\xBA aux");
-
-      QTreeWidgetItem* pItem = new QTreeWidgetItem(pParentItem, QStringList(sLabel));
-      SetGuidData(pItem, buses[i]->GetGuid());
-      busItems[i] = pItem;
+      default:
+        break;
     }
   }
 
-  // VCAs
-  {
-    QTreeWidgetItem* pGroup = makeGroup("VCAS");
-    for (const plDocumentObject* pVca : vcas)
-    {
-      plString sName = pVca->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
-      if (sName.IsEmpty())
-        sName = "<unnamed>";
+  plAudioMixerConsoleMsgToEngine msg;
+  msg.m_Command = plAudioMixerConsoleCommand::Apply;
+  msg.m_bLoad = m_Source == Source::Preview;
 
-      QTreeWidgetItem* pItem = new QTreeWidgetItem(pGroup, QStringList(QString::fromUtf8(sName.GetData())));
-      SetGuidData(pItem, pVca->GetGuid());
+  plMemoryStreamContainerWrapperStorage<plDataBuffer> storage(&msg.m_MixerData);
+  plMemoryStreamWriter writer(&storage);
+  if (m_pAssetDoc->WriteConsoleData(writer, desc).Failed())
+    return;
+
+  m_pAssetDoc->SendMessageToEngine(&msg);
+  m_LastApply = plTime::Now();
+  m_bApplyPending = false;
+}
+
+bool plAudioMixerAssetDocumentWindow::SendConsoleCommand(plAudioMixerConsoleCommand::Enum command, plStringView sTarget, float fValue)
+{
+  plAudioMixerConsoleMsgToEngine msg;
+  msg.m_Command = command;
+  msg.m_sTarget = sTarget;
+  msg.m_fValue = fValue;
+  return m_pAssetDoc->SendMessageToEngine(&msg);
+}
+
+void plAudioMixerAssetDocumentWindow::OnConsoleStatus(const plAudioMixerConsoleStatusMsgToEditor& status)
+{
+  PL_IGNORE_UNUSED(status);
+
+  if (!status.m_sError.IsEmpty())
+    ShowToast(status.m_sError);
+
+  UpdateConsoleState();
+
+  m_pStripsView->Refresh();
+  m_pRailView->Refresh();
+  m_pInsertView->Refresh();
+  UpdateStatusRow();
+}
+
+void plAudioMixerAssetDocumentWindow::UpdateConsoleState()
+{
+  const plAudioMixerConsoleStatusMsgToEditor& status = m_pAssetDoc->GetConsoleStatus();
+  const plAudioMixerAssetProperties& props = *m_pAssetDoc->GetProperties();
+  const plUInt32 uiBusCount = props.m_Buses.GetCount();
+
+  m_State.m_bLive = status.m_bAvailable && status.m_bIsThisMixer;
+
+  m_State.m_BusPeak.SetCount(uiBusCount);
+  m_State.m_BusRms.SetCount(uiBusCount);
+  m_State.m_BusMuted.SetCount(uiBusCount);
+  m_State.m_BusSoloed.SetCount(uiBusCount);
+  m_State.m_BusSilenced.SetCount(uiBusCount);
+  m_State.m_BusError.SetCount(uiBusCount);
+  m_State.m_BusSnapshotDb.SetCount(uiBusCount);
+  m_State.m_EffectGainReduction.SetCount(uiBusCount);
+
+  // the engine process's values belong to its buses by name; its effects follow the applied desc
+  plUInt32 uiEffectOffset = 0;
+  for (plUInt32 i = 0; i < uiBusCount; ++i)
+  {
+    const plAudioMixerBus& bus = props.m_Buses[i];
+
+    m_State.m_BusPeak[i] = 0.0f;
+    m_State.m_BusRms[i] = 0.0f;
+    m_State.m_BusMuted[i] = false;
+    m_State.m_BusSoloed[i] = false;
+    m_State.m_BusError[i] = false;
+    m_State.m_EffectGainReduction[i].SetCount(bus.m_Effects.GetCount());
+    for (float& f : m_State.m_EffectGainReduction[i])
+      f = 0.0f;
+
+    if (!m_State.m_bLive)
+      continue;
+
+    for (plUInt32 j = 0; j < status.m_BusNames.GetCount(); ++j)
+    {
+      if (!status.m_BusNames[j].IsEqual_NoCase(bus.m_sName))
+        continue;
+
+      m_State.m_BusPeak[i] = j < status.m_BusPeaks.GetCount() ? status.m_BusPeaks[j] : 0.0f;
+      m_State.m_BusRms[i] = j < status.m_BusRms.GetCount() ? status.m_BusRms[j] : 0.0f;
+      m_State.m_BusMuted[i] = j < status.m_BusMuted.GetCount() && status.m_BusMuted[j] != 0;
+      m_State.m_BusSoloed[i] = j < status.m_BusSoloed.GetCount() && status.m_BusSoloed[j] != 0;
+      break;
+    }
+
+    if (m_bDescValid && i < m_Desc.m_Buses.GetCount())
+    {
+      const plUInt32 uiEffects = m_Desc.m_Buses[i].m_Effects.GetCount();
+      for (plUInt32 e = 0; e < uiEffects && e < m_State.m_EffectGainReduction[i].GetCount(); ++e)
+      {
+        if (uiEffectOffset + e < status.m_EffectGainReductions.GetCount())
+          m_State.m_EffectGainReduction[i][e] = status.m_EffectGainReductions[uiEffectOffset + e];
+      }
+      uiEffectOffset += uiEffects;
     }
   }
 
-  // snapshots
-  {
-    QTreeWidgetItem* pGroup = makeGroup("SNAPSHOTS");
-    for (const plDocumentObject* pSnapshot : snapshots)
-    {
-      plString sName = pSnapshot->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
-      if (sName.IsEmpty())
-        sName = "<unnamed>";
+  // silenced: muted, or outside every soloed bus's routing
+  bool bAnySolo = false;
+  for (bool bSoloed : m_State.m_BusSoloed)
+    bAnySolo |= bSoloed;
 
-      QTreeWidgetItem* pItem = new QTreeWidgetItem(pGroup, QStringList(QString::fromUtf8(sName.GetData())));
-      SetGuidData(pItem, pSnapshot->GetGuid());
+  for (plUInt32 i = 0; i < uiBusCount; ++i)
+  {
+    bool bSilenced = m_State.m_BusMuted[i];
+
+    if (!bSilenced && bAnySolo && m_bDescValid)
+    {
+      bSilenced = true;
+      for (plUInt32 s = 0; s < uiBusCount; ++s)
+      {
+        if (m_State.m_BusSoloed[s] && (m_Desc.IsRoutedTo(i, s) || m_Desc.IsRoutedTo(s, i)))
+          bSilenced = false;
+      }
+    }
+
+    m_State.m_BusSilenced[i] = bSilenced;
+  }
+
+  for (const plAudioMixerIssue& issue : m_State.m_Issues)
+  {
+    if (issue.m_uiBus < uiBusCount)
+      m_State.m_BusError[issue.m_uiBus] = true;
+    if (issue.m_uiOtherBus < uiBusCount)
+      m_State.m_BusError[issue.m_uiOtherBus] = true;
+  }
+
+  // snapshot intensities by name, and the volumes with the playing snapshots blended in (by priority, like the runtime)
+  m_State.m_SnapshotIntensity.SetCount(props.m_Snapshots.GetCount());
+  for (plUInt32 s = 0; s < props.m_Snapshots.GetCount(); ++s)
+  {
+    m_State.m_SnapshotIntensity[s] = 0.0f;
+
+    for (plUInt32 j = 0; j < status.m_SnapshotNames.GetCount() && m_State.m_bLive; ++j)
+    {
+      if (status.m_SnapshotNames[j].IsEqual_NoCase(props.m_Snapshots[s].m_sName) && j < status.m_SnapshotIntensities.GetCount())
+        m_State.m_SnapshotIntensity[s] = status.m_SnapshotIntensities[j];
     }
   }
 
-  m_pRoutingTree->expandAll();
-}
-
-void plAudioMixerAssetDocumentWindow::RebuildSnapshotList()
-{
-  if (m_pSnapshotList == nullptr)
-    return;
-
-  m_pSnapshotList->clear();
-
-  plHybridArray<const plDocumentObject*, 12> snapshots;
-  GatherChildrenOfProperty(GetPropertiesObject(), "Snapshots", snapshots);
-
-  for (const plDocumentObject* pSnapshot : snapshots)
+  plHybridArray<plUInt32, 8> order;
+  for (plUInt32 s = 0; s < props.m_Snapshots.GetCount(); ++s)
   {
-    const auto& accessor = pSnapshot->GetTypeAccessor();
-
-    plString sName = accessor.GetValue("Name").ConvertTo<plString>();
-    if (sName.IsEmpty())
-      sName = "<unnamed>";
-
-    plHybridArray<const plDocumentObject*, 12> overrides;
-    GatherChildrenOfProperty(pSnapshot, "Overrides", overrides);
-
-    const plInt64 iPriority = accessor.GetValue("Priority").ConvertTo<plInt64>();
-    const double fFadeIn = accessor.GetValue("FadeIn").ConvertTo<double>();
-    const double fFadeOut = accessor.GetValue("FadeOut").ConvertTo<double>();
-
-    QListWidgetItem* pItem = new QListWidgetItem(QString::asprintf("%s\n   %u overrides \xC2\xB7 in %.1fs / out %.1fs \xC2\xB7 prio %lld",
-      sName.GetData(), overrides.GetCount(), fFadeIn, fFadeOut, static_cast<long long>(iPriority)));
-
-    plStringBuilder sGuid;
-    plConversionUtils::ToString(pSnapshot->GetGuid(), sGuid);
-    pItem->setData(Qt::UserRole, QVariant(QString::fromUtf8(sGuid.GetData())));
-
-    m_pSnapshotList->addItem(pItem);
+    if (m_State.m_SnapshotIntensity[s] > 0.0f)
+      order.PushBack(s);
   }
+  order.Sort([&](plUInt32 a, plUInt32 b)
+    { return props.m_Snapshots[a].m_uiPriority < props.m_Snapshots[b].m_uiPriority; });
 
-  if (snapshots.IsEmpty())
+  for (plUInt32 i = 0; i < uiBusCount; ++i)
   {
-    QListWidgetItem* pHint = new QListWidgetItem("No snapshots - '+ Snapshot' adds one.");
-    pHint->setFlags(Qt::NoItemFlags);
-    m_pSnapshotList->addItem(pHint);
+    float fDb = props.m_Buses[i].m_fVolumeDb;
+
+    for (plUInt32 s : order)
+    {
+      for (const plAudioMixerSnapshotOverride& ovr : props.m_Snapshots[s].m_Overrides)
+      {
+        if (ovr.m_eTarget == plAudioSnapshotTarget::BusVolume && ovr.m_sBus.IsEqual_NoCase(props.m_Buses[i].m_sName))
+          fDb = plMath::Lerp(fDb, ovr.m_fValue, m_State.m_SnapshotIntensity[s]);
+      }
+    }
+
+    m_State.m_BusSnapshotDb[i] = fDb;
   }
 }
 
-void plAudioMixerAssetDocumentWindow::SelectObjectByGuidString(const QVariant& itemData)
+void plAudioMixerAssetDocumentWindow::SetSource(Source source)
 {
-  if (!itemData.isValid())
-    return;
+  m_Source = source;
+  m_pToolStrip->SetChecked(m_uiSourcePreview, source == Source::Preview);
+  m_pToolStrip->SetChecked(m_uiSourceEngine, source == Source::EngineProcess);
+  m_pToolStrip->SetEnabled(m_uiTestSignal, source == Source::Preview);
 
-  const plStringBuilder sGuid = itemData.toString().toUtf8().data();
-  if (!plConversionUtils::IsStringUuid(sGuid))
-    return;
-
-  const plUuid guid = plConversionUtils::ConvertStringToUuid(sGuid);
-
-  if (const plDocumentObject* pObject = GetDocument()->GetObjectManager()->GetObject(guid))
+  // the test signal belongs to the preview
+  if (source == Source::EngineProcess && m_bTestSignal)
   {
-    GetDocument()->GetSelectionManager()->SetSelection(pObject);
+    m_bTestSignal = false;
+    m_pToolStrip->SetChecked(m_uiTestSignal, false);
+    SendConsoleCommand(plAudioMixerConsoleCommand::SetTestSignal, {}, 0.0f);
+  }
+
+  ShowToast(source == Source::Preview ? "Preview: the engine process plays this mixer" : "Engine process: shows the mixer that plays; edits apply live when it is this one");
+  ApplyToEngine(true);
+}
+
+void plAudioMixerAssetDocumentWindow::OnLiveEdit(const plAudioMixerLiveEdit& edit)
+{
+  m_LiveEdit = edit;
+  ApplyToEngine(false);
+}
+
+void plAudioMixerAssetDocumentWindow::OnMute(const plUuid& bus, bool bMute)
+{
+  const plDocumentObject* pBus = GetDocument()->GetObjectManager()->GetObject(bus);
+  if (pBus == nullptr)
+    return;
+
+  if (!m_State.m_bLive)
+  {
+    ShowToast("Mute acts on the engine process's mixer; it does not play this one. Switch the source to Preview.");
+    return;
+  }
+
+  SendConsoleCommand(plAudioMixerConsoleCommand::SetBusMute, GetName(pBus), bMute ? 1.0f : 0.0f);
+}
+
+void plAudioMixerAssetDocumentWindow::OnSolo(const plUuid& bus, bool bSolo)
+{
+  const plDocumentObject* pBus = GetDocument()->GetObjectManager()->GetObject(bus);
+  if (pBus == nullptr)
+    return;
+
+  if (!m_State.m_bLive)
+  {
+    ShowToast("Solo acts on the engine process's mixer; it does not play this one. Switch the source to Preview.");
+    return;
+  }
+
+  SendConsoleCommand(plAudioMixerConsoleCommand::SetBusSolo, GetName(pBus), bSolo ? 1.0f : 0.0f);
+}
+
+void plAudioMixerAssetDocumentWindow::OnSelectInsert(const plUuid& bus, plInt32 iEffect)
+{
+  m_State.m_SelectedBus = bus;
+  m_State.m_iSelectedEffect = iEffect;
+
+  // the insert editor shows what was clicked
+  if (iEffect >= 0 && m_pInsertPanel != nullptr)
+    m_pInsertPanel->setAsCurrentTab();
+
+  m_pStripsView->Refresh();
+  m_pInsertView->Refresh();
+}
+
+void plAudioMixerAssetDocumentWindow::OnSnapshotIntensity(const plUuid& snapshot, float fIntensity)
+{
+  const plDocumentObject* pSnapshot = GetDocument()->GetObjectManager()->GetObject(snapshot);
+  if (pSnapshot == nullptr)
+    return;
+
+  if (!m_State.m_bLive)
+  {
+    ShowToast("Snapshots are auditioned in the engine process's mixer; it does not play this one. Switch the source to Preview.");
+    return;
+  }
+
+  SendConsoleCommand(plAudioMixerConsoleCommand::SetSnapshot, GetName(pSnapshot), fIntensity);
+
+  plStringBuilder sToast;
+  sToast.SetFormat("Auditioning {} at {}: overridden faders show the blended value", GetName(pSnapshot), plArgF(fIntensity, 2));
+  ShowToast(sToast);
+}
+
+void plAudioMixerAssetDocumentWindow::TakeBaseline()
+{
+  m_Baseline.Clear();
+
+  plHybridArray<const plDocumentObject*, 12> buses;
+  GatherChildren(GetPropertiesObject(), "Buses", buses);
+
+  for (const plDocumentObject* pBus : buses)
+  {
+    m_Baseline[pBus->GetGuid()] = pBus->GetTypeAccessor().GetValue("Volume").ConvertTo<float>();
   }
 }
 
-void plAudioMixerAssetDocumentWindow::OnSnapshotItemClicked(QListWidgetItem* pItem)
+void plAudioMixerAssetDocumentWindow::OnCapture(const plUuid& snapshot)
 {
-  SelectObjectByGuidString(pItem->data(Qt::UserRole));
+  const plDocumentObject* pSnapshot = GetDocument()->GetObjectManager()->GetObject(snapshot);
+  if (pSnapshot == nullptr)
+    return;
+
+  plHybridArray<const plDocumentObject*, 12> buses, overrides;
+  GatherChildren(GetPropertiesObject(), "Buses", buses);
+  GatherChildren(pSnapshot, "Overrides", overrides);
+
+  // the faders that moved since the window opened, the mix was saved or the last capture
+  plHybridArray<const plDocumentObject*, 12> changed;
+  for (const plDocumentObject* pBus : buses)
+  {
+    float fBaseline = 0.0f;
+    if (m_Baseline.TryGetValue(pBus->GetGuid(), fBaseline) && plMath::Abs(pBus->GetTypeAccessor().GetValue("Volume").ConvertTo<float>() - fBaseline) > 0.05f)
+      changed.PushBack(pBus);
+  }
+
+  if (changed.IsEmpty())
+  {
+    ShowToast("Capture: no fader differs from the authored mix. Move a fader first.");
+    return;
+  }
+
+  plStringBuilder sTransaction("Capture into ", GetName(pSnapshot));
+
+  plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
+  accessor.StartTransaction(sTransaction);
+
+  for (const plDocumentObject* pBus : changed)
+  {
+    const plString sBus = GetName(pBus);
+    const float fVolume = pBus->GetTypeAccessor().GetValue("Volume").ConvertTo<float>();
+
+    // the snapshot's volume override of this bus takes the fader's value; without one, one is added
+    const plDocumentObject* pOverride = nullptr;
+    for (const plDocumentObject* pCandidate : overrides)
+    {
+      const auto& ovr = pCandidate->GetTypeAccessor();
+      if (ovr.GetValue("Target").ConvertTo<plInt64>() == plAudioSnapshotTarget::BusVolume && ovr.GetValue("Bus").ConvertTo<plString>().IsEqual_NoCase(sBus))
+        pOverride = pCandidate;
+    }
+
+    if (pOverride == nullptr)
+    {
+      plUuid overrideGuid;
+      if (accessor.AddObjectByName(pSnapshot, "Overrides", -1, plGetStaticRTTI<plAudioMixerSnapshotOverride>(), overrideGuid).Failed())
+        continue;
+
+      pOverride = GetDocument()->GetObjectManager()->GetObject(overrideGuid);
+      accessor.SetValueByName(pOverride, "Bus", sBus.GetView()).IgnoreResult();
+      accessor.SetValueByName(pOverride, "Target", static_cast<plInt64>(plAudioSnapshotTarget::BusVolume)).IgnoreResult();
+    }
+
+    accessor.SetValueByName(pOverride, "Value", fVolume).IgnoreResult();
+
+    // the fader goes back to the authored mix
+    accessor.SetValueByName(pBus, "Volume", m_Baseline[pBus->GetGuid()]).IgnoreResult();
+  }
+
+  accessor.FinishTransaction();
+
+  plStringBuilder sToast;
+  sToast.SetFormat("Captured {} fader change(s) into {}; faders reset to the authored mix", changed.GetCount(), GetName(pSnapshot));
+  ShowToast(sToast);
 }
 
-void plAudioMixerAssetDocumentWindow::OnRoutingItemClicked(QTreeWidgetItem* pItem, int iColumn)
+void plAudioMixerAssetDocumentWindow::RenameBus(const plUuid& bus, plStringView sNewName)
 {
-  PL_IGNORE_UNUSED(iColumn);
-  SelectObjectByGuidString(pItem->data(0, Qt::UserRole));
+  const plDocumentObject* pBus = GetDocument()->GetObjectManager()->GetObject(bus);
+  if (pBus == nullptr)
+    return;
+
+  const plString sOld = GetName(pBus);
+  if (sOld == sNewName || sNewName.IsEmpty())
+    return;
+
+  m_bUpdatingReferences = true;
+
+  plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
+  accessor.StartTransaction("Rename Bus");
+  accessor.SetValueByName(pBus, "Name", sNewName).IgnoreResult();
+  const plUInt32 uiReferences = RenameBusReferences(accessor, GetPropertiesObject(), sOld, sNewName);
+  accessor.FinishTransaction();
+
+  m_bUpdatingReferences = false;
+
+  const plUInt32 uiEvents = RenameEventOutputBuses(sOld, sNewName);
+
+  plStringBuilder sToast;
+  sToast.SetFormat("Renamed {} \xE2\x86\x92 {}: updated {} reference(s) in the mixer and {} event(s)", sOld, sNewName, uiReferences, uiEvents);
+  ShowToast(sToast);
+}
+
+void plAudioMixerAssetDocumentWindow::UpdateReferencesAfterRename(plStringView sOldName, plStringView sNewName)
+{
+  m_bUpdatingReferences = true;
+
+  plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
+  accessor.StartTransaction("Update Bus References");
+  const plUInt32 uiReferences = RenameBusReferences(accessor, GetPropertiesObject(), sOldName, sNewName);
+
+  if (uiReferences > 0)
+  {
+    accessor.FinishTransaction();
+
+    // one undo step with the rename itself
+    GetDocument()->GetCommandHistory()->MergeLastTwoTransactions();
+  }
+  else
+  {
+    accessor.CancelTransaction();
+  }
+
+  m_bUpdatingReferences = false;
+
+  const plUInt32 uiEvents = RenameEventOutputBuses(sOldName, sNewName);
+
+  plStringBuilder sToast;
+  sToast.SetFormat("Renamed {} \xE2\x86\x92 {}: updated {} reference(s) in the mixer and {} event(s)", sOldName, sNewName, uiReferences, uiEvents);
+  ShowToast(sToast);
+}
+
+plUInt32 plAudioMixerAssetDocumentWindow::RenameEventOutputBuses(plStringView sOldName, plStringView sNewName)
+{
+  // the events that output to the bus: their files name it, so only those are opened
+  plStringBuilder sNeedle;
+  sNeedle.SetFormat("%OutputBus{\"{}\"}", sOldName);
+
+  plHybridArray<plString, 16> eventPaths;
+  {
+    const auto knownSubAssets = plAssetCurator::GetSingleton()->GetKnownSubAssets();
+
+    for (auto it = knownSubAssets->GetIterator(); it.IsValid(); ++it)
+    {
+      const plSubAsset& subAsset = it.Value();
+      if (!subAsset.m_bMainAsset || subAsset.m_pAssetInfo == nullptr || subAsset.m_pAssetInfo->m_pDocumentTypeDescriptor == nullptr)
+        continue;
+
+      if (!subAsset.m_pAssetInfo->m_pDocumentTypeDescriptor->m_sDocumentTypeName.IsEqual_NoCase("Audio Event"))
+        continue;
+
+      eventPaths.PushBack(subAsset.m_pAssetInfo->m_Path.GetAbsolutePath());
+    }
+  }
+
+  plUInt32 uiChanged = 0;
+
+  for (const plString& sPath : eventPaths)
+  {
+    const plDocumentTypeDescriptor* pTypeDesc = nullptr;
+    if (plDocumentManager::FindDocumentTypeFromPath(sPath, false, pTypeDesc).Failed())
+      continue;
+
+    plDocument* pDoc = pTypeDesc->m_pManager->GetDocumentByPath(sPath);
+    const bool bOpenedHere = pDoc == nullptr;
+
+    // an open event is checked as it is; a closed one is opened only when its file names the bus
+    if (bOpenedHere)
+    {
+      plFileReader file;
+      if (file.Open(sPath).Failed())
+        continue;
+
+      plStringBuilder sContent;
+      sContent.ReadAll(file);
+      if (sContent.FindSubString(sNeedle) == nullptr)
+        continue;
+
+      pDoc = plQtEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::None);
+      if (pDoc == nullptr)
+        continue;
+    }
+
+    const auto& rootChildren = pDoc->GetObjectManager()->GetRootObject()->GetChildren();
+    const plDocumentObject* pProps = rootChildren.IsEmpty() ? nullptr : rootChildren[0];
+
+    if (pProps != nullptr && pProps->GetTypeAccessor().GetValue("OutputBus").ConvertTo<plString>().IsEqual_NoCase(sOldName))
+    {
+      plObjectCommandAccessor accessor(pDoc->GetCommandHistory());
+      accessor.StartTransaction("Rename Output Bus");
+      accessor.SetValueByName(pProps, "OutputBus", sNewName).IgnoreResult();
+      accessor.FinishTransaction();
+
+      // an event someone has open keeps the change unsaved, like any other edit
+      if (!bOpenedHere || pDoc->SaveDocument(true).Succeeded())
+        ++uiChanged;
+      else
+        plLog::Error("Saving the audio event '{0}' with its renamed output bus failed.", sPath);
+    }
+
+    if (bOpenedHere)
+      pDoc->GetDocumentManager()->CloseDocument(pDoc);
+  }
+
+  return uiChanged;
+}
+
+void plAudioMixerAssetDocumentWindow::ShowToast(plStringView sText)
+{
+  m_sToast = sText;
+  m_ToastTime = plTime::Now();
+  UpdateStatusRow();
+}
+
+void plAudioMixerAssetDocumentWindow::UpdateStatusRow()
+{
+  if (m_pStatusView == nullptr)
+    return;
+
+  const plAudioMixerConsoleStatusMsgToEditor& status = m_pAssetDoc->GetConsoleStatus();
+
+  plStringBuilder sSource = m_Source == Source::Preview ? "Preview" : "Engine process";
+  plStringBuilder sPlays;
+  if (!status.m_bAvailable)
+    sPlays = "no PlasmaAudio in the engine process";
+  else if (status.m_bIsThisMixer)
+    sPlays.SetFormat("plays this mixer \xC2\xB7 {} voices", status.m_uiRealVoices);
+  else if (status.m_bHasMixer)
+    sPlays = "plays another mixer";
+  else
+    sPlays = "no mixer loaded";
+
+  plStringBuilder sRebuilds;
+  sRebuilds.SetFormat("{}", status.m_uiLayoutRebuilds);
+
+  plHybridArray<plEditorUiAudioStatusRow::Part, 4> parts;
+  parts.PushBack({sSource, sPlays});
+  parts.PushBack({"no voices stopped", "hot-apply"});
+  parts.PushBack({sRebuilds, "layout rebuilds"});
+  m_pStatusView->SetParts(parts);
+  m_pStatusView->SetRight(m_sToast.IsEmpty() ? plStringView("backend: PlasmaAudio") : m_sToast.GetView());
 }
 
 void plAudioMixerAssetDocumentWindow::OnAddBus(bool bAux)
@@ -1220,7 +993,7 @@ void plAudioMixerAssetDocumentWindow::OnAddBus(bool bAux)
     return;
 
   plHybridArray<const plDocumentObject*, 12> buses;
-  GatherChildrenOfProperty(pProps, "Buses", buses);
+  GatherChildren(pProps, "Buses", buses);
 
   plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
   accessor.StartTransaction(bAux ? "Add Aux Bus" : "Add Bus");
@@ -1253,6 +1026,7 @@ void plAudioMixerAssetDocumentWindow::OnAddBus(bool bAux)
 
   accessor.FinishTransaction();
 
+  m_Baseline[busGuid] = 0.0f;
   GetDocument()->GetSelectionManager()->SetSelection(pBus);
 }
 

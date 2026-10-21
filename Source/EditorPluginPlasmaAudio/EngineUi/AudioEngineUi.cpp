@@ -2,7 +2,6 @@
 
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <Foundation/Math/ColorScheme.h>
-#include <Foundation/Utilities/CommandLineUtils.h>
 
 namespace plAudioEngineUi
 {
@@ -12,11 +11,6 @@ namespace plAudioEngineUi
     constexpr float s_fChipPadding = 8.0f;
     constexpr float s_fChipDot = 7.0f;
   } // namespace
-
-  bool UseEngineViews()
-  {
-    return plCommandLineUtils::GetGlobalInstance()->GetBoolOption("-engineAudioEditors", true);
-  }
 
   plColorGammaUB AudioColor()
   {
