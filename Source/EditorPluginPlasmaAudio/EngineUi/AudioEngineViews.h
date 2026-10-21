@@ -60,6 +60,47 @@ private:
   plUiDrawListWriter m_Writer;
 };
 
+/// \brief A section header over a list of timed messages, newest first: the time in the code face and the text,
+/// tinted by kind. Keeps the latest MaxMessages.
+class plEditorUiAudioMessageList : public plEditorUiContent
+{
+public:
+  plEditorUiAudioMessageList(plStringView sTitle, plStringView sEmptyHint);
+
+  enum class Kind
+  {
+    Normal,
+    Ok,
+    Warning
+  };
+
+  static constexpr plUInt32 MaxMessages = 32;
+
+  void Add(double fTime, plStringView sText, Kind kind = Kind::Normal);
+  void Clear();
+
+  static float GetMinimumHeight();
+
+protected:
+  void OnUiUpdate() override;
+
+private:
+  struct Message
+  {
+    double m_fTime = 0.0;
+    plString m_sText;
+    Kind m_Kind = Kind::Normal;
+  };
+
+  plString m_sTitle;
+  plString m_sEmptyHint;
+  plDynamicArray<Message> m_Messages; ///< oldest first
+  bool m_bRebuild = true;
+  bool m_bDrawDirty = true;
+  plVec2 m_vDrawnSize = plVec2::MakeZero();
+  plUiDrawListWriter m_Writer;
+};
+
 /// \brief A horizontal output meter on the -60..0 dBFS scale with its readout, for a toolbar row: "OUT" is the
 /// strip's label, this view draws the meter and "-3.1 dB" after it. The peak line holds and decays.
 class plEditorUiAudioMeter : public plEditorUiContent

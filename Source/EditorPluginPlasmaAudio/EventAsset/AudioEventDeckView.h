@@ -31,6 +31,7 @@ public:
   /// The add buttons under the playlist.
   plDelegate<void()> m_OnAddFiles;
   plDelegate<void()> m_OnAddClip;
+  plDelegate<void()> m_OnAddEvent; ///< "+ Event...": a nested event
   plDelegate<void()> m_OnAddSilence;
 
   /// "..." of a playlist entry: pick its Audio Clip.

@@ -1,5 +1,6 @@
 ﻿#include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
+#include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorFramework/Assets/EngineAssetPicker.h>
 #include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
 #include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationView.h>
@@ -19,6 +20,7 @@
 #include <GuiFoundation/ActionViews/MenuBarActionMapView.moc.h>
 #include <GuiFoundation/ActionViews/ToolBarActionMapView.moc.h>
 #include <GuiFoundation/DockPanels/DocumentPanel.moc.h>
+#include <GuiFoundation/UIServices/DynamicStringEnum.h>
 #include <ToolsFoundation/Object/ObjectCommandAccessor.h>
 
 #include <QFileDialog>
@@ -123,6 +125,13 @@ plAudioEventAssetDocumentWindow::plAudioEventAssetDocumentWindow(plDocument* pDo
     { m_pTimelineView->SetAuditionValue("Distance", fDistance); };
     pWidget->layout()->addWidget(m_pAttenuationWidget);
 
+    // MESSAGES TO GAME: what the audition's markers, sustain points and key-offs would send (the engine shell shows it
+    // between AUTOMATION and DETAILS, see plAudioShellPanels)
+    plQtEngineUiContentWidget* pMessagesWidget = nullptr;
+    m_pMessagesView = plQtEngineUiContentWidget::Create<plEditorUiAudioMessageList>(pWidget, "AudioEventMessages", &pMessagesWidget, "Messages to game", "Markers the audition passes show here, as the entity's game object gets them.");
+    pMessagesWidget->SetFixedLogicalHeight(plEditorUiAudioMessageList::GetMinimumHeight() + 4.0f * 20.0f);
+    pWidget->layout()->addWidget(pMessagesWidget);
+
     pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
 
     m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
@@ -177,6 +186,8 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
     m_pToolStrip->setObjectName("AudioEventToolStrip");
     m_uiPlay = m_pToolStrip->AddIconButton(Icon::Play, "Plays the event from the timeline cursor through the engine process's event manager and mixer, as the game does (respects M mute and S solo). Space in the timeline plays and stops.");
     m_uiStop = m_pToolStrip->AddIconButton(Icon::Stop, "Stops the audition with the event's stop fade");
+    m_uiKeyOff = m_pToolStrip->AddButton("Key off", "Releases the sustain point the audition waits at, as the game does with plMsgAudioKeyOff (or the trigger component's KeyOff)", 64.0f);
+    m_pToolStrip->SetEnabled(m_uiKeyOff, false);
     m_pToolStrip->AddChip("RUNTIME AUDITION", plEditorUi::Accent(),
       "The audition runs in the engine process: clip build settings, fades, loop region, retrigger, automation, parameter ranges, voice limits and the mixer's buses all apply. Not yet: 3D position (P4) and switch states.");
     m_pToolStrip->AddSeparator();
@@ -198,6 +209,8 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
         OnPlayEvent();
       else if (uiControl == m_uiStop)
         OnStopEvent();
+      else if (uiControl == m_uiKeyOff)
+        OnKeyOff();
       else if (uiControl == m_uiSeedField)
       {
         plInt64 iSeed = m_uiSeed;
@@ -238,6 +251,8 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
     { OnAddParameter(); };
     m_pTimelineView->m_OnTogglePlay = [this]()
     { OnTogglePlay(); };
+    m_pTimelineView->m_OnOpenEvent = [this](const plString& sEventGuid)
+    { OpenNestedEvent(sEventGuid); };
     m_pTimelineView->m_OnAuditionValueChanged = [this](const plString& sName, float fValue)
     {
       if (sName.IsEqual_NoCase("Distance") && m_pAttenuationView != nullptr)
@@ -269,6 +284,8 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
     { OnAddFilesToInstrument(); };
     m_pDeckView->m_OnAddClip = [this]()
     { OnAddClipToInstrument(); };
+    m_pDeckView->m_OnAddEvent = [this]()
+    { OnAddEventToInstrument(); };
     m_pDeckView->m_OnAddSilence = [this]()
     { OnAddPlaylistEntry(); };
     m_pDeckView->m_OnPickEntryClip = [this](const plUuid& entryGuid)
@@ -283,6 +300,8 @@ void plAudioEventAssetDocumentWindow::CreateEngineCentralWidget(QWidget* pCentra
     { OnAddAutomationFor(uiTarget, sParameter); };
     pAutomationWidget->setMinimumHeight(qCeil(plEditorUiAudioEventAutomation::GetMinimumHeight() * pAutomationWidget->GetUiScale()));
     pDeckLayout->addWidget(pAutomationWidget, 1, 0);
+
+    // MESSAGES TO GAME: what the audition's markers, sustain points and key-offs would send
 
     // DETAILS · selection: the property grid of the selected object
     QWidget* pDetails = new QWidget(pDeck);
@@ -466,10 +485,12 @@ void plAudioEventAssetDocumentWindow::QueueRefresh()
         m_pAttenuationWidget->setVisible(bSpatialize);
       }
 
-      plHybridArray<const plDocumentObject*, 8> instruments, parameters, automations;
+      plHybridArray<const plDocumentObject*, 8> instruments, parameters, automations, markers, sustains;
       GatherChildrenOfProperty(GetPropertiesObject(), "Instruments", instruments);
       GatherChildrenOfProperty(GetPropertiesObject(), "Parameters", parameters);
       GatherChildrenOfProperty(GetPropertiesObject(), "Automations", automations);
+      GatherChildrenOfProperty(GetPropertiesObject(), "Markers", markers);
+      GatherChildrenOfProperty(GetPropertiesObject(), "SustainPoints", sustains);
 
       plUInt32 uiSamples = 0;
       for (const plDocumentObject* pInstrument : instruments)
@@ -481,13 +502,15 @@ void plAudioEventAssetDocumentWindow::QueueRefresh()
 
       if (m_pStatusView != nullptr)
       {
-        plStringBuilder sInstruments, sEntries, sParameters, sAutomations;
+        plStringBuilder sInstruments, sEntries, sParameters, sAutomations, sMarkers, sSustains;
         sInstruments.SetFormat("{}", instruments.GetCount());
         sEntries.SetFormat("{}", uiSamples);
         sParameters.SetFormat("{}", parameters.GetCount());
         sAutomations.SetFormat("{}", automations.GetCount());
+        sMarkers.SetFormat("{}", markers.GetCount());
+        sSustains.SetFormat("{}", sustains.GetCount());
 
-        const plEditorUiAudioStatusRow::Part parts[] = {{sInstruments, "instruments"}, {sEntries, "playlist entries"}, {sParameters, "parameters"}, {sAutomations, "automations"}};
+        const plEditorUiAudioStatusRow::Part parts[] = {{sInstruments, "instruments"}, {sEntries, "playlist entries"}, {sParameters, "sheets"}, {sAutomations, "automations"}, {sMarkers, "markers"}, {sSustains, "sustain points"}};
         m_pStatusView->SetParts(parts);
       } });
 }
@@ -664,6 +687,48 @@ void plAudioEventAssetDocumentWindow::OnAddClipToInstrument()
   accessor.FinishTransaction();
 }
 
+void plAudioEventAssetDocumentWindow::OnAddEventToInstrument()
+{
+  const plDocumentObject* pInstrument = GetActiveInstrument();
+  if (pInstrument == nullptr)
+  {
+    ShowTemporaryStatusBarMsg("Add an instrument first.");
+    return;
+  }
+
+  const plUuid instrumentGuid = pInstrument->GetGuid();
+
+  plEngineAssetPicker::Result picked;
+  if (!plEngineAssetPicker::PickAsset(this, plUuid(), "CompatibleAsset_Audio_Event", picked, "Select Audio Event") || !picked.m_Guid.IsValid())
+    return;
+
+  if (picked.m_Guid == GetDocument()->GetGuid())
+  {
+    ShowTemporaryStatusBarMsg("An event cannot play itself - pick another event.");
+    return;
+  }
+
+  pInstrument = GetDocument()->GetObjectManager()->GetObject(instrumentGuid);
+  if (pInstrument == nullptr)
+    return;
+
+  plStringBuilder sEventGuid;
+  plConversionUtils::ToString(picked.m_Guid, sEventGuid);
+
+  plObjectCommandAccessor accessor(GetDocument()->GetCommandHistory());
+  accessor.StartTransaction("Add Nested Event");
+
+  plUuid entryGuid;
+  if (accessor.AddObjectByName(pInstrument, "Playlist", -1, plGetStaticRTTI<plAudioEventPlaylistEntry>(), entryGuid).Failed())
+  {
+    accessor.CancelTransaction();
+    return;
+  }
+
+  accessor.SetValueByName(GetDocument()->GetObjectManager()->GetObject(entryGuid), "Event", sEventGuid.GetView()).IgnoreResult();
+  accessor.FinishTransaction();
+}
+
 void plAudioEventAssetDocumentWindow::OnAddPlaylistEntry()
 {
   const plDocumentObject* pInstrument = GetActiveInstrument();
@@ -727,17 +792,41 @@ void plAudioEventAssetDocumentWindow::OnAddAutomationFor(plUInt8 uiTarget, const
   accessor.SetValueByName(pAutomation, "Parameter", sParameter.GetView()).IgnoreResult();
   accessor.SetValueByName(pAutomation, "Target", static_cast<plInt64>(uiTarget)).IgnoreResult();
 
-  // two default curve points (identity ramp over 0..1)
+  // the curve starts at what changes nothing: a multiplier of 1, an open filter, or no send (rising to a full send)
+  float fStartY = 1.0f;
+  float fEndY = 1.0f;
+
+  if (uiTarget == plAudioEventAutomationTarget::InstrumentVolume)
+  {
+    // the active instrument, which the deck shows
+    if (const plDocumentObject* pInstrument = GetActiveInstrument())
+      accessor.SetValueByName(pAutomation, "Instrument", pInstrument->GetTypeAccessor().GetValue("Name").ConvertTo<plString>().GetView()).IgnoreResult();
+  }
+  else if (uiTarget == plAudioEventAutomationTarget::FilterCutoff)
+  {
+    fStartY = 22000.0f;
+    fEndY = 22000.0f;
+  }
+  else if (uiTarget == plAudioEventAutomationTarget::SendLevel)
+  {
+    fStartY = 0.0f;
+
+    // the first aux bus of the loaded mixers
+    const auto& auxBuses = plDynamicStringEnum::GetDynamicEnum("AudioSystem.AuxBus").GetAllValidValues();
+    if (!auxBuses.IsEmpty())
+      accessor.SetValueByName(pAutomation, "Bus", auxBuses[0].GetView()).IgnoreResult();
+  }
+
   plUuid pointGuid;
   if (accessor.AddObjectByName(pAutomation, "Points", -1, plGetStaticRTTI<plAudioEventCurvePoint>(), pointGuid).Succeeded())
   {
     accessor.SetValueByName(GetDocument()->GetObjectManager()->GetObject(pointGuid), "X", 0.0f).IgnoreResult();
-    accessor.SetValueByName(GetDocument()->GetObjectManager()->GetObject(pointGuid), "Y", 1.0f).IgnoreResult();
+    accessor.SetValueByName(GetDocument()->GetObjectManager()->GetObject(pointGuid), "Y", fStartY).IgnoreResult();
   }
   if (accessor.AddObjectByName(pAutomation, "Points", -1, plGetStaticRTTI<plAudioEventCurvePoint>(), pointGuid).Succeeded())
   {
     accessor.SetValueByName(GetDocument()->GetObjectManager()->GetObject(pointGuid), "X", 1.0f).IgnoreResult();
-    accessor.SetValueByName(GetDocument()->GetObjectManager()->GetObject(pointGuid), "Y", 1.0f).IgnoreResult();
+    accessor.SetValueByName(GetDocument()->GetObjectManager()->GetObject(pointGuid), "Y", fEndY).IgnoreResult();
   }
 
   accessor.FinishTransaction();
@@ -760,8 +849,40 @@ void plAudioEventAssetDocumentWindow::OnTogglePlay()
 
 void plAudioEventAssetDocumentWindow::OnStopEvent()
 {
-  if (m_bAuditioning)
-    SendAuditionCommand(plAudioAuditionCommand::Stop);
+  if (!m_bAuditioning)
+    return;
+
+  SendAuditionCommand(plAudioAuditionCommand::Stop);
+
+  if (m_pMessagesView != nullptr)
+    m_pMessagesView->Add(m_fAuditionPosition, "stop");
+}
+
+void plAudioEventAssetDocumentWindow::OnKeyOff()
+{
+  if (!m_bAuditioning)
+    return;
+
+  SendAuditionCommand(plAudioAuditionCommand::KeyOff);
+
+  if (m_pMessagesView != nullptr)
+    m_pMessagesView->Add(m_fAuditionPosition, "key off: sustain released", plEditorUiAudioMessageList::Kind::Ok);
+}
+
+void plAudioEventAssetDocumentWindow::OpenNestedEvent(const plString& sEventGuid)
+{
+  // opening a document from inside an input event of the engine-drawn timeline is not allowed: one frame later
+  QTimer::singleShot(0, this, [this, sEventGuid]()
+    {
+      const auto pSubAsset = plAssetCurator::GetSingleton()->FindSubAsset(sEventGuid);
+      if (!pSubAsset.isValid() || pSubAsset->m_pAssetInfo == nullptr)
+      {
+        ShowTemporaryStatusBarMsg("The nested event is not in the asset browser.");
+        return;
+      }
+
+      plQtEditorApp::GetSingleton()->OpenDocument(pSubAsset->m_pAssetInfo->m_Path.GetAbsolutePath(), plDocumentFlags::RequestWindow | plDocumentFlags::AddToRecentFilesList);
+    });
 }
 
 void plAudioEventAssetDocumentWindow::StartAudition(const plUuid& entryGuid, double fStartOffset)
@@ -863,10 +984,21 @@ void plAudioEventAssetDocumentWindow::StartAudition(const plUuid& entryGuid, dou
 
   m_bAuditioning = m_pAssetDoc->SendMessageToEngine(&msg);
   m_bMixerNoteShown = false;
+  m_bHolding = false;
+  m_fAuditionPosition = fStartOffset;
 
   if (!m_bAuditioning)
   {
     ShowTemporaryStatusBarMsg("The engine process is not running - the audition plays there.");
+    return;
+  }
+
+  if (m_pMessagesView != nullptr)
+  {
+    plStringBuilder sStart;
+    sStart.SetFormat("start {}", plPathUtils::GetFileName(GetDocument()->GetDocumentPath()));
+    m_pMessagesView->Clear();
+    m_pMessagesView->Add(fStartOffset, sStart);
   }
 }
 
@@ -924,16 +1056,45 @@ void plAudioEventAssetDocumentWindow::OnAuditionStatus(const plAudioAuditionStat
   }
 
   const bool bPlaying = status.m_bAvailable && status.m_bPlaying;
+
+  ShowAuditionLevel(bPlaying ? status.m_fPeak : 0.0f);
+
+  if (bPlaying)
+    m_fAuditionPosition = status.m_fPosition;
+
+  // what the game object of the entity would get: the passed markers, and when the playhead starts waiting
+  if (m_pMessagesView != nullptr)
+  {
+    for (const plString& sMarker : status.m_Markers)
+    {
+      plStringBuilder sText;
+      sText.SetFormat("marker \"{}\" -> game object", sMarker);
+      m_pMessagesView->Add(m_fAuditionPosition, sText);
+    }
+
+    const bool bHolding = bPlaying && status.m_bHolding;
+    if (bHolding && !m_bHolding)
+      m_pMessagesView->Add(m_fAuditionPosition, "sustain reached: waits for key off", plEditorUiAudioMessageList::Kind::Warning);
+
+    m_bHolding = bHolding;
+  }
+
+  // the end comes after the markers the last status carried
   if (!bPlaying && !status.m_bWaiting)
   {
+    if (m_bAuditioning && m_pMessagesView != nullptr)
+      m_pMessagesView->Add(m_fAuditionPosition, "event finished");
+
     m_bAuditioning = false;
   }
 
-  ShowAuditionLevel(bPlaying ? status.m_fPeak : 0.0f);
+  if (m_pToolStrip != nullptr)
+    m_pToolStrip->SetEnabled(m_uiKeyOff, bPlaying && status.m_uiSustainsLeft > 0);
 
   if (m_pTimelineView != nullptr)
   {
     m_pTimelineView->SetPlayback(bPlaying && !status.m_bWaiting, status.m_fPosition, status.m_InstrumentSounding);
+    m_pTimelineView->SetHolding(m_bHolding);
   }
 }
 

@@ -253,10 +253,11 @@ void plAudioShellPanels::CreateEventPanels(plEditorUiDocumentFrame& ref_frame)
   if (auto* pDeck = static_cast<plEditorUiAudioEventDeck*>(pMain->AddLentPart(ref_frame, pWindow, "AudioEventDeck", 1.0f)))
     pMain->SetExtentSource(pDeck, [pDeck](float) { return pDeck->GetContentHeight(); });
 
-  // AUTOMATION beside DETAILS · selection take the rest
+  // AUTOMATION, MESSAGES TO GAME and DETAILS · selection take the rest
   auto* pLower = static_cast<plEditorUiAudioShellStack*>(pMain->AddOwnedPart(PL_DEFAULT_NEW(plEditorUiAudioShellStack, true), 0.0f));
   pLower->SetSeparators(true);
   pLower->AddLentPart(ref_frame, pWindow, "AudioEventAutomation", 0.0f);
+  pLower->AddLentPart(ref_frame, pWindow, "AudioEventMessages", 300.0f);
 
   auto* pDetails = static_cast<plEditorUiAudioShellStack*>(pLower->AddOwnedPart(PL_DEFAULT_NEW(plEditorUiAudioShellStack), 0.0f));
   pDetails->AddLentPart(ref_frame, pWindow, "AudioEventDetailsHeader", plEditorUiAudioSectionHeader::GetHeight());

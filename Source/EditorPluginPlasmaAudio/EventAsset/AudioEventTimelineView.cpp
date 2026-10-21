@@ -1,6 +1,7 @@
 #include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
 #include <AudioSystem/Mixer/AudioMixerData.h>
+#include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorFramework/EditorApp/EditorApp.moc.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
@@ -17,6 +18,7 @@ namespace
 {
   constexpr float s_fTabRow = plEditorUiTabs::Height + 4.0f;
   constexpr float s_fRuler = 24.0f;
+  constexpr float s_fMarkerLane = 24.0f;
   constexpr float s_fRow = 66.0f;
   constexpr float s_fHead = 156.0f;
   constexpr float s_fLane = 28.0f;
@@ -169,6 +171,14 @@ double plEditorUiAudioEventTimeline::GetSampleDuration(plStringView sFile) const
 
 double plEditorUiAudioEventTimeline::GetEntryDuration(const plDocumentObject* pEntry) const
 {
+  // a nested event: one pass of its timeline, from its saved asset info
+  const plString sEvent = pEntry->GetTypeAccessor().GetValue("Event").ConvertTo<plString>();
+  if (!sEvent.IsEmpty())
+  {
+    plAudioEventAssetMetaInfo info;
+    return plAudioEventAssetMetaInfo::Find(sEvent, info) ? info.m_fLength : 0.0;
+  }
+
   const plString sClip = pEntry->GetTypeAccessor().GetValue("Clip").ConvertTo<plString>();
   if (!sClip.IsEmpty())
   {
@@ -298,6 +308,27 @@ double plEditorUiAudioEventTimeline::GetInstrumentDelay(const plDocumentObject* 
   return pInstrument->GetTypeAccessor().GetValue("StartDelay").ConvertTo<double>();
 }
 
+bool plEditorUiAudioEventTimeline::HasNestedLength(const plDocumentObject* pInstrument) const
+{
+  return !GetNestedEvent(pInstrument).IsEmpty() && !pInstrument->GetTypeAccessor().GetValue("Loop").ConvertTo<bool>();
+}
+
+double plEditorUiAudioEventTimeline::GetInstrumentLength(const plDocumentObject* pInstrument) const
+{
+  // a nested event of a non-looping instrument plays for the length set on the instrument (being dragged: its preview)
+  if (HasNestedLength(pInstrument))
+  {
+    if (m_bResizingNested && pInstrument->GetGuid() == m_ResizeGuid)
+      return m_fResizeLength;
+
+    const double fLength = pInstrument->GetTypeAccessor().GetValue("NestedLength").ConvertTo<double>();
+    if (fLength > 0.0)
+      return fLength;
+  }
+
+  return GetLongestEntry(pInstrument);
+}
+
 double plEditorUiAudioEventTimeline::GetMarkerValue(const char* szProperty, DragHandle handle) const
 {
   if (m_ActiveHandle == handle && m_bHandlePreviewValid)
@@ -316,7 +347,7 @@ double plEditorUiAudioEventTimeline::GetTimeExtent() const
   double fEnd = 0.0;
   for (const plDocumentObject* pInstrument : instruments)
   {
-    const double fLength = GetLongestEntry(pInstrument);
+    const double fLength = GetInstrumentLength(pInstrument);
     fEnd = plMath::Max(fEnd, GetInstrumentDelay(pInstrument) + plMath::Max(fLength, s_fPlaceholderLength));
   }
 
@@ -330,6 +361,11 @@ double plEditorUiAudioEventTimeline::GetTimeExtent() const
 float plEditorUiAudioEventTimeline::GetCanvasTop() const
 {
   return s_fTabRow;
+}
+
+float plEditorUiAudioEventTimeline::GetLanesTop() const
+{
+  return GetCanvasTop() + s_fRuler + (IsParameterTab() ? 0.0f : s_fMarkerLane);
 }
 
 float plEditorUiAudioEventTimeline::TimeToX(double fSeconds) const
@@ -375,9 +411,18 @@ void plEditorUiAudioEventTimeline::SetPlayback(bool bPlaying, double fPosition, 
   m_bDrawDirty = true;
 }
 
+void plEditorUiAudioEventTimeline::SetHolding(bool bHolding)
+{
+  if (m_bHolding == bHolding)
+    return;
+
+  m_bHolding = bHolding;
+  m_bDrawDirty = true;
+}
+
 float plEditorUiAudioEventTimeline::GetRowTop(plUInt32 uiRow) const
 {
-  return GetCanvasTop() + s_fRuler + uiRow * s_fRow - m_fScrollY;
+  return GetLanesTop() + uiRow * s_fRow - m_fScrollY;
 }
 
 plVec2 plEditorUiAudioEventTimeline::GetContentSize() const
@@ -387,7 +432,7 @@ plVec2 plEditorUiAudioEventTimeline::GetContentSize() const
 
   // padding is pixels, not seconds, so the content end stays at its true time position
   const float fWidth = s_fHead + s_fTimeInset + static_cast<float>(GetTimeExtent() * m_fPixelsPerSecond) + 90.0f;
-  const float fHeight = s_fRuler + plMath::Max<plUInt32>(1, instruments.GetCount()) * s_fRow + 2.0f * s_fLane + 8.0f;
+  const float fHeight = GetLanesTop() - GetCanvasTop() + plMath::Max<plUInt32>(1, instruments.GetCount()) * s_fRow + 2.0f * s_fLane + 8.0f;
   return plVec2(fWidth, fHeight);
 }
 
@@ -513,7 +558,7 @@ void plEditorUiAudioEventTimeline::BuildDocument()
 
   DrawList(pRoot, "Timeline.Canvas", s_sCanvasEntry.GetView());
 
-  // dock-style tabs for the timeline and the parameters, then the dashed "+ Parameter" slot
+  // dock-style tabs for the timeline and the parameter sheets, then the dashed "+ Sheet" slot
   plHybridArray<plEditorUiTab, 8> tabs;
   float fTabsWidth = 0.0f;
   for (const plString& sLabel : m_TabLabels)
@@ -536,25 +581,32 @@ void plEditorUiAudioEventTimeline::BuildDocument()
   m_pTabs->Build(pTabHost, fTabsWidth);
 
   m_fAddTabX = 6.0f + fTabsWidth + 6.0f;
-  plStringBuilder sAddLabel("+ PARAMETER");
-  plAudioEngineUi::HitButton(pRoot, plRectFloat(m_fAddTabX, 4.0f, MeasureText(sAddLabel, FontSize - 2) + 20.0f, 22.0f), s_szAddParameter, "Adds an event parameter (an RTPC the game sets)", &GetSurface()->GetBlackboard());
+  plStringBuilder sAddLabel("+ SHEET");
+  plAudioEngineUi::HitButton(pRoot, plRectFloat(m_fAddTabX, 4.0f, MeasureText(sAddLabel, FontSize - 2) + 20.0f, 22.0f), s_szAddParameter, "Adds a parameter sheet: an event parameter the game sets (an RTPC). Set its name, range, default and seek speed in Details; it is saved with the event.", &GetSurface()->GetBlackboard());
 
-  // the inline rename field over the track header
+  // the inline rename field over the track header, or next to the marker
   if (m_RenameGuid.IsValid())
   {
     plHybridArray<const plDocumentObject*, 8> instruments;
     GatherInstruments(instruments);
 
-    for (plUInt32 i = 0; i < instruments.GetCount(); ++i)
+    auto renameField = [&](const plRectFloat& rect)
     {
-      if (instruments[i]->GetGuid() != m_RenameGuid)
-        continue;
-
       plUiTextInput* pInput = Input(pRoot, s_szRename, s_sRenameText.GetView(), "", s_szRenameSubmit);
-      plAudioEngineUi::Place(pInput, plRectFloat(8.0f, GetRowTop(i) + 6.0f, s_fHead - 60.0f, 22.0f));
+      plAudioEngineUi::Place(pInput, rect);
       pInput->m_BorderColor = Accent();
       pInput->m_vCornerRadius = plVec4(3);
+    };
+
+    for (plUInt32 i = 0; i < instruments.GetCount(); ++i)
+    {
+      if (instruments[i]->GetGuid() == m_RenameGuid)
+        renameField(plRectFloat(8.0f, GetRowTop(i) + 6.0f, s_fHead - 60.0f, 22.0f));
     }
+
+    const plDocumentObject* pRenamed = m_pDocument->GetObjectManager()->GetObject(m_RenameGuid);
+    if (pRenamed != nullptr && pRenamed->GetParentProperty().IsEqual("Markers"))
+      renameField(plRectFloat(TimeToX(GetPointTime(pRenamed)) + 4.0f, GetCanvasTop() + s_fRuler + 1.0f, 140.0f, s_fMarkerLane - 2.0f));
   }
 
   SetDocument(Finish(pRoot));
@@ -607,9 +659,9 @@ void plEditorUiAudioEventTimeline::Draw()
   const plVec2 size = GetSurface()->GetLogicalSize();
   const plRectFloat canvas(0.0f, GetCanvasTop(), size.x, plMath::Max(size.y - GetCanvasTop(), 1.0f));
 
-  // the tab row: the painted "+ Parameter" slot and the hairline under the row
+  // the tab row: the painted "+ Sheet" slot and the hairline under the row
   {
-    plStringBuilder sAddLabel("+ PARAMETER");
+    plStringBuilder sAddLabel("+ SHEET");
     const plRectFloat addRect(m_fAddTabX, 4.0f, MeasureText(sAddLabel, FontSize - 2) + 20.0f, 22.0f);
     plAudioEngineUi::DashedRect(m_Writer, addRect, Border());
     m_Writer.Text(addRect, sAddLabel, Dim(), FontSize - 2, plUiTextHAlign::Center);
@@ -642,7 +694,7 @@ void plEditorUiAudioEventTimeline::Draw()
   const plDocumentObject* pProps = GetPropertiesObject();
   const double fExtent = GetTimeExtent();
   const bool bLoopRegion = pProps != nullptr && pProps->GetTypeAccessor().GetValue("LoopRegion").ConvertTo<bool>();
-  const float fRulerBottom = canvas.y + s_fRuler;
+  const float fRulerBottom = GetLanesTop();
   const plRectFloat content(s_fHead, fRulerBottom, plMath::Max(size.x - s_fHead, 1.0f), plMath::Max(size.y - fRulerBottom, 1.0f));
 
   plString sOutputBus = pProps != nullptr ? pProps->GetTypeAccessor().GetValue("OutputBus").ConvertTo<plString>() : plString();
@@ -693,6 +745,7 @@ void plEditorUiAudioEventTimeline::Draw()
     DrawLanes(instruments.GetCount(), selected);
   }
 
+  DrawMarkerLane(canvas, selected);
   DrawRuler(canvas, fExtent, bLoopRegion);
 
   // the cursor auditions start from, and the playhead while the engine process plays
@@ -708,14 +761,24 @@ void plEditorUiAudioEventTimeline::Draw()
 
     if (m_bPlaying)
     {
+      // a playhead waiting at a sustain point takes the accent colour and says what it waits for
+      const plColorGammaUB playColor = m_bHolding ? Accent() : Foreground();
       const float fPlayX = TimeToX(m_fPlayhead);
-      m_Writer.Rect(plRectFloat(fPlayX - 0.75f, canvas.y, 1.5f, canvas.height), Foreground());
+      m_Writer.Rect(plRectFloat(fPlayX - 0.75f, canvas.y, 1.5f, canvas.height), playColor);
 
       plDynamicArray<plVec2> playMark;
       playMark.PushBack(plVec2(fPlayX - 5.0f, canvas.y));
       playMark.PushBack(plVec2(fPlayX + 6.0f, canvas.y));
       playMark.PushBack(plVec2(fPlayX + 0.5f, canvas.y + 7.0f));
-      m_Writer.Triangles(playMark, Foreground());
+      m_Writer.Triangles(playMark, playColor);
+
+      if (m_bHolding)
+      {
+        const plStringView sHold = "holding at sustain - press Key off";
+        const float fWidth = MeasureText(sHold, FontSize - 1) + 4.0f;
+        const float fLabelX = plMath::Min(fPlayX + 6.0f, size.x - fWidth - 6.0f);
+        m_Writer.Text(plRectFloat(fLabelX, canvas.y + canvas.height - 20.0f, fWidth, 16.0f), sHold, Accent(), FontSize - 1);
+      }
     }
   }
   m_Writer.PopClip();
@@ -856,7 +919,7 @@ void plEditorUiAudioEventTimeline::DrawParameterTrack(const plDocumentObject* pI
   using namespace plEditorUi;
 
   const plVec2 size = GetSurface()->GetLogicalSize();
-  const float fRulerBottom = GetCanvasTop() + s_fRuler;
+  const float fRulerBottom = GetLanesTop();
   const float y = GetRowTop(uiIndex);
 
   if (y + s_fRow < fRulerBottom || y > size.y)
@@ -1076,7 +1139,7 @@ void plEditorUiAudioEventTimeline::DrawTrackHeader(const plDocumentObject* pInst
   using namespace plEditorUi;
 
   const plVec2 size = GetSurface()->GetLogicalSize();
-  const float fRulerBottom = GetCanvasTop() + s_fRuler;
+  const float fRulerBottom = GetLanesTop();
   const float y = GetRowTop(uiIndex);
 
   const auto& accessor = pInstrument->GetTypeAccessor();
@@ -1130,7 +1193,7 @@ void plEditorUiAudioEventTimeline::DrawTrack(const plDocumentObject* pInstrument
   using namespace plEditorUi;
 
   const plVec2 size = GetSurface()->GetLogicalSize();
-  const float fRulerBottom = GetCanvasTop() + s_fRuler;
+  const float fRulerBottom = GetLanesTop();
   const float y = GetRowTop(uiIndex);
 
   if (y + s_fRow < fRulerBottom || y > size.y)
@@ -1149,16 +1212,28 @@ void plEditorUiAudioEventTimeline::DrawTrack(const plDocumentObject* pInstrument
   plHybridArray<const plDocumentObject*, 8> playlist;
   GatherChildrenOfProperty(pInstrument, "Playlist", playlist);
 
-  // longest measured entry: 0 when nothing could be decoded (missing files, silence only)
+  // longest measured entry, or the nested event's length: 0 when nothing could be measured (missing files, silence only)
   const plDocumentObject* pLongestEntry = nullptr;
-  const double fRealLength = GetLongestEntry(pInstrument, &pLongestEntry);
+  GetLongestEntry(pInstrument, &pLongestEntry);
+  const double fRealLength = GetInstrumentLength(pInstrument);
   const bool bLengthKnown = fRealLength > 0.0;
 
   // while auditioning, the instruments that sound light up
   const bool bSounding = m_bPlaying && uiIndex < m_Sounding.GetCount() && m_Sounding[uiIndex] != 0;
 
+  // a playlist that plays another event: its name, from the asset curator
+  const plString sNestedEvent = GetNestedEvent(pInstrument);
+  plStringBuilder sNestedName;
+  if (!sNestedEvent.IsEmpty())
+  {
+    const auto pSubAsset = plAssetCurator::GetSingleton()->FindSubAsset(sNestedEvent);
+    sNestedName = pSubAsset.isValid() ? pSubAsset->GetName() : plStringView("missing event");
+  }
+
   plStringBuilder sSub;
   sSub.SetFormat("-> {}", sOutputBus);
+  if (!sNestedEvent.IsEmpty())
+    sSub.Append(" \xC2\xB7 nested event");
   if (bMuted)
     sSub.Append(" \xC2\xB7 muted");
   else if (bSilencedBySolo)
@@ -1190,7 +1265,10 @@ void plEditorUiAudioEventTimeline::DrawTrack(const plDocumentObject* pInstrument
 
     m_Writer.Rect(clip, plAudioEngineUi::Mix(background, trackColor, (bSounding ? 0.32f : 0.18f) * fStrength), 3.0f);
 
-    if (bAudible)
+    // a nested event is outlined dashed: its content lives in another event
+    if (!sNestedEvent.IsEmpty())
+      plAudioEngineUi::DashedRect(m_Writer, clip, bAudible ? Foreground() : Border());
+    else if (bAudible)
       m_Writer.RectOutline(clip, bSounding ? trackColor : plAudioEngineUi::Mix(background, trackColor, 0.8f), bSounding ? 1.5f : 1.0f, 3.0f);
     else
       plAudioEngineUi::DashedRect(m_Writer, clip, Border());
@@ -1225,14 +1303,23 @@ void plEditorUiAudioEventTimeline::DrawTrack(const plDocumentObject* pInstrument
         m_Writer.Rect(plRectFloat(clip.x + 2.0f, y + 31.0f, clip.width - 4.0f, 1.0f), plAudioEngineUi::Mix(background, trackColor, 0.5f * fStrength));
       }
 
-      m_Writer.Text(plRectFloat(clip.x + 6.0f, clip.y + 2.0f, clip.width - 10.0f, 16.0f), playlist.GetCount() > 1 ? "Multi Sound" : "Single Sound", bAudible ? Foreground() : Dim(), FontSize - 1);
+      plStringBuilder sTitle;
+      if (!sNestedEvent.IsEmpty())
+        sTitle.SetFormat("{} \xE2\x96\xB8", sNestedName);
+      else
+        sTitle = playlist.GetCount() > 1 ? "Multi Sound" : "Single Sound";
+
+      m_Writer.Text(plRectFloat(clip.x + 6.0f, clip.y + 2.0f, clip.width - 10.0f, 16.0f), sTitle, bAudible ? Foreground() : Dim(), FontSize - 1);
 
       const plInt64 iMode = accessor.GetValue("PlaylistMode").ConvertTo<plInt64>();
       const char* szMode = (iMode == plAudioEventPlaylistMode::Sequential) ? "sequential" : (iMode == plAudioEventPlaylistMode::Shuffle ? "shuffle" : "random");
       const double fPitchRand = accessor.GetValue("PitchRandomization").ConvertTo<double>();
 
       plStringBuilder sInfo;
-      sInfo.SetFormat("{} {} \xC2\xB7 {}", playlist.GetCount(), playlist.GetCount() == 1 ? "entry" : "entries", szMode);
+      if (!sNestedEvent.IsEmpty())
+        sInfo = HasNestedLength(pInstrument) ? "plays for its length - drag the end" : "plays until the event stops";
+      else
+        sInfo.SetFormat("{} {} \xC2\xB7 {}", playlist.GetCount(), playlist.GetCount() == 1 ? "entry" : "entries", szMode);
       if (fPitchRand > 0.0)
         sInfo.AppendFormat(" \xC2\xB7 \xC2\xB1{} st", plArgF(fPitchRand, 1));
       if (bLengthKnown)
@@ -1249,6 +1336,23 @@ void plEditorUiAudioEventTimeline::DrawTrack(const plDocumentObject* pInstrument
       m_Writer.Rect(plRectFloat(clip.x + clip.width - 1.0f, clip.y + 2.0f, 1.0f, clip.height - 4.0f), plAudioEngineUi::WithAlpha(Foreground(), 70));
     else
       m_Writer.Line(plVec2(clip.x + clip.width - 0.5f, clip.y + 2.0f), plVec2(clip.x + clip.width - 0.5f, clip.y + clip.height - 2.0f), Warning(), 1.0f, 2.0f, 2.0f);
+
+    // the grip that sets how long a nested event plays on a non-looping track
+    if (HasNestedLength(pInstrument))
+    {
+      const float fGripX = clip.x + clip.width - 4.0f;
+      m_Writer.Rect(plRectFloat(fGripX, clip.y + clip.height * 0.5f - 8.0f, 2.0f, 16.0f), Foreground(), 1.0f);
+    }
+
+    // while resizing: how long the nested event plays now
+    if (m_bResizingNested && guid == m_ResizeGuid)
+    {
+      plStringBuilder sLength;
+      sLength.SetFormat("{}s", plArgF(m_fResizeLength, 2));
+      const plRectFloat badge(clip.x + clip.width - MeasureCodeText(sLength, MinFontSize) - 10.0f, clip.y - 15.0f, MeasureCodeText(sLength, MinFontSize) + 10.0f, 14.0f);
+      m_Writer.Rect(badge, Accent(), 3.0f);
+      m_Writer.Text(badge, sLength, Background(), MinFontSize, plUiTextHAlign::Center, plUiTextVAlign::Center, true);
+    }
 
     // while dragging: where the clip starts now
     if (m_bDraggingClip && guid == m_DragClipGuid)
@@ -1273,7 +1377,7 @@ void plEditorUiAudioEventTimeline::DrawLanes(plUInt32 uiInstruments, const plUui
   using namespace plEditorUi;
 
   const plVec2 size = GetSurface()->GetLogicalSize();
-  const float fRulerBottom = GetCanvasTop() + s_fRuler;
+  const float fRulerBottom = GetLanesTop();
   const float y = GetRowTop(uiInstruments);
   const plDocumentObject* pProps = GetPropertiesObject();
 
@@ -1364,10 +1468,11 @@ void plEditorUiAudioEventTimeline::DrawLanes(plUInt32 uiInstruments, const plUui
       if (sParam.IsEmpty())
         sParam = "?";
 
-      const plInt64 iTarget = accessor.GetValue("Target").ConvertTo<plInt64>();
+      plStringBuilder sTarget;
+      plAudioEventAssetDocument::FormatAutomationTarget(pAutomation, sTarget);
 
       plStringBuilder sLabel;
-      sLabel.SetFormat("{} by {}", iTarget == plAudioEventAutomationTarget::EventPitch ? "Pitch" : "Volume", sParam);
+      sLabel.SetFormat("{} by {}", sTarget, sParam);
 
       const plRectFloat chip(x, fChipY, MeasureText(sLabel, FontSize - 1) + 16.0f, 18.0f);
       const bool bChipSelected = pAutomation->GetGuid() == selected;
@@ -1387,13 +1492,185 @@ void plEditorUiAudioEventTimeline::DrawLanes(plUInt32 uiInstruments, const plUui
   m_Writer.PopClip();
 }
 
+double plEditorUiAudioEventTimeline::GetPointTime(const plDocumentObject* pPoint) const
+{
+  if (m_bDraggingMarker && pPoint->GetGuid() == m_DragMarkerGuid)
+    return m_fDragMarkerTime;
+
+  return pPoint->GetTypeAccessor().GetValue("Time").ConvertTo<double>();
+}
+
+plString plEditorUiAudioEventTimeline::GetNestedEvent(const plDocumentObject* pInstrument) const
+{
+  plHybridArray<const plDocumentObject*, 8> playlist;
+  GatherChildrenOfProperty(pInstrument, "Playlist", playlist);
+
+  for (const plDocumentObject* pEntry : playlist)
+  {
+    plString sEvent = pEntry->GetTypeAccessor().GetValue("Event").ConvertTo<plString>();
+    if (!sEvent.IsEmpty())
+      return sEvent;
+  }
+
+  return plString();
+}
+
+void plEditorUiAudioEventTimeline::DrawMarkerLane(const plRectFloat& canvas, const plUuid& selected)
+{
+  using namespace plEditorUi;
+
+  const plRectFloat lane(0.0f, canvas.y + s_fRuler, canvas.width, s_fMarkerLane);
+  const plDocumentObject* pProps = GetPropertiesObject();
+
+  m_Writer.Rect(lane, plAudioEngineUi::Mix(Surface(), Raised(), 0.5f));
+  m_Writer.Rect(plRectFloat(0.0f, lane.y + lane.height - 1.0f, lane.width, 1.0f), Line());
+
+  // the header's add buttons, each a small chip
+  auto addButton = [&](float x, plStringView sLabel, plColorGammaUB color) -> plRectFloat
+  {
+    const plRectFloat rect(x, lane.y + 3.0f, MeasureText(sLabel, FontSize - 2) + 12.0f, lane.height - 6.0f);
+    m_Writer.Rect(rect, Plate(), 3.0f);
+    m_Writer.RectOutline(rect, plAudioEngineUi::Mix(Border(), color, 0.5f), 1.0f, 3.0f);
+    m_Writer.Text(rect, sLabel, color, FontSize - 2, plUiTextHAlign::Center);
+    return rect;
+  };
+
+  m_AddMarkerRect = addButton(8.0f, "+ Marker", Warning());
+  m_AddSustainRect = addButton(m_AddMarkerRect.x + m_AddMarkerRect.width + 4.0f, "+ Sustain", Accent());
+
+  plHybridArray<const plDocumentObject*, 8> markers;
+  plHybridArray<const plDocumentObject*, 8> sustains;
+  GatherChildrenOfProperty(pProps, "Markers", markers);
+  GatherChildrenOfProperty(pProps, "SustainPoints", sustains);
+
+  m_Writer.PushClip(plRectFloat(s_fHead, lane.y, plMath::Max(lane.width - s_fHead, 1.0f), lane.height));
+
+  if (markers.IsEmpty() && sustains.IsEmpty())
+  {
+    m_Writer.Text(plRectFloat(TimeToX(0.0), lane.y, 620.0f, lane.height), "markers send messages to the game, sustain points wait for key off - add them at the cursor, or double-click here", Dim(), FontSize - 2);
+  }
+
+  // markers: a flag pointing down at its time, with its name
+  const plColorGammaUB markerColor = Warning();
+  for (const plDocumentObject* pMarker : markers)
+  {
+    const float x = TimeToX(GetPointTime(pMarker));
+    const bool bSelected = pMarker->GetGuid() == selected;
+
+    plDynamicArray<plVec2> flag;
+    flag.PushBack(plVec2(x - 5.0f, lane.y + 4.0f));
+    flag.PushBack(plVec2(x + 5.0f, lane.y + 4.0f));
+    flag.PushBack(plVec2(x, lane.y + 12.0f));
+    m_Writer.Triangles(flag, bSelected ? Foreground() : markerColor);
+    m_Writer.Rect(plRectFloat(x - 0.5f, lane.y + 12.0f, 1.0f, lane.height - 13.0f), plAudioEngineUi::WithAlpha(markerColor, 140));
+
+    plStringBuilder sName = pMarker->GetTypeAccessor().GetValue("Name").ConvertTo<plString>();
+    if (sName.IsEmpty())
+      sName = "marker";
+
+    const float fNameWidth = MeasureText(sName, FontSize - 2) + 4.0f;
+    if (pMarker->GetGuid() != m_RenameGuid)
+      m_Writer.Text(plRectFloat(x + 6.0f, lane.y + 6.0f, fNameWidth, 14.0f), sName, bSelected ? Foreground() : Muted(), FontSize - 2);
+
+    Hit& hit = m_Hits.ExpandAndGetRef();
+    hit.m_Kind = HitKind::Marker;
+    hit.m_Guid = pMarker->GetGuid();
+    hit.m_Rect = plRectFloat(x - 6.0f, lane.y, fNameWidth + 12.0f, lane.height);
+  }
+
+  // sustain points: a diamond in the accent colour
+  for (const plDocumentObject* pSustain : sustains)
+  {
+    const float x = TimeToX(GetPointTime(pSustain));
+    const float cy = lane.y + lane.height * 0.5f;
+    const bool bSelected = pSustain->GetGuid() == selected;
+
+    plDynamicArray<plVec2> diamond;
+    diamond.PushBack(plVec2(x, cy - 7.0f));
+    diamond.PushBack(plVec2(x + 6.0f, cy));
+    diamond.PushBack(plVec2(x, cy + 7.0f));
+    diamond.PushBack(plVec2(x, cy - 7.0f));
+    diamond.PushBack(plVec2(x, cy + 7.0f));
+    diamond.PushBack(plVec2(x - 6.0f, cy));
+    m_Writer.Triangles(diamond, bSelected ? Foreground() : Accent());
+    m_Writer.Text(plRectFloat(x + 8.0f, lane.y, 60.0f, lane.height), "sustain", bSelected ? Foreground() : Accent(), FontSize - 2);
+
+    Hit& hit = m_Hits.ExpandAndGetRef();
+    hit.m_Kind = HitKind::Marker;
+    hit.m_Guid = pSustain->GetGuid();
+    hit.m_Rect = plRectFloat(x - 7.0f, lane.y, 60.0f, lane.height);
+  }
+
+  // while dragging: where the point is now
+  if (m_bDraggingMarker)
+  {
+    plStringBuilder sPos;
+    sPos.SetFormat("{}s", plArgF(m_fDragMarkerTime, 2));
+    const plRectFloat badge(TimeToX(m_fDragMarkerTime) - 2.0f, lane.y + lane.height + 2.0f, MeasureCodeText(sPos, MinFontSize) + 10.0f, 14.0f);
+    m_Writer.PopClip();
+    m_Writer.Rect(badge, Accent(), 3.0f);
+    m_Writer.Text(badge, sPos, Background(), MinFontSize, plUiTextHAlign::Center, plUiTextVAlign::Center, true);
+    return;
+  }
+
+  m_Writer.PopClip();
+}
+
+void plEditorUiAudioEventTimeline::AddMarker(double fTime, bool bSustain)
+{
+  const plDocumentObject* pProps = GetPropertiesObject();
+  if (pProps == nullptr)
+    return;
+
+  fTime = plMath::RoundToMultiple(plMath::Max(fTime, 0.0), 0.01);
+
+  plHybridArray<const plDocumentObject*, 8> markers;
+  GatherChildrenOfProperty(pProps, "Markers", markers);
+
+  plObjectCommandAccessor accessor(m_pDocument->GetCommandHistory());
+  accessor.StartTransaction(bSustain ? "Add Sustain Point" : "Add Marker");
+
+  plUuid guid;
+  if (accessor.AddObjectByName(pProps, bSustain ? "SustainPoints" : "Markers", -1, bSustain ? plGetStaticRTTI<plAudioEventSustainPoint>() : plGetStaticRTTI<plAudioEventMarker>(), guid).Failed())
+  {
+    accessor.CancelTransaction();
+    return;
+  }
+
+  const plDocumentObject* pObject = m_pDocument->GetObjectManager()->GetObject(guid);
+  accessor.SetValueByName(pObject, "Time", static_cast<float>(fTime)).IgnoreResult();
+
+  if (!bSustain)
+  {
+    plStringBuilder sName;
+    sName.SetFormat("Marker {}", markers.GetCount() + 1);
+    accessor.SetValueByName(pObject, "Name", sName.GetView()).IgnoreResult();
+  }
+
+  accessor.FinishTransaction();
+
+  m_pDocument->GetSelectionManager()->SetSelection(pObject);
+}
+
 //////////////////////////////////////////////////////////////////////////
 // Input
 
 const plEditorUiAudioEventTimeline::Hit* plEditorUiAudioEventTimeline::FindHit(const plVec2& vPos) const
 {
+  // the Markers lane lies over the scrolled rows
+  if (vPos.y >= GetCanvasTop() + s_fRuler && vPos.y < GetLanesTop())
+  {
+    for (const Hit& hit : m_Hits)
+    {
+      if (hit.m_Kind == HitKind::Marker && hit.m_Rect.Contains(vPos) && vPos.x >= s_fHead)
+        return &hit;
+    }
+
+    return nullptr;
+  }
+
   // the ruler and the tab row cover the scrolled rows
-  if (vPos.y < GetCanvasTop() + s_fRuler)
+  if (vPos.y < GetLanesTop())
     return nullptr;
 
   // toggles first: they lie inside the header
@@ -1407,6 +1684,27 @@ const plEditorUiAudioEventTimeline::Hit* plEditorUiAudioEventTimeline::FindHit(c
   }
 
   return nullptr;
+}
+
+plUuid plEditorUiAudioEventTimeline::PickNestedLengthGrip(const plVec2& vPos) const
+{
+  if (IsParameterTab() || vPos.y < GetLanesTop())
+    return plUuid();
+
+  for (const Hit& hit : m_Hits)
+  {
+    if (hit.m_Kind != HitKind::Clip || vPos.y < hit.m_Rect.y || vPos.y >= hit.m_Rect.y + hit.m_Rect.height)
+      continue;
+
+    if (plMath::Abs(vPos.x - (hit.m_Rect.x + hit.m_Rect.width)) > s_fHandleGrab)
+      continue;
+
+    const plDocumentObject* pInstrument = m_pDocument->GetObjectManager()->GetObject(hit.m_Guid);
+    if (pInstrument != nullptr && HasNestedLength(pInstrument))
+      return hit.m_Guid;
+  }
+
+  return plUuid();
 }
 
 plEditorUiAudioEventTimeline::DragHandle plEditorUiAudioEventTimeline::PickHandle(const plVec2& vPos) const
@@ -1535,7 +1833,7 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
   using Type = plEditorUiPointerEvent::Type;
   using Button = plEditorUiPointerEvent::Button;
 
-  // the tabs, the "+ Parameter" slot and the rename field handle themselves
+  // the tabs, the "+ Sheet" slot and the rename field handle themselves
   const bool bOnCanvas = e.m_sElement.IsEmpty() && e.m_vPosition.y >= GetCanvasTop();
 
   switch (e.m_Type)
@@ -1581,7 +1879,7 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
       }
 
       plUuid rangeGuid;
-      if (PickHandle(e.m_vPosition) != DragHandle::None || PickRangeHandle(e.m_vPosition, rangeGuid) != DragHandle::None)
+      if (PickHandle(e.m_vPosition) != DragHandle::None || PickRangeHandle(e.m_vPosition, rangeGuid) != DragHandle::None || PickNestedLengthGrip(e.m_vPosition).IsValid())
       {
         SetCursor(plEditorPlatformCursor::SizeWE);
         return;
@@ -1590,6 +1888,8 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
       const Hit* pHit = FindHit(e.m_vPosition);
       if (pHit != nullptr && pHit->m_Kind == HitKind::Clip)
         SetCursor(plEditorPlatformCursor::SizeAll);
+      else if (pHit != nullptr && pHit->m_Kind == HitKind::Marker)
+        SetCursor(plEditorPlatformCursor::SizeWE);
       else
         SetCursor(plEditorPlatformCursor::Arrow);
       return;
@@ -1632,6 +1932,27 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
         {
           m_ActiveHandle = handle;
           ApplyHandleDrag(handle, e.m_vPosition.x, false);
+          return;
+        }
+
+        // the end of a nested event's clip on a non-looping track sets how long it plays
+        if (const plUuid gripGuid = PickNestedLengthGrip(e.m_vPosition); gripGuid.IsValid())
+        {
+          if (const plDocumentObject* pInstrument = m_pDocument->GetObjectManager()->GetObject(gripGuid))
+          {
+            m_bResizingNested = true;
+            m_ResizeGuid = gripGuid;
+            m_fResizeLength = GetInstrumentLength(pInstrument);
+            m_pDocument->GetSelectionManager()->SetSelection(pInstrument);
+            m_bDrawDirty = true;
+          }
+          return;
+        }
+
+        // the Markers lane's add buttons
+        if (m_AddMarkerRect.Contains(e.m_vPosition) || m_AddSustainRect.Contains(e.m_vPosition))
+        {
+          AddMarker(m_fCursor, m_AddSustainRect.Contains(e.m_vPosition));
           return;
         }
 
@@ -1682,6 +2003,15 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
         m_fDragGrabOffset = XToTime(e.m_vPosition.x) - m_fDragClipDelay;
       }
 
+      // markers and sustain points drag along the Markers lane
+      if (pHit->m_Kind == HitKind::Marker)
+      {
+        m_bDraggingMarker = true;
+        m_DragMarkerGuid = pHit->m_Guid;
+        m_fDragMarkerTime = pObject->GetTypeAccessor().GetValue("Time").ConvertTo<double>();
+        m_fDragGrabOffset = XToTime(e.m_vPosition.x) - m_fDragMarkerTime;
+      }
+
       m_bDrawDirty = true;
       return;
     }
@@ -1696,6 +2026,32 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
       {
         BeginRename(pHit->m_Guid);
         return;
+      }
+
+      // the Markers lane: rename a marker, or add one (Shift: a sustain point)
+      if (!IsParameterTab() && e.m_vPosition.y >= GetCanvasTop() + s_fRuler && e.m_vPosition.y < GetLanesTop() && e.m_vPosition.x >= s_fHead)
+      {
+        const plDocumentObject* pHitObject = pHit != nullptr ? m_pDocument->GetObjectManager()->GetObject(pHit->m_Guid) : nullptr;
+
+        if (pHitObject != nullptr && pHitObject->GetParentProperty().IsEqual("Markers"))
+          BeginRename(pHit->m_Guid);
+        else if (pHitObject == nullptr)
+          AddMarker(XToTime(e.m_vPosition.x), e.HasModifier(plEditorUiPointerEvent::Shift));
+        return;
+      }
+
+      // the clip of a track that plays another event opens that event
+      if (pHit != nullptr && pHit->m_Kind == HitKind::Clip && m_OnOpenEvent.IsValid())
+      {
+        if (const plDocumentObject* pInstrument = m_pDocument->GetObjectManager()->GetObject(pHit->m_Guid))
+        {
+          const plString sEvent = GetNestedEvent(pInstrument);
+          if (!sEvent.IsEmpty())
+          {
+            m_OnOpenEvent(sEvent);
+            return;
+          }
+        }
       }
 
       // parameter tab: a row of an instrument that is not on the parameter is placed on it around the clicked value
@@ -1759,6 +2115,18 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
         m_fDragClipDelay = plMath::Max(0.0, plMath::RoundToMultiple(XToTime(e.m_vPosition.x) - m_fDragGrabOffset, 0.01));
         m_bDrawDirty = true;
       }
+      else if (m_bDraggingMarker)
+      {
+        m_fDragMarkerTime = plMath::Max(0.0, plMath::RoundToMultiple(XToTime(e.m_vPosition.x) - m_fDragGrabOffset, 0.01));
+        m_bDrawDirty = true;
+      }
+      else if (m_bResizingNested)
+      {
+        // 10 ms snap, at least 50 ms
+        if (const plDocumentObject* pInstrument = m_pDocument->GetObjectManager()->GetObject(m_ResizeGuid))
+          m_fResizeLength = plMath::Max(0.05, plMath::RoundToMultiple(XToTime(e.m_vPosition.x) - GetInstrumentDelay(pInstrument), 0.01));
+        m_bDrawDirty = true;
+      }
       return;
     }
 
@@ -1802,6 +2170,48 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
           }
         }
       }
+
+      if (m_bResizingNested)
+      {
+        const plUuid guid = m_ResizeGuid;
+        const double fLength = m_fResizeLength;
+
+        m_bResizingNested = false;
+        m_ResizeGuid = plUuid();
+        m_bDrawDirty = true;
+
+        if (const plDocumentObject* pInstrument = m_pDocument->GetObjectManager()->GetObject(guid))
+        {
+          if (plMath::Abs(pInstrument->GetTypeAccessor().GetValue("NestedLength").ConvertTo<double>() - fLength) > 0.0001)
+          {
+            plObjectCommandAccessor accessor(m_pDocument->GetCommandHistory());
+            accessor.StartTransaction("Set Nested Event Length");
+            accessor.SetValueByName(pInstrument, "NestedLength", static_cast<float>(fLength)).IgnoreResult();
+            accessor.FinishTransaction();
+          }
+        }
+      }
+
+      if (m_bDraggingMarker)
+      {
+        const plUuid guid = m_DragMarkerGuid;
+        const double fTime = m_fDragMarkerTime;
+
+        m_bDraggingMarker = false;
+        m_DragMarkerGuid = plUuid();
+        m_bDrawDirty = true;
+
+        if (const plDocumentObject* pPoint = m_pDocument->GetObjectManager()->GetObject(guid))
+        {
+          if (plMath::Abs(pPoint->GetTypeAccessor().GetValue("Time").ConvertTo<double>() - fTime) > 0.0001)
+          {
+            plObjectCommandAccessor accessor(m_pDocument->GetCommandHistory());
+            accessor.StartTransaction(pPoint->GetParentProperty().IsEqual("Markers") ? "Move Marker" : "Move Sustain Point");
+            accessor.SetValueByName(pPoint, "Time", static_cast<float>(fTime)).IgnoreResult();
+            accessor.FinishTransaction();
+          }
+        }
+      }
       return;
     }
 
@@ -1813,6 +2223,10 @@ void plEditorUiAudioEventTimeline::OnPointer(const plEditorUiPointerEvent& e)
       m_bHandlePreviewValid = false;
       m_bDraggingClip = false;
       m_DragClipGuid = plUuid();
+      m_bDraggingMarker = false;
+      m_DragMarkerGuid = plUuid();
+      m_bResizingNested = false;
+      m_ResizeGuid = plUuid();
       m_bDrawDirty = true;
       return;
     }
@@ -1925,7 +2339,7 @@ void plEditorUiAudioEventTimeline::CommitRename()
     return;
 
   plObjectCommandAccessor accessor(m_pDocument->GetCommandHistory());
-  accessor.StartTransaction("Rename Instrument");
+  accessor.StartTransaction(pObject->GetParentProperty().IsEqual("Markers") ? "Rename Marker" : "Rename Instrument");
   accessor.SetValueByName(pObject, "Name", sNewName.GetView()).IgnoreResult();
   accessor.FinishTransaction();
 }

@@ -353,6 +353,17 @@ ma_sound_group* plMiniAudioBusGraph::GetEnvironmentAuxBus(plStringView sEnvironm
   return &m_Buses[uiBus].m_Group;
 }
 
+ma_sound_group* plMiniAudioBusGraph::GetAuxBus(plStringView sBusName)
+{
+  for (plUInt32 i = 0; i < m_Desc.m_Buses.GetCount() && i < m_Buses.GetCount(); ++i)
+  {
+    if (m_Desc.m_Buses[i].m_bIsAux && m_Desc.m_Buses[i].m_sName == sBusName)
+      return &m_Buses[i].m_Group;
+  }
+
+  return nullptr;
+}
+
 void plMiniAudioBusGraph::SetBusVolume(plUInt32 uiBusIndex, float fLinearGain)
 {
   if (uiBusIndex >= m_Buses.GetCount())

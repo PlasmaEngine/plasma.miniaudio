@@ -80,6 +80,10 @@ const char* plAudioLogEventType::GetName(Enum type)
       return "over budget";
     case StreamUnderrun:
       return "underrun";
+    case KeyOff:
+      return "key off";
+    case Marker:
+      return "marker";
     default:
       return "?";
   }

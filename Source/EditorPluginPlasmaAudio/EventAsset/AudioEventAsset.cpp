@@ -14,6 +14,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventPlaylistEntry, 1, plRTTIDefaultAlloc
 {
   PL_BEGIN_PROPERTIES
   {
+    PL_MEMBER_PROPERTY("Event", m_sEvent)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Audio_Event", plDependencyFlags::Transform | plDependencyFlags::Package)),
     PL_MEMBER_PROPERTY("Clip", m_sClip)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Audio_Clip", plDependencyFlags::Transform | plDependencyFlags::Package)),
     PL_MEMBER_PROPERTY("File", m_sFile)->AddAttributes(new plFileBrowserAttribute("Select Sound", "*.wav;*.mp3")),
     PL_MEMBER_PROPERTY("Weight", m_fWeight)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 100.0f)),
@@ -42,6 +43,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventInstrument, 1, plRTTIDefaultAllocato
     PL_MEMBER_PROPERTY("RangeMin", m_fRangeMin),
     PL_MEMBER_PROPERTY("RangeMax", m_fRangeMax)->AddAttributes(new plDefaultValueAttribute(1.0f)),
     PL_MEMBER_PROPERTY("RangeFade", m_fRangeFade)->AddAttributes(new plClampValueAttribute(0.0f, plVariant())),
+    PL_MEMBER_PROPERTY("NestedLength", m_fNestedLength)->AddAttributes(new plClampValueAttribute(0.0f, 600.0f), new plSuffixAttribute(" sec")),
     PL_ARRAY_MEMBER_PROPERTY("Playlist", m_Playlist),
   }
   PL_END_PROPERTIES;
@@ -56,6 +58,28 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventParameter, 1, plRTTIDefaultAllocator
     PL_MEMBER_PROPERTY("Min", m_fMin),
     PL_MEMBER_PROPERTY("Max", m_fMax)->AddAttributes(new plDefaultValueAttribute(1.0f)),
     PL_MEMBER_PROPERTY("Default", m_fDefault),
+    PL_MEMBER_PROPERTY("SeekSpeed", m_fSeekSpeed)->AddAttributes(new plClampValueAttribute(0.0f, plVariant()), new plSuffixAttribute(" /sec")),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventMarker, 1, plRTTIDefaultAllocator<plAudioEventMarker>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Name", m_sName),
+    PL_MEMBER_PROPERTY("Time", m_fTime)->AddAttributes(new plClampValueAttribute(0.0f, 600.0f), new plSuffixAttribute(" sec")),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventSustainPoint, 1, plRTTIDefaultAllocator<plAudioEventSustainPoint>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Time", m_fTime)->AddAttributes(new plClampValueAttribute(0.0f, 600.0f), new plSuffixAttribute(" sec")),
   }
   PL_END_PROPERTIES;
 }
@@ -78,6 +102,8 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventAutomation, 1, plRTTIDefaultAllocato
   {
     PL_MEMBER_PROPERTY("Parameter", m_sParameter),
     PL_ENUM_MEMBER_PROPERTY("Target", plAudioEventAutomationTarget, m_eTarget),
+    PL_MEMBER_PROPERTY("Instrument", m_sInstrument),
+    PL_MEMBER_PROPERTY("Bus", m_sBus)->AddAttributes(new plDynamicStringEnumAttribute("AudioSystem.AuxBus")),
     PL_ARRAY_MEMBER_PROPERTY("Points", m_Points),
   }
   PL_END_PROPERTIES;
@@ -118,6 +144,8 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventAssetProperties, 1, plRTTIDefaultAll
     PL_ARRAY_MEMBER_PROPERTY("Instruments", m_Instruments),
     PL_ARRAY_MEMBER_PROPERTY("Parameters", m_Parameters),
     PL_ARRAY_MEMBER_PROPERTY("Automations", m_Automations),
+    PL_ARRAY_MEMBER_PROPERTY("Markers", m_Markers),
+    PL_ARRAY_MEMBER_PROPERTY("SustainPoints", m_SustainPoints),
   }
   PL_END_PROPERTIES;
 }
@@ -129,6 +157,8 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventAssetMetaInfo, 1, plRTTIDefaultAlloc
   {
     PL_ARRAY_MEMBER_PROPERTY("Parameters", m_Parameters),
     PL_ARRAY_MEMBER_PROPERTY("SwitchStates", m_SwitchStates),
+    PL_MEMBER_PROPERTY("Length", m_fLength),
+    PL_MEMBER_PROPERTY("Loops", m_bLoops),
   }
   PL_END_PROPERTIES;
 }
@@ -172,6 +202,8 @@ void plAudioEventAssetProperties::PropertyMetaStateEventHandler(plPropertyMetaSt
     props["Instruments"].m_Visibility = plPropertyUiState::Invisible;
     props["Parameters"].m_Visibility = plPropertyUiState::Invisible;
     props["Automations"].m_Visibility = plPropertyUiState::Invisible;
+    props["Markers"].m_Visibility = plPropertyUiState::Invisible;
+    props["SustainPoints"].m_Visibility = plPropertyUiState::Invisible;
 
     // the loop window only matters when the region is enabled (drag it on the timeline's logic lane)
     const bool bLoopRegion = e.m_pObject->GetTypeAccessor().GetValue("LoopRegion").ConvertTo<bool>();
@@ -185,15 +217,37 @@ void plAudioEventAssetProperties::PropertyMetaStateEventHandler(plPropertyMetaSt
 
     // the playlist is edited through the window's playlist panel (rows with weights + add row)
     props["Playlist"].m_Visibility = plPropertyUiState::Invisible;
+
+    // a nested event's length only matters while the instrument does not loop (drag the clip's end on the timeline)
+    bool bPlaysEvent = false;
+    for (const plDocumentObject* pChild : e.m_pObject->GetChildren())
+    {
+      bPlaysEvent |= pChild->GetParentProperty().IsEqual("Playlist") && !pChild->GetTypeAccessor().GetValue("Event").ConvertTo<plString>().IsEmpty();
+    }
+
+    const bool bLoop = e.m_pObject->GetTypeAccessor().GetValue("Loop").ConvertTo<bool>();
+    props["NestedLength"].m_Visibility = (bPlaysEvent && !bLoop) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
   }
 
   if (e.m_pObject->GetTypeAccessor().GetType() == plGetStaticRTTI<plAudioEventPlaylistEntry>())
   {
     auto& props = *e.m_pPropertyStates;
 
-    // an embedded file is ignored once the entry references a clip
+    // a nested event replaces the clip and the file; an embedded file is ignored once the entry references a clip
+    const bool bHasEvent = !e.m_pObject->GetTypeAccessor().GetValue("Event").ConvertTo<plString>().IsEmpty();
     const bool bHasClip = !e.m_pObject->GetTypeAccessor().GetValue("Clip").ConvertTo<plString>().IsEmpty();
-    props["File"].m_Visibility = bHasClip ? plPropertyUiState::Invisible : plPropertyUiState::Default;
+    props["Clip"].m_Visibility = bHasEvent ? plPropertyUiState::Invisible : plPropertyUiState::Default;
+    props["File"].m_Visibility = (bHasEvent || bHasClip) ? plPropertyUiState::Invisible : plPropertyUiState::Default;
+  }
+
+  if (e.m_pObject->GetTypeAccessor().GetType() == plGetStaticRTTI<plAudioEventAutomation>())
+  {
+    auto& props = *e.m_pPropertyStates;
+
+    // the instrument and the bus only matter for the targets that name one
+    const plInt64 iTarget = e.m_pObject->GetTypeAccessor().GetValue("Target").ConvertTo<plInt64>();
+    props["Instrument"].m_Visibility = iTarget == plAudioEventAutomationTarget::InstrumentVolume ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["Bus"].m_Visibility = iTarget == plAudioEventAutomationTarget::SendLevel ? plPropertyUiState::Default : plPropertyUiState::Invisible;
   }
 }
 
@@ -212,6 +266,40 @@ void plAudioEventAssetDocument::HandleEngineMessage(const plEditorEngineDocument
   }
 
   plSimpleAssetDocument<plAudioEventAssetProperties>::HandleEngineMessage(pMsg);
+}
+
+void plAudioEventAssetDocument::FormatAutomationTarget(const plDocumentObject* pAutomation, plStringBuilder& out_sTarget)
+{
+  const auto& accessor = pAutomation->GetTypeAccessor();
+
+  switch (accessor.GetValue("Target").ConvertTo<plInt64>())
+  {
+    case plAudioEventAutomationTarget::EventPitch:
+      out_sTarget = "Pitch";
+      break;
+
+    case plAudioEventAutomationTarget::InstrumentVolume:
+    {
+      const plString sInstrument = accessor.GetValue("Instrument").ConvertTo<plString>();
+      out_sTarget.SetFormat("{} volume", sInstrument.IsEmpty() ? plStringView("Instrument") : sInstrument.GetView());
+      break;
+    }
+
+    case plAudioEventAutomationTarget::FilterCutoff:
+      out_sTarget = "Filter cutoff";
+      break;
+
+    case plAudioEventAutomationTarget::SendLevel:
+    {
+      const plString sBus = accessor.GetValue("Bus").ConvertTo<plString>();
+      out_sTarget.SetFormat("Send {}", sBus.IsEmpty() ? plStringView("?") : sBus.GetView());
+      break;
+    }
+
+    default:
+      out_sTarget = "Volume";
+      break;
+  }
 }
 
 plStatus plAudioEventAssetDocument::ExtractClips(plUInt32& out_uiConverted)
@@ -321,7 +409,74 @@ void plAudioEventAssetDocument::UpdateAssetDocumentInfo(plAssetDocumentInfo* pIn
       pMeta->m_SwitchStates.PushBack(instrument.m_sSwitchState);
   }
 
+  ComputeLength(pMeta->m_fLength, pMeta->m_bLoops);
+
   pInfo->m_MetaInfo.PushBack(pMeta);
+}
+
+void plAudioEventAssetDocument::ComputeLength(float& out_fLength, bool& out_bLoops) const
+{
+  const plAudioEventAssetProperties* pProp = GetProperties();
+
+  plStringBuilder sOwnGuid;
+  plConversionUtils::ToString(GetGuid(), sOwnGuid);
+
+  out_fLength = 0.0f;
+  out_bLoops = false;
+
+  for (const auto& instrument : pProp->m_Instruments)
+  {
+    if (instrument.m_bMute)
+      continue;
+
+    float fLongest = 0.0f;
+    for (const auto& entry : instrument.m_Playlist)
+    {
+      if (!entry.m_sEvent.IsEmpty())
+      {
+        // a nested event: the length the instrument gives it, else one pass of it (from its own saved info)
+        plAudioEventAssetMetaInfo nested;
+        const bool bKnown = entry.m_sEvent != sOwnGuid && plAudioEventAssetMetaInfo::Find(entry.m_sEvent, nested);
+
+        if (!instrument.m_bLoop && instrument.m_fNestedLength > 0.0f)
+          fLongest = plMath::Max(fLongest, instrument.m_fNestedLength);
+        else if (bKnown)
+          fLongest = plMath::Max(fLongest, nested.m_fLength);
+
+        out_bLoops |= instrument.m_bLoop || (bKnown && nested.m_bLoops && instrument.m_fNestedLength <= 0.0f);
+        continue;
+      }
+
+      plAudioClipAssetMetaInfo clipInfo;
+      if (!entry.m_sClip.IsEmpty() && plAudioClipAssetUtils::GetClipInfo(entry.m_sClip, clipInfo))
+        fLongest = plMath::Max(fLongest, static_cast<float>(clipInfo.m_fDuration));
+
+      out_bLoops |= instrument.m_bLoop;
+    }
+
+    if (fLongest > 0.0f)
+      out_fLength = plMath::Max(out_fLength, instrument.m_fStartDelay + fLongest);
+  }
+}
+
+bool plAudioEventAssetMetaInfo::Find(plStringView sAssetGuid, plAudioEventAssetMetaInfo& out_info)
+{
+  if (sAssetGuid.IsEmpty())
+    return false;
+
+  const auto pSubAsset = plAssetCurator::GetSingleton()->FindSubAsset(sAssetGuid);
+  if (!pSubAsset.isValid() || pSubAsset->m_pAssetInfo == nullptr || pSubAsset->m_pAssetInfo->m_Info == nullptr)
+    return false;
+
+  const plAudioEventAssetMetaInfo* pMeta = pSubAsset->m_pAssetInfo->m_Info->GetMetaInfo<plAudioEventAssetMetaInfo>();
+  if (pMeta == nullptr)
+    return false;
+
+  out_info.m_Parameters = pMeta->m_Parameters;
+  out_info.m_SwitchStates = pMeta->m_SwitchStates;
+  out_info.m_fLength = pMeta->m_fLength;
+  out_info.m_bLoops = pMeta->m_bLoops;
+  return true;
 }
 
 plTransformStatus plAudioEventAssetDocument::InternalTransformAsset(plStreamWriter& stream, plStringView sOutputTag, const plPlatformProfile* pAssetProfile, const plAssetFileHeader& AssetHeader, plBitflags<plTransformFlags> transformFlags)
@@ -415,6 +570,7 @@ plStatus plAudioEventAssetDocument::BuildEventDesc(plAudioEventDesc& out_desc) c
     paramDesc.m_fMin = plMath::Min(parameter.m_fMin, parameter.m_fMax);
     paramDesc.m_fMax = plMath::Max(parameter.m_fMin, parameter.m_fMax);
     paramDesc.m_fDefault = plMath::Clamp(parameter.m_fDefault, paramDesc.m_fMin, paramDesc.m_fMax);
+    paramDesc.m_fSeekSpeed = plMath::Max(parameter.m_fSeekSpeed, 0.0f);
   }
 
   // the built-in Distance of a spatialized event, when it has no parameter of that name: instruments and automations
@@ -446,6 +602,7 @@ plStatus plAudioEventAssetDocument::BuildEventDesc(plAudioEventDesc& out_desc) c
     instrumentDesc.m_fVolumeRandDb = instrument.m_fVolumeRandDb;
     instrumentDesc.m_fPitchSemitones = instrument.m_fPitchSemitones;
     instrumentDesc.m_fPitchRandSemitones = instrument.m_fPitchRandSemitones;
+    instrumentDesc.m_NestedLength = plTime::MakeFromSeconds(plMath::Max(instrument.m_fNestedLength, 0.0f));
 
     if (!instrument.m_sRangeParameter.IsEmpty())
     {
@@ -463,6 +620,19 @@ plStatus plAudioEventAssetDocument::BuildEventDesc(plAudioEventDesc& out_desc) c
     {
       auto& entryDesc = instrumentDesc.m_Playlist.ExpandAndGetRef();
       entryDesc.m_fWeight = entry.m_fWeight;
+
+      // a nested event, loaded by the runtime by its asset GUID string like a clip
+      if (!entry.m_sEvent.IsEmpty())
+      {
+        plStringBuilder sOwnGuid;
+        plConversionUtils::ToString(GetGuid(), sOwnGuid);
+        if (entry.m_sEvent == sOwnGuid)
+          return plStatus(plFmt("Instrument '{0}' plays this event itself. A nested event must be another event.", instrument.m_sName));
+
+        entryDesc.m_sEvent = entry.m_sEvent;
+        entryDesc.m_uiSample = plAudioEventSilenceSample;
+        continue;
+      }
 
       // the runtime loads the plAudioClipResource by the asset GUID string
       if (!entry.m_sClip.IsEmpty())
@@ -506,6 +676,32 @@ plStatus plAudioEventAssetDocument::BuildEventDesc(plAudioEventDesc& out_desc) c
     automationDesc.m_uiParameter = static_cast<plUInt8>(uiParam);
     automationDesc.m_eTarget = static_cast<plAudioEventAutomationTarget::Enum>(automation.m_eTarget.GetValue());
 
+    if (automationDesc.m_eTarget == plAudioEventAutomationTarget::InstrumentVolume)
+    {
+      plUInt32 uiInstrument = plInvalidIndex;
+      for (plUInt32 i = 0; i < pProp->m_Instruments.GetCount(); ++i)
+      {
+        if (pProp->m_Instruments[i].m_sName == automation.m_sInstrument)
+        {
+          uiInstrument = i;
+          break;
+        }
+      }
+
+      if (uiInstrument == plInvalidIndex)
+        return plStatus(plFmt("The instrument volume automation on '{0}' names the unknown instrument '{1}'.", automation.m_sParameter, automation.m_sInstrument));
+
+      automationDesc.m_uiInstrument = static_cast<plUInt8>(uiInstrument);
+    }
+
+    if (automationDesc.m_eTarget == plAudioEventAutomationTarget::SendLevel)
+    {
+      if (automation.m_sBus.IsEmpty())
+        return plStatus(plFmt("The send level automation on '{0}' needs an aux bus.", automation.m_sParameter));
+
+      automationDesc.m_sBus = automation.m_sBus;
+    }
+
     for (const auto& point : automation.m_Points)
     {
       auto& cp = automationDesc.m_Curve.AddControlPoint(point.m_fX);
@@ -515,6 +711,24 @@ plStatus plAudioEventAssetDocument::BuildEventDesc(plAudioEventDesc& out_desc) c
     automationDesc.m_Curve.SortControlPoints();
     automationDesc.m_Curve.CreateLinearApproximation();
   }
+
+  // markers and sustain points, in time order
+  for (const auto& marker : pProp->m_Markers)
+  {
+    auto& markerDesc = desc.m_Markers.ExpandAndGetRef();
+    markerDesc.m_sName = marker.m_sName;
+    markerDesc.m_Time = plTime::MakeFromSeconds(plMath::Max(marker.m_fTime, 0.0f));
+  }
+
+  desc.m_Markers.Sort([](const plAudioEventMarkerDesc& a, const plAudioEventMarkerDesc& b)
+    { return a.m_Time < b.m_Time; });
+
+  for (const auto& sustain : pProp->m_SustainPoints)
+  {
+    desc.m_SustainPoints.PushBack(plTime::MakeFromSeconds(plMath::Max(sustain.m_fTime, 0.0f)));
+  }
+
+  desc.m_SustainPoints.Sort();
 
   return plStatus(PL_SUCCESS);
 }

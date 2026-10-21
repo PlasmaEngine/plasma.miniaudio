@@ -28,10 +28,11 @@ void plAudioEnumRegistry::RegisterMixerNames(const plAudioMixerDesc& desc)
   {
     AddValue("AudioSystem.Bus", bus.m_sName);
 
-    // only aux buses can be fed by a reverb zone
+    // only aux buses can be fed by a reverb zone or an event's send automation
     if (bus.m_bIsAux)
     {
       AddValue("AudioSystem.Environment", bus.m_sEnvironmentName);
+      AddValue("AudioSystem.AuxBus", bus.m_sName);
     }
     else
     {

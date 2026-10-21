@@ -14,6 +14,7 @@ class plEditorUiAudioEventAutomation;
 class plEditorUiAudioEventDeck;
 class plEditorUiAudioEventTimeline;
 class plQtEngineUiContentWidget;
+class plEditorUiAudioMessageList;
 class plEditorUiAudioMeter;
 class plEditorUiAudioStatusRow;
 class plQtEngineControlStrip;
@@ -70,6 +71,12 @@ private:
   void OnStopEvent();
   void OnTogglePlay();
 
+  /// \brief Releases the audition's next sustain point.
+  void OnKeyOff();
+
+  /// \brief Opens the Audio Event asset with the given GUID (a nested event), after the current input event.
+  void OpenNestedEvent(const plString& sEventGuid);
+
   /// \brief Sends the event as it is edited now to the engine process and plays it there. With a valid entryGuid only
   /// that playlist entry plays.
   void StartAudition(const plUuid& entryGuid, double fStartOffset);
@@ -82,6 +89,9 @@ private:
   void OnAddPlaylistEntry();
   void OnAddFilesToInstrument();
   void OnAddClipToInstrument();
+
+  /// \brief "+ Event...": picks another Audio Event and appends it to the active instrument's playlist (a nested event).
+  void OnAddEventToInstrument();
 
   /// \brief Asset browser for Audio Clips, preselecting sCurrentClip; returns the picked clip's GUID string.
   bool PickClip(plStringView sCurrentClip, plString& out_sClipGuid);
@@ -100,6 +110,8 @@ private:
   // audition in the engine process; the seed is a session value that makes the random picks repeat
   bool m_bAuditioning = false;
   bool m_bMixerNoteShown = false;
+  bool m_bHolding = false;         ///< the audition's playhead waits at a sustain point
+  double m_fAuditionPosition = 0.0; ///< timeline position of the last status, for the message times
   plUInt32 m_uiSeed = 1;
   plEventSubscriptionID m_AuditionSubscription = 0;
 
@@ -109,6 +121,7 @@ private:
   plQtEngineControlStrip* m_pToolStrip = nullptr;
   plUInt32 m_uiPlay = 0;
   plUInt32 m_uiStop = 0;
+  plUInt32 m_uiKeyOff = 0;
   plUInt32 m_uiSeedField = 0;
   plUInt32 m_uiNewSeed = 0;
   plUInt32 m_uiFit = 0;
@@ -122,4 +135,5 @@ private:
   plEditorUiAudioAttenuation* m_pAttenuationView = nullptr;
   plQtEngineUiContentWidget* m_pAttenuationWidget = nullptr; ///< under the event macros; hidden for a 2D event
   plEditorUiAudioStatusRow* m_pStatusView = nullptr;
+  plEditorUiAudioMessageList* m_pMessagesView = nullptr; ///< what the audition sends to the game: markers, sustain, key-off
 };

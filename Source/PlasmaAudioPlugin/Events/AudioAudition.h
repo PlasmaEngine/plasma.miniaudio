@@ -49,6 +49,12 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioAuditionStatus
 
   plDynamicArray<bool> m_InstrumentSounding;
   plDynamicArray<float> m_InstrumentRangeGains;
+
+  plUInt32 m_uiSustainsLeft = 0; ///< sustain points not released yet
+  bool m_bHolding = false;       ///< the playhead waits at a sustain point for the key-off
+
+  /// \brief The markers the event passed that plAudioAudition::TakeMarkers did not take yet, oldest first.
+  plDynamicArray<plString> m_Markers;
 };
 
 /// \brief Live state of the loaded mixer, for the editor's mixer console.
@@ -123,6 +129,12 @@ public:
   /// \brief Sets parameter values of the key's playing audition.
   void SetParameters(plUInt64 uiKey, plArrayPtr<const plString> names, plArrayPtr<const float> values);
 
+  /// \brief Releases the next sustain point of the key's audition.
+  void KeyOff(plUInt64 uiKey);
+
+  /// \brief Moves the markers the key's audition passed since the last call into out_markers.
+  void TakeMarkers(plUInt64 uiKey, plDynamicArray<plString>& out_markers);
+
   /// \brief Stops the key's audition right away and forgets the key.
   void Remove(plUInt64 uiKey);
 
@@ -149,6 +161,9 @@ private:
 
   struct Command;
   struct Slot;
+
+  /// \brief The most markers a status keeps for the editor to take.
+  static constexpr plUInt32 MaxQueuedMarkers = 64;
 
   /// \brief Carries out the queued requests and refreshes the status. Audio thread.
   void Update(plPlasmaAudioEventManager& ref_events, plMiniAudioBusGraph& ref_busGraph, ma_engine* pEngine, float fMasterPeak);

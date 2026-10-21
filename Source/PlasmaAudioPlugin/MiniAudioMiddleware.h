@@ -86,6 +86,7 @@ public:
   float GetGlobalParameter(plStringView sName) const override;
 
   bool IsEventDataPlaying(const plAudioSystemEventData* pEventData) const override;
+  void TakeEventMarkers(plAudioSystemEventData* pEventData, plDynamicArray<plString>& out_markers) override;
 
   // mixer graph SPI: the engine's plAudioMixerService loads the mixer resource, blends VCAs and snapshots and
   // pushes the final per-bus values; they land on the plMiniAudioBusGraph built from the desc

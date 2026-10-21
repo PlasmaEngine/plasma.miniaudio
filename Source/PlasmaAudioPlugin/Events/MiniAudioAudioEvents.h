@@ -157,6 +157,16 @@ public:
   /// goes back to its default without one.
   void ResetParameter(plStringView sName);
 
+  /// \brief Releases the next sustain point: the instruments behind it start, as far behind the moment of the key-off
+  /// as they are behind the sustain point. Before the timeline reaches the sustain point, it just does not stop there.
+  void KeyOff();
+
+  /// \brief How many sustain points of the event were released (or lay before the start offset).
+  PL_NODISCARD plUInt32 GetReleasedSustainCount() const { return m_uiReleasedSustains; }
+
+  /// \brief The sustain points not released yet, and whether the playhead waits at one.
+  void GetSustainState(plUInt32& out_uiSustainsLeft, bool& out_bHolding) const;
+
   /// \brief Sets m_vListenerPos to the listener closest to the entity (or the first one for a global entity).
   void SelectListener(plArrayPtr<const plVec3> listeners);
 
@@ -186,7 +196,8 @@ public:
   /// \brief Number of instruments of the playing event.
   PL_NODISCARD plUInt32 GetInstrumentCount() const { return m_Instruments.GetCount(); }
 
-  /// \brief Whether the instrument has an active voice, and the volume factor of its parameter range.
+  /// \brief Whether the instrument has an active voice or a nested event that plays, and the volume factor of its
+  /// parameter range.
   PL_NODISCARD bool IsInstrumentSounding(plUInt32 uiInstrument) const;
   PL_NODISCARD float GetInstrumentRangeGain(plUInt32 uiInstrument) const { return m_Instruments[uiInstrument].m_fRangeGain; }
 
@@ -215,6 +226,7 @@ public:
 
   /// \brief The bus graph the voices attach to; null without one.
   PL_NODISCARD const plMiniAudioBusGraph* GetBusGraph() const { return m_pBusGraph; }
+  PL_NODISCARD plMiniAudioBusGraph* GetBusGraph() { return m_pBusGraph; }
 
   plPlasmaAudioEntityData* m_pEntity = nullptr;
   plPlasmaAudioEventData* m_pEventData = nullptr;
@@ -236,6 +248,45 @@ public:
   plVec3 m_vListenerPos = plVec3::MakeZero();
 
   plUInt64 m_uiSerial = 0; ///< start order among the manager's instances, the last tie-break of the voice ranking
+
+  /// \name Nested events
+  /// A playlist entry that plays an event asks the manager for a child instance on the same entity. The parent lives
+  /// while its children do, and stopping it stops them.
+  ///@{
+
+  /// \brief A child instance the instance needs; the manager starts it after the instance's Update.
+  struct ChildRequest
+  {
+    plAudioEventResourceHandle m_hEvent;
+    ma_uint64 m_uiOriginFrame = 0; ///< engine frame the child's timeline starts at
+    plUInt8 m_uiInstrument = 0;
+    bool m_bLimited = false;       ///< the instrument does not loop: the child stops after m_Length
+    plTime m_Length;               ///< zero: one pass of the child's timeline
+    bool m_bWaiting = false;       ///< the event was still loading when the manager first tried to start it
+    plTime m_WaitStart;            ///< manager time of that first try
+  };
+
+  /// \brief The deepest nesting the manager starts; deeper requests (e.g. an event that nests itself) are dropped.
+  static constexpr plUInt8 MaxNestingDepth = 4;
+
+  plHybridArray<ChildRequest, 1> m_ChildRequests;
+  plUInt64 m_uiParentSerial = 0;          ///< serial of the parent instance; 0 for an instance the game started
+  plUInt8 m_uiParentInstrument = 0;       ///< the instrument of the parent that started this instance
+  plUInt8 m_uiNestingDepth = 0;           ///< 0 for an instance the game started
+  plUInt32 m_uiLiveChildren = 0;          ///< set by the manager before every Update
+  ma_uint64 m_uiRequestedOriginFrame = 0; ///< set by the manager before Start: the timeline origin of a child; 0 for none
+  bool m_bRequestedLimit = false;         ///< set by the manager before Start: the child stops after m_RequestedLength
+  plTime m_RequestedLength;               ///< zero: one pass of the timeline (see GetTimelineLength)
+
+  /// \brief One pass of the event's timeline: where its last sound ends, from the start delays and the lengths of the
+  /// instruments' longest entries. Entries whose length is not known yet (a clip still loading, a nested event) count
+  /// as zero; zero when nothing is known.
+  PL_NODISCARD plTime GetTimelineLength() const;
+
+  /// \brief A child instance started by the instrument ended: a looping instrument triggers again.
+  void OnChildFinished(plUInt32 uiInstrument, plRandom& ref_rng);
+
+  ///@}
 
   /// \name Voice manager interface
   /// Voices are addressed by their index in [0, GetVoiceSlotCount()).
@@ -341,10 +392,27 @@ private:
     bool m_bLoadWaitLogged = false;  ///< the wait for the clip of the pending trigger was logged
     bool m_bClipMissingLogged = false; ///< a missing clip of the instrument was logged
     float m_fRangeGain = 1.0f;         ///< volume factor of the instrument's parameter range, set by ApplyModulation
+    float m_fAutomationGain = 1.0f;    ///< volume factor of the instrument's volume automations, set by ApplyModulation
+    plUInt8 m_uiSustainIndex = 0;      ///< sustain points at or before the instrument's start; it waits until all are released
+    bool m_bChildPlaying = false;      ///< a nested event the instrument started still plays
   };
 
+  /// \brief Whether the instrument waits for a key-off: a sustain point before its start was not released yet.
+  PL_NODISCARD bool IsWaitingForKeyOff(plUInt32 uiInstrument) const { return m_Instruments[uiInstrument].m_uiSustainIndex > m_uiReleasedSustains; }
+
+  /// \brief Queues the markers between the timeline position of the last call and the current one on the event data.
+  void PassMarkers();
+
+  /// \brief Whether the playhead has markers ahead of it: markers are part of the timeline, so the instance lives until
+  /// it passed the last one, even when nothing sounds (e.g. while it holds at a sustain point).
+  PL_NODISCARD bool HasMarkersAhead() const;
+
   /// \brief Base volume of the voice times the parameter range gain of its instrument.
-  float GetVoiceVolume(const Voice& voice) const { return voice.m_fBaseVolume * m_Instruments[voice.m_uiInstrument].m_fRangeGain; }
+  float GetVoiceVolume(const Voice& voice) const
+  {
+    const InstrumentState& state = m_Instruments[voice.m_uiInstrument];
+    return voice.m_fBaseVolume * state.m_fRangeGain * state.m_fAutomationGain;
+  }
 
   /// \brief Adds an entry about this instance to m_pEventLog, if set.
   void Log(plAudioLogEventType::Enum type, plStringView sDetail = plStringView()) const;
@@ -393,7 +461,27 @@ private:
   /// out_bNotLoaded is set when it only is not loaded yet.
   plResult InitClipSource(Voice& voice, const plAudioClipResourceHandle& hClip, bool& out_bNotLoaded);
   void ApplyGlobalParameters();
+
+  /// \brief Moves each parameter's value toward the value the game set, at the parameter's seek speed.
+  void SeekParameters(plTime delta);
+
+  /// \brief Sets parameter uiParam to fValue, clamped to its range; the value follows at the seek speed, or jumps.
+  void SetParameterTarget(plUInt32 uiParam, float fValue);
+
   void ApplyModulation();
+
+  /// \brief A wet output of the voices' splitter: the aux bus it feeds and at what linear level.
+  struct AuxSend
+  {
+    ma_sound_group* m_pAux = nullptr;
+    float m_fLevel = 0.0f;
+  };
+
+  /// \brief Adds the send level automations to the environment sends. A send to an aux bus already in the list adds its
+  /// level; with no output left, it replaces the weakest send when it is louder.
+  void AddAutomationSends(plHybridArray<AuxSend, MaxEnvironmentSends>& inout_sends);
+
+  /// \brief The low-pass cutoff of the voices: the lower of the occlusion's and the filter automations'.
   float GetOcclusionCutoff() const;
   bool IsRegionLooping() const;
 
@@ -444,7 +532,13 @@ private:
   plHybridArray<Voice, 4> m_Voices;           // VoiceSlotsPerInstrument per instrument
   plHybridArray<InstrumentState, 2> m_Instruments;
   plHybridArray<float, 4> m_ParameterValues;  // one per desc parameter
+  plHybridArray<float, 4> m_ParameterTargets; // one per desc parameter: what the game set; the values seek toward them
   plHybridArray<plUInt64, 4> m_ParameterNameHashes; // one per desc parameter
+  plHybridArray<float, 4> m_AutomationValues; // one per desc automation: the curve's value, set by ApplyModulation
+  float m_fAutomationCutoff = 22000.0f;       ///< the lowest cutoff of the filter automations, set by ApplyModulation
+  plUInt32 m_uiReleasedSustains = 0;          ///< sustain points released by KeyOff or passed by the start offset
+  ma_uint64 m_uiStopFrame = 0;                ///< a limited nested event stops with its fade from this engine frame on; 0 for none
+  double m_fMarkerPosition = 0.0;             ///< timeline position up to which PassMarkers queued the markers
   plHybridArray<bool, 4> m_ParameterLocal;    // true once SetParameter set the value
 
   ma_uint64 m_uiStartFrame = 0;               ///< engine frame at Start()
@@ -534,6 +628,16 @@ public:
   /// \brief Drops the instance-local value of the parameter on every instance of the entity (see plPlasmaAudioEventInstance::ResetParameter).
   void ResetEventParameter(const plPlasmaAudioEntityData* pEntity, plStringView sParamName);
 
+  /// \brief Releases the next sustain point of every instance of the entity (see plPlasmaAudioEventInstance::KeyOff).
+  void KeyOff(const plPlasmaAudioEntityData* pEntity);
+
+  /// \brief Moves the markers the instances of the event data passed and nobody took yet into out_markers.
+  void TakeMarkers(plPlasmaAudioEventData* pEventData, plDynamicArray<plString>& out_markers);
+
+  /// \brief The sustain points of the instance of the event data not released yet, and whether its playhead waits at
+  /// one. Both 0 / false when nothing plays for the event data.
+  void GetSustainState(const plPlasmaAudioEventData* pEventData, plUInt32& out_uiSustainsLeft, bool& out_bHolding) const;
+
   /// \brief Whether an instance is bound to the event data, or its start is still waiting for the event to load.
   PL_NODISCARD bool IsEventPlaying(const plPlasmaAudioEventData* pEventData) const;
 
@@ -606,8 +710,9 @@ private:
   /// with the resource manager mutex held.
   void OnResourceEvent(const plResourceEvent& e);
 
-  /// \brief Starts an instance of a loaded event. Takes the manager's mutex; the event must be loaded.
-  plResult ActivateEventInternal(const plAudioEventResourceHandle& hEvent, plStringView sEventResourceId, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine);
+  /// \brief Starts an instance of a loaded event. Takes the manager's mutex; the event must be loaded. With pParent and
+  /// pRequest, the instance is a nested event of pParent.
+  plResult ActivateEventInternal(const plAudioEventResourceHandle& hEvent, plStringView sEventResourceId, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine, const plPlasmaAudioEventInstance* pParent = nullptr, const plPlasmaAudioEventInstance::ChildRequest* pRequest = nullptr);
 
   /// \brief The generated event of a loaded legacy sound (creating it on first use). Takes no manager lock: it may
   /// create a resource.
@@ -639,6 +744,13 @@ private:
   /// \brief Updates every instance and the voice manager. Takes the manager's mutex.
   void UpdateInstances(plTime delta);
 
+  /// \brief Counts the live children of every instance and stops the children whose parent stops or is gone. Fills
+  /// out_parents (serial -> instance) when any instance is nested. Under the mutex.
+  void LinkNestedInstances(plHashTable<plUInt64, plPlasmaAudioEventInstance*>& out_parents);
+
+  /// \brief Starts the nested events the instances asked for in their updates. Under the mutex.
+  void StartNestedInstances();
+
   /// \brief Closest of the last known listener positions to the entity.
   plVec3 GetClosestListener(const plPlasmaAudioEntityData* pEntity) const;
 
@@ -666,7 +778,7 @@ private:
   plAudioStreamService* m_pStreamService = nullptr;
   plAudioVoiceManager m_VoiceManager;
   plAudioEventLog m_EventLog;
-  plUInt64 m_uiNextInstanceSerial = 0;
+  plUInt64 m_uiNextInstanceSerial = 1; // 0 is no instance (see plPlasmaAudioEventInstance::m_uiParentSerial)
   plRandom m_Rng;
   plTime m_Now;
   bool m_bRngInitialized = false;

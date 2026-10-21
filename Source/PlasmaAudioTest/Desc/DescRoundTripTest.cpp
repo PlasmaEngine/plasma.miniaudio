@@ -83,6 +83,11 @@ namespace
       auto& e0 = instrument.m_Playlist.ExpandAndGetRef();
       e0.m_uiSample = 2;
       e0.m_fWeight = 1.0f;
+
+      auto& e1 = instrument.m_Playlist.ExpandAndGetRef();
+      e1.m_uiSample = plAudioEventSilenceSample;
+      e1.m_fWeight = 0.5f;
+      e1.m_sEvent = "{ 5d0e7c41-2a9b-4c6e-8f13-97ab40c2e002 }";
     }
 
     {
@@ -91,6 +96,7 @@ namespace
       p.m_fMin = 0.0f;
       p.m_fMax = 10.0f;
       p.m_fDefault = 2.0f;
+      p.m_fSeekSpeed = 4.0f;
     }
     {
       auto& p = desc.m_Parameters.ExpandAndGetRef();
@@ -109,6 +115,29 @@ namespace
       a.m_Curve.AddControlPoint(10.0).m_Position.y = 1.4;
     }
 
+    {
+      auto& a = desc.m_Automations.ExpandAndGetRef();
+      a.m_uiParameter = 0;
+      a.m_eTarget = plAudioEventAutomationTarget::SendLevel;
+      a.m_uiInstrument = 1;
+      a.m_sBus = "Reverb";
+      a.m_Curve.AddControlPoint(0.0).m_Position.y = 0.0;
+      a.m_Curve.AddControlPoint(10.0).m_Position.y = 1.4;
+    }
+
+    {
+      auto& marker = desc.m_Markers.ExpandAndGetRef();
+      marker.m_sName = "FootL";
+      marker.m_Time = plTime::MakeFromMilliseconds(250);
+    }
+    {
+      auto& marker = desc.m_Markers.ExpandAndGetRef();
+      marker.m_sName = "FootR";
+      marker.m_Time = plTime::MakeFromMilliseconds(750);
+    }
+
+    desc.m_SustainPoints.PushBack(plTime::MakeFromMilliseconds(1600));
+
     desc.m_SampleNames.PushBack("Step_A.wav");
     desc.m_SampleNames.PushBack("Step_B.wav");
     desc.m_SampleNames.PushBack("Rustle.ogg");
@@ -116,7 +145,7 @@ namespace
     return desc;
   }
 
-  void CompareInstrument(const plAudioEventInstrumentDesc& a, const plAudioEventInstrumentDesc& b, bool bHasMute, bool bHasSwitch, bool bHasClip, bool bHasRange)
+  void CompareInstrument(const plAudioEventInstrumentDesc& a, const plAudioEventInstrumentDesc& b, bool bHasMute, bool bHasSwitch, bool bHasClip, bool bHasRange, bool bHasEvent)
   {
     const plAudioEventInstrumentDesc defaults;
     const plAudioEventInstrumentDesc& range = bHasRange ? b : defaults;
@@ -145,6 +174,7 @@ namespace
         PL_TEST_INT(a.m_Playlist[i].m_uiSample, b.m_Playlist[i].m_uiSample);
         PL_TEST_FLOAT(a.m_Playlist[i].m_fWeight, b.m_Playlist[i].m_fWeight, 0.0f);
         PL_TEST_STRING(a.m_Playlist[i].m_sClip, bHasClip ? b.m_Playlist[i].m_sClip.GetView() : plStringView());
+        PL_TEST_STRING(a.m_Playlist[i].m_sEvent, bHasEvent ? b.m_Playlist[i].m_sEvent.GetView() : plStringView());
       }
     }
   }
@@ -204,7 +234,7 @@ namespace
     {
       for (plUInt32 i = 0; i < loaded.m_Instruments.GetCount(); ++i)
       {
-        CompareInstrument(loaded.m_Instruments[i], reference.m_Instruments[i], uiVersion >= 2, uiVersion >= 4, uiVersion >= 5, uiVersion >= 7);
+        CompareInstrument(loaded.m_Instruments[i], reference.m_Instruments[i], uiVersion >= 2, uiVersion >= 4, uiVersion >= 5, uiVersion >= 7, uiVersion >= 9);
       }
     }
 
@@ -216,6 +246,7 @@ namespace
         PL_TEST_FLOAT(loaded.m_Parameters[i].m_fMin, reference.m_Parameters[i].m_fMin, 0.0f);
         PL_TEST_FLOAT(loaded.m_Parameters[i].m_fMax, reference.m_Parameters[i].m_fMax, 0.0f);
         PL_TEST_FLOAT(loaded.m_Parameters[i].m_fDefault, reference.m_Parameters[i].m_fDefault, 0.0f);
+        PL_TEST_FLOAT(loaded.m_Parameters[i].m_fSeekSpeed, uiVersion >= 9 ? reference.m_Parameters[i].m_fSeekSpeed : 0.0f, 0.0f);
       }
     }
 
@@ -227,6 +258,8 @@ namespace
         const auto& b = reference.m_Automations[i];
         PL_TEST_INT(a.m_uiParameter, b.m_uiParameter);
         PL_TEST_INT(a.m_eTarget, b.m_eTarget);
+        PL_TEST_INT(a.m_uiInstrument, uiVersion >= 9 ? b.m_uiInstrument : 0);
+        PL_TEST_STRING(a.m_sBus, uiVersion >= 9 ? b.m_sBus.GetView() : plStringView());
 
         if (PL_TEST_INT(a.m_Curve.GetNumControlPoints(), b.m_Curve.GetNumControlPoints()))
         {
@@ -247,6 +280,28 @@ namespace
       for (plUInt32 i = 0; i < loaded.m_SampleNames.GetCount(); ++i)
       {
         PL_TEST_STRING(loaded.m_SampleNames[i], reference.m_SampleNames[i]);
+      }
+    }
+
+    // version 9: markers and sustain points
+    {
+      const plAudioEventDesc& v9 = uiVersion >= 9 ? reference : defaults;
+
+      if (PL_TEST_INT(loaded.m_Markers.GetCount(), v9.m_Markers.GetCount()))
+      {
+        for (plUInt32 i = 0; i < loaded.m_Markers.GetCount(); ++i)
+        {
+          PL_TEST_STRING(loaded.m_Markers[i].m_sName, v9.m_Markers[i].m_sName);
+          PL_TEST_DOUBLE(loaded.m_Markers[i].m_Time.GetSeconds(), v9.m_Markers[i].m_Time.GetSeconds(), 0.0);
+        }
+      }
+
+      if (PL_TEST_INT(loaded.m_SustainPoints.GetCount(), v9.m_SustainPoints.GetCount()))
+      {
+        for (plUInt32 i = 0; i < loaded.m_SustainPoints.GetCount(); ++i)
+        {
+          PL_TEST_DOUBLE(loaded.m_SustainPoints[i].GetSeconds(), v9.m_SustainPoints[i].GetSeconds(), 0.0);
+        }
       }
     }
   }
@@ -448,7 +503,7 @@ PL_CREATE_SIMPLE_TEST(Desc, EventRoundTrip)
     plAudioEventDesc loaded;
     PL_TEST_RESULT(loaded.Load(reader));
 
-    CompareEventDesc(loaded, reference, 8);
+    CompareEventDesc(loaded, reference, 9);
 
     // the whole stream was consumed
     plUInt8 uiExtra = 0;

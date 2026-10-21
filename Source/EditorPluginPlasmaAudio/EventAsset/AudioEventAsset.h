@@ -8,15 +8,16 @@
 
 /// \brief One entry of an instrument playlist.
 ///
-/// Plays the Audio Clip asset m_sClip when set. Otherwise m_sFile is a sound file embedded into the event, and an
-/// entry with neither is a weighted silence entry.
+/// Plays the Audio Event asset m_sEvent when set (a nested event), else the Audio Clip asset m_sClip. Otherwise m_sFile
+/// is a sound file embedded into the event, and an entry with none of them is a weighted silence entry.
 class plAudioEventPlaylistEntry : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plAudioEventPlaylistEntry, plReflectedClass);
 
 public:
-  plString m_sClip; ///< asset GUID of an Audio Clip
-  plString m_sFile; ///< embedded sound file, used when m_sClip is empty
+  plString m_sEvent; ///< asset GUID of an Audio Event played as a nested event
+  plString m_sClip;  ///< asset GUID of an Audio Clip
+  plString m_sFile;  ///< embedded sound file, used when m_sClip is empty
   float m_fWeight = 1.0f;
 };
 
@@ -45,10 +46,13 @@ public:
   float m_fRangeMax = 1.0f;
   float m_fRangeFade = 0.0f;
 
+  float m_fNestedLength = 0.0f; // seconds a nested event plays when the instrument does not loop; 0 = one pass of it
+
   plDynamicArray<plAudioEventPlaylistEntry> m_Playlist;
 };
 
-/// \brief A named, ranged event parameter ("Distance" is built-in and fed automatically).
+/// \brief A named, ranged event parameter ("Distance" is built-in and fed automatically). The window shows each as a
+/// parameter sheet.
 class plAudioEventParameter : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plAudioEventParameter, plReflectedClass);
@@ -58,6 +62,26 @@ public:
   float m_fMin = 0.0f;
   float m_fMax = 1.0f;
   float m_fDefault = 0.0f;
+  float m_fSeekSpeed = 0.0f; ///< units per second the value moves toward what the game set; 0 jumps
+};
+
+/// \brief A named point on the timeline; the game object of the entity gets a plMsgAudioMarker when the playhead passes it.
+class plAudioEventMarker : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plAudioEventMarker, plReflectedClass);
+
+public:
+  plString m_sName;
+  float m_fTime = 0.0f; // seconds
+};
+
+/// \brief A point where the playhead waits until the game sends key-off.
+class plAudioEventSustainPoint : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plAudioEventSustainPoint, plReflectedClass);
+
+public:
+  float m_fTime = 0.0f; // seconds
 };
 
 /// \brief One control point of an automation curve (x = parameter value, y = multiplier).
@@ -70,7 +94,8 @@ public:
   float m_fY = 1.0f;
 };
 
-/// \brief A parameter-driven automation curve modulating event volume or pitch.
+/// \brief A parameter-driven automation curve modulating the event's volume or pitch, an instrument's volume, a
+/// low-pass cutoff or a send to an aux bus.
 class plAudioEventAutomation : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plAudioEventAutomation, plReflectedClass);
@@ -78,6 +103,8 @@ class plAudioEventAutomation : public plReflectedClass
 public:
   plString m_sParameter;
   plEnum<plAudioEventAutomationTarget> m_eTarget;
+  plString m_sInstrument; ///< InstrumentVolume: the name of the instrument
+  plString m_sBus;        ///< SendLevel: the aux bus
   plDynamicArray<plAudioEventCurvePoint> m_Points;
 };
 
@@ -90,6 +117,14 @@ class plAudioEventAssetMetaInfo : public plReflectedClass
 public:
   plDynamicArray<plString> m_Parameters;
   plDynamicArray<plString> m_SwitchStates;
+
+  /// \brief One pass of the event's timeline in seconds: where its last sound ends (0 when no length is known), and
+  /// whether an instrument loops past it.
+  float m_fLength = 0.0f;
+  bool m_bLoops = false;
+
+  /// \brief The meta info of the event asset with that GUID. Returns false for an unknown asset.
+  static bool Find(plStringView sAssetGuid, plAudioEventAssetMetaInfo& out_info);
 };
 
 class plAudioEventAssetProperties : public plReflectedClass
@@ -135,6 +170,8 @@ public:
   plDynamicArray<plAudioEventInstrument> m_Instruments;
   plDynamicArray<plAudioEventParameter> m_Parameters;
   plDynamicArray<plAudioEventAutomation> m_Automations;
+  plDynamicArray<plAudioEventMarker> m_Markers;
+  plDynamicArray<plAudioEventSustainPoint> m_SustainPoints;
 };
 
 class plAudioEventAssetDocument : public plSimpleAssetDocument<plAudioEventAssetProperties>
@@ -167,6 +204,14 @@ public:
 
   /// \brief The audition status the engine process reported last.
   const plAudioAuditionStatusMsgToEditor& GetAuditionStatus() const { return m_AuditionStatus; }
+
+  /// \brief What an automation object drives, for labels: "Volume", "Pitch", "<instrument> volume", "Filter cutoff" or
+  /// "Send <bus>".
+  static void FormatAutomationTarget(const plDocumentObject* pAutomation, plStringBuilder& out_sTarget);
+
+  /// \brief One pass of the event's timeline in seconds (where its last measured sound ends) and whether an instrument
+  /// loops past it. Clip lengths come from their asset info; embedded sound files are not measured.
+  void ComputeLength(float& out_fLength, bool& out_bLoops) const;
 
   /// \brief Raised for every audition status from the engine process.
   plEvent<const plAudioAuditionStatusMsgToEditor&> m_AuditionEvents;

@@ -17,7 +17,7 @@
 // version 6: voice priority + virtual mode
 // version 7: instrument parameter range
 // version 8: attenuation curve, cone, spread, occlusion settings
-static constexpr plTypeVersion kAudioEventDescVersion = 8;
+static constexpr plTypeVersion kAudioEventDescVersion = 9;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventResource, 1, plRTTIDefaultAllocator<plAudioEventResource>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -41,6 +41,7 @@ PL_END_STATIC_REFLECTED_ENUM;
 
 PL_BEGIN_STATIC_REFLECTED_ENUM(plAudioEventAutomationTarget, 1)
   PL_ENUM_CONSTANTS(plAudioEventAutomationTarget::EventVolume, plAudioEventAutomationTarget::EventPitch)
+  PL_ENUM_CONSTANTS(plAudioEventAutomationTarget::InstrumentVolume, plAudioEventAutomationTarget::FilterCutoff, plAudioEventAutomationTarget::SendLevel)
 PL_END_STATIC_REFLECTED_ENUM;
 // clang-format on
 
@@ -229,6 +230,35 @@ plResult plAudioEventDesc::Save(plStreamWriter& inout_stream) const
   for (const auto& sName : m_SampleNames)
     inout_stream << sName;
 
+  // version 9: seek speeds, the new automation targets' settings, nested events, markers and sustain points
+  for (const auto& parameter : m_Parameters)
+    inout_stream << parameter.m_fSeekSpeed;
+
+  for (const auto& automation : m_Automations)
+  {
+    inout_stream << automation.m_uiInstrument;
+    inout_stream << automation.m_sBus;
+  }
+
+  for (const auto& instrument : m_Instruments)
+  {
+    for (const auto& entry : instrument.m_Playlist)
+      inout_stream << entry.m_sEvent;
+
+    inout_stream << instrument.m_NestedLength;
+  }
+
+  inout_stream << m_Markers.GetCount();
+  for (const plAudioEventMarkerDesc& marker : m_Markers)
+  {
+    inout_stream << marker.m_sName;
+    inout_stream << marker.m_Time;
+  }
+
+  inout_stream << m_SustainPoints.GetCount();
+  for (plTime time : m_SustainPoints)
+    inout_stream << time;
+
   return PL_SUCCESS;
 }
 
@@ -317,6 +347,42 @@ plResult plAudioEventDesc::Load(plStreamReader& inout_stream)
   m_SampleNames.SetCount(uiCount);
   for (auto& sName : m_SampleNames)
     inout_stream >> sName;
+
+  m_Markers.Clear();
+  m_SustainPoints.Clear();
+
+  if (uiVersion < 9)
+    return PL_SUCCESS;
+
+  for (auto& parameter : m_Parameters)
+    inout_stream >> parameter.m_fSeekSpeed;
+
+  for (auto& automation : m_Automations)
+  {
+    inout_stream >> automation.m_uiInstrument;
+    inout_stream >> automation.m_sBus;
+  }
+
+  for (auto& instrument : m_Instruments)
+  {
+    for (auto& entry : instrument.m_Playlist)
+      inout_stream >> entry.m_sEvent;
+
+    inout_stream >> instrument.m_NestedLength;
+  }
+
+  inout_stream >> uiCount;
+  m_Markers.SetCount(uiCount);
+  for (plAudioEventMarkerDesc& marker : m_Markers)
+  {
+    inout_stream >> marker.m_sName;
+    inout_stream >> marker.m_Time;
+  }
+
+  inout_stream >> uiCount;
+  m_SustainPoints.SetCount(uiCount);
+  for (plTime& time : m_SustainPoints)
+    inout_stream >> time;
 
   return PL_SUCCESS;
 }
@@ -554,23 +620,42 @@ void plAudioEventResource::GetSampleLength(plUInt32 uiIndex, plUInt64& out_uiFra
   out_uiSampleRate = length.m_uiSampleRate;
 }
 
+plAudioEventResourceHandle plAudioEventResource::GetNestedEvent(plUInt32 uiInstrument, plUInt32 uiEntry) const
+{
+  if (uiInstrument >= m_InstrumentClipOffsets.GetCount() || uiInstrument >= m_Desc.m_Instruments.GetCount())
+    return {};
+
+  const plUInt32 uiIndex = m_InstrumentClipOffsets[uiInstrument] + uiEntry;
+  const plUInt32 uiEnd = (uiInstrument + 1 < m_InstrumentClipOffsets.GetCount()) ? m_InstrumentClipOffsets[uiInstrument + 1] : m_NestedEvents.GetCount();
+
+  if (uiIndex >= uiEnd)
+    return {};
+
+  // an event that nests itself keeps no handle to itself (see SetupClips)
+  if (!m_NestedEvents[uiIndex].IsValid() && m_Desc.m_Instruments[uiInstrument].m_Playlist[uiEntry].m_sEvent == GetResourceID())
+    return plAudioEventResourceHandle(const_cast<plAudioEventResource*>(this));
+
+  return m_NestedEvents[uiIndex];
+}
+
 void plAudioEventResource::SetupClips()
 {
   m_Clips.Clear();
+  m_NestedEvents.Clear();
   m_InstrumentClipOffsets.Clear();
   m_SampleLengths.Clear();
 
-  bool bAnyClip = false;
+  bool bAnyReference = false;
   for (const auto& instrument : m_Desc.m_Instruments)
   {
     for (const auto& entry : instrument.m_Playlist)
     {
-      bAnyClip |= !entry.m_sClip.IsEmpty();
+      bAnyReference |= !entry.m_sClip.IsEmpty() || !entry.m_sEvent.IsEmpty();
     }
   }
 
-  // events without clips (embedded samples only) keep both arrays empty
-  if (!bAnyClip)
+  // events without clips or nested events (embedded samples only) keep the arrays empty
+  if (!bAnyReference)
     return;
 
   m_InstrumentClipOffsets.SetCount(m_Desc.m_Instruments.GetCount());
@@ -582,6 +667,18 @@ void plAudioEventResource::SetupClips()
     for (const auto& entry : m_Desc.m_Instruments[i].m_Playlist)
     {
       plAudioClipResourceHandle& hClip = m_Clips.ExpandAndGetRef();
+      plAudioEventResourceHandle& hEvent = m_NestedEvents.ExpandAndGetRef();
+
+      // a nested event takes precedence over a clip; a handle of the event to itself would keep it loaded forever
+      if (!entry.m_sEvent.IsEmpty())
+      {
+        if (entry.m_sEvent != GetResourceID())
+        {
+          hEvent = plResourceManager::LoadResource<plAudioEventResource>(entry.m_sEvent);
+          plResourceManager::PreloadResource(hEvent);
+        }
+        continue;
+      }
 
       if (entry.m_sClip.IsEmpty())
         continue;
@@ -603,6 +700,8 @@ plResourceLoadDesc plAudioEventResource::UnloadData(Unload WhatToUnload)
   m_SampleData.Compact();
   m_Clips.Clear();
   m_Clips.Compact();
+  m_NestedEvents.Clear();
+  m_NestedEvents.Compact();
   m_InstrumentClipOffsets.Clear();
   m_InstrumentClipOffsets.Compact();
   m_SampleLengths.Clear();

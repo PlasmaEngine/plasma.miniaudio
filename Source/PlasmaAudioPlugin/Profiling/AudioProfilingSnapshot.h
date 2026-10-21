@@ -116,6 +116,8 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioLogEventType
     EventDropped,     ///< a waiting start was dropped: the event is missing, or a one-shot did not load in time
     BudgetExceeded,   ///< a bank finished loading with the loaded content over a memory budget
     StreamUnderrun,   ///< streamed voices ran out of data since the last audio update (detail: how often)
+    KeyOff,           ///< an event instance released a sustain point
+    Marker,           ///< an event instance passed a timeline marker (detail: its name)
     Count
   };
 

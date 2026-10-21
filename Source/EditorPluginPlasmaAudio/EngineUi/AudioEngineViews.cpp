@@ -161,6 +161,103 @@ void plEditorUiAudioStatusRow::OnUiUpdate()
 }
 
 //////////////////////////////////////////////////////////////////////////
+// plEditorUiAudioMessageList
+
+plEditorUiAudioMessageList::plEditorUiAudioMessageList(plStringView sTitle, plStringView sEmptyHint)
+  : plEditorUiContent("AudioMessageList")
+  , m_sTitle(sTitle)
+  , m_sEmptyHint(sEmptyHint)
+{
+}
+
+void plEditorUiAudioMessageList::Add(double fTime, plStringView sText, Kind kind)
+{
+  if (m_Messages.GetCount() >= MaxMessages)
+    m_Messages.RemoveAtAndCopy(0);
+
+  Message& message = m_Messages.ExpandAndGetRef();
+  message.m_fTime = fTime;
+  message.m_sText = sText;
+  message.m_Kind = kind;
+
+  m_bDrawDirty = true;
+  RequestRedraw();
+}
+
+void plEditorUiAudioMessageList::Clear()
+{
+  if (m_Messages.IsEmpty())
+    return;
+
+  m_Messages.Clear();
+  m_bDrawDirty = true;
+  RequestRedraw();
+}
+
+float plEditorUiAudioMessageList::GetMinimumHeight()
+{
+  return plAudioEngineUi::SectionHeight + 4.0f * 20.0f;
+}
+
+void plEditorUiAudioMessageList::OnUiUpdate()
+{
+  using namespace plEditorUi;
+
+  if (!IsReady())
+    return;
+
+  if (m_bRebuild)
+  {
+    m_bRebuild = false;
+    BuildDrawingDocument(*this, Surface());
+    m_bDrawDirty = true;
+  }
+
+  const plVec2 size = GetSurface()->GetLogicalSize();
+  if (!m_bDrawDirty && size == m_vDrawnSize)
+    return;
+
+  m_bDrawDirty = false;
+  m_vDrawnSize = size;
+  m_Writer.Clear();
+
+  plStringBuilder sCount;
+  if (!m_Messages.IsEmpty())
+    sCount.SetFormat("{}", m_Messages.GetCount());
+
+  plAudioEngineUi::SectionHeader(m_Writer, plRectFloat(0, 0, size.x, plAudioEngineUi::SectionHeight), m_sTitle, plAudioEngineUi::AudioColor(), sCount);
+
+  constexpr float fRowHeight = 20.0f;
+  float y = plAudioEngineUi::SectionHeight + 4.0f;
+
+  if (m_Messages.IsEmpty())
+  {
+    m_Writer.Text(plRectFloat(8.0f, y, size.x - 16.0f, fRowHeight), m_sEmptyHint, Dim(), FontSize - 2);
+  }
+
+  // newest first, as many as fit
+  for (plUInt32 i = m_Messages.GetCount(); i > 0 && y + fRowHeight <= size.y; --i)
+  {
+    const Message& message = m_Messages[i - 1];
+
+    plStringBuilder sTime;
+    sTime.SetFormat("{}s", plArgF(message.m_fTime, 2));
+    const float fTimeWidth = MeasureCodeText(sTime, FontSize - 2) + 8.0f;
+
+    // the theme's green is the Y axis colour
+    const plColorGammaUB textColor = message.m_Kind == Kind::Ok ? Axis(1) : (message.m_Kind == Kind::Warning ? Warning() : Foreground());
+
+    m_Writer.Text(plRectFloat(8.0f, y, fTimeWidth, fRowHeight), sTime, Dim(), FontSize - 2, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
+    m_Writer.Text(plRectFloat(8.0f + fTimeWidth, y, plMath::Max(size.x - fTimeWidth - 16.0f, 1.0f), fRowHeight), message.m_sText, textColor, FontSize - 1);
+    m_Writer.Rect(plRectFloat(8.0f, y + fRowHeight - 1.0f, size.x - 16.0f, 1.0f), Line());
+
+    y += fRowHeight;
+  }
+
+  m_Writer.Publish(GetSurface()->GetBlackboard(), s_sDrawing);
+}
+
+//////////////////////////////////////////////////////////////////////////
 // plEditorUiAudioMeter
 
 plEditorUiAudioMeter::plEditorUiAudioMeter()

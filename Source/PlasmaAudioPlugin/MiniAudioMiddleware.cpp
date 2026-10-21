@@ -661,6 +661,12 @@ plResult plPlasmaAudioMiddleware::SetEventParameter(plAudioSystemEntityData* pEn
     return PL_SUCCESS;
   }
 
+  if (sParamName == plAudioSystemReservedParameter::KeyOff)
+  {
+    m_EventManager.KeyOff(pEntity);
+    return PL_SUCCESS;
+  }
+
   m_EventManager.SetEventParameter(pEntity, sParamName, fValue);
   return PL_SUCCESS;
 }
@@ -1380,6 +1386,14 @@ bool plPlasmaAudioMiddleware::IsEventDataPlaying(const plAudioSystemEventData* p
     return m_EventManager.IsEventPlaying(pEvent);
   }
   return false;
+}
+
+void plPlasmaAudioMiddleware::TakeEventMarkers(plAudioSystemEventData* pEventData, plDynamicArray<plString>& out_markers)
+{
+  if (auto* pEvent = plDynamicCast<plPlasmaAudioEventData*>(pEventData))
+  {
+    m_EventManager.TakeMarkers(pEvent, out_markers);
+  }
 }
 
 plResult plPlasmaAudioMiddleware::LoadMixer(const plAudioMixerDesc& desc)

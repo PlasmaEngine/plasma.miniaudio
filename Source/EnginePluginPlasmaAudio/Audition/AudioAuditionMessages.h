@@ -14,6 +14,7 @@ struct PL_ENGINEPLUGINPLASMAAUDIO_DLL plAudioAuditionCommand
     Stop,          ///< stops with the event's stop fade
     SetParameters, ///< changes parameter values of the playing audition
     Poll,          ///< only answers with the status
+    KeyOff,        ///< releases the next sustain point of the playing audition
 
     Default = Poll
   };
@@ -68,6 +69,12 @@ public:
   /// \brief Per instrument: whether it sounds (1) and the volume of its parameter range.
   plDynamicArray<plUInt8> m_InstrumentSounding;
   plDynamicArray<float> m_InstrumentRangeGains;
+
+  plUInt32 m_uiSustainsLeft = 0; ///< sustain points not released yet
+  bool m_bHolding = false;       ///< the playhead waits at a sustain point for the key-off
+
+  /// \brief The markers the audition passed since the last status, oldest first.
+  plDynamicArray<plString> m_Markers;
 
   /// \brief Why the last Play did not start, if it failed.
   plString m_sError;

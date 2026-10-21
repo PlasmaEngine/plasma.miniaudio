@@ -56,6 +56,9 @@ public:
   /// \brief Aux bus group mapped to the given environment name, or nullptr.
   ma_sound_group* GetEnvironmentAuxBus(plStringView sEnvironmentName);
 
+  /// \brief The aux bus of that name, or nullptr when the mixer has no such aux bus.
+  ma_sound_group* GetAuxBus(plStringView sBusName);
+
   void SetBusVolume(plUInt32 uiBusIndex, float fLinearGain);
   void SetBusPitch(plUInt32 uiBusIndex, float fPitch);
   void SetBusSendLevel(plUInt32 uiBusIndex, plUInt32 uiSendIndex, float fLinearLevel);

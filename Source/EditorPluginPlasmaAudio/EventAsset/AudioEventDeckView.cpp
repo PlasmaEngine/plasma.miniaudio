@@ -1,5 +1,6 @@
 #include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
+#include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
@@ -24,6 +25,9 @@ namespace
   constexpr float s_fRowPitch = 30.0f;
   constexpr float s_fLabelWidth = 96.0f;
   constexpr float s_fRandomizationMax = 24.0f;
+
+  /// The automation targets the add menu offers per parameter (plAudioEventAutomationTarget 0..SendLevel).
+  constexpr plUInt32 s_uiTargets = plAudioEventAutomationTarget::SendLevel + 1;
 
   const plHashedString s_sDeckEntry = plMakeHashedString("Deck.Drawing");
   const plHashedString s_sAutomationEntry = plMakeHashedString("Automation.Drawing");
@@ -81,11 +85,26 @@ namespace
   /// The line a playlist entry shows, with its tooltip.
   void DescribeEntry(const plDocumentObject* pEntry, plString& out_sText, plString& out_sToolTip, bool& out_bSilence)
   {
+    const plString sEvent = pEntry->GetTypeAccessor().GetValue("Event").ConvertTo<plString>();
     const plString sClip = pEntry->GetTypeAccessor().GetValue("Clip").ConvertTo<plString>();
     const plString sFile = pEntry->GetTypeAccessor().GetValue("File").ConvertTo<plString>();
     out_bSilence = false;
 
-    if (!sClip.IsEmpty())
+    if (!sEvent.IsEmpty())
+    {
+      const auto pSubAsset = plAssetCurator::GetSingleton()->FindSubAsset(sEvent);
+      if (pSubAsset.isValid())
+      {
+        out_sText = plStringBuilder("Event: ", pSubAsset->GetName());
+        out_sToolTip = "Nested event - double-click its clip on the timeline to open it";
+      }
+      else
+      {
+        out_sText = "missing event";
+        out_sToolTip = sEvent;
+      }
+    }
+    else if (!sClip.IsEmpty())
     {
       plAudioClipAssetMetaInfo clipInfo;
       plString sClipName;
@@ -271,6 +290,7 @@ void plEditorUiAudioEventDeck::BuildDocument()
     } adds[] = {
       {"Add Files...", "Deck.AddFiles", "Appends sound files to this playlist as Audio Clips (the clip next to each file is reused or created)"},
       {"Clip...", "Deck.AddClip", "Appends an existing Audio Clip to this playlist"},
+      {"Event...", "Deck.AddEvent", "Appends another Audio Event to this playlist: it plays as a nested event with its own instruments and parameters"},
       {"Silence", "Deck.AddSilence", "Adds a weighted silence entry"},
     };
 
@@ -429,7 +449,7 @@ void plEditorUiAudioEventDeck::DrawInstrumentColumn(float fWidth)
   // add buttons
   const float y = s_fEntryTop + entries.GetCount() * s_fEntryPitch;
   float x = s_fPad;
-  for (const char* szLabel : {"Add Files...", "Clip...", "Silence"})
+  for (const char* szLabel : {"Add Files...", "Clip...", "Event...", "Silence"})
   {
     const float fButton = plAudioEngineUi::TextButtonWidth(szLabel, true);
     plAudioEngineUi::TextButton(m_Writer, plRectFloat(x, y, fButton, ControlHeight), szLabel, IconPath(Icon::Add));
@@ -537,6 +557,8 @@ void plEditorUiAudioEventDeck::OnUiEvent(const plMsgUiEvent& event)
     m_OnAddFiles();
   else if (sId == "Deck.AddClip" && m_OnAddClip.IsValid())
     m_OnAddClip();
+  else if (sId == "Deck.AddEvent" && m_OnAddEvent.IsValid())
+    m_OnAddEvent();
   else if (sId == "Deck.AddSilence" && m_OnAddSilence.IsValid())
     m_OnAddSilence();
   else if (sId.EndsWith(".Submit"))
@@ -878,6 +900,10 @@ void plEditorUiAudioEventAutomation::GetRanges(double& out_fMinX, double& out_fM
   }
 
   out_fMaxY = plMath::Max(out_fMaxY, 1.0);
+
+  // a cutoff curve is in Hz: the whole audible range
+  if (pAutomation != nullptr && pAutomation->GetTypeAccessor().GetValue("Target").ConvertTo<plInt64>() == plAudioEventAutomationTarget::FilterCutoff)
+    out_fMaxY = plMath::Max(out_fMaxY, 22000.0);
 }
 
 plRectFloat plEditorUiAudioEventAutomation::GetCurveRect() const
@@ -976,7 +1002,7 @@ void plEditorUiAudioEventAutomation::Draw()
 
   // header: AUTOMATION (PARAMETER) and the target line
   plStringBuilder sHeader("Automation");
-  plStringView sTarget = "no automation \xC2\xB7 add one below";
+  plStringBuilder sTarget = "no automation \xC2\xB7 add one below";
   if (pAutomation != nullptr)
   {
     plStringBuilder sParam = pAutomation->GetTypeAccessor().GetValue("Parameter").ConvertTo<plString>();
@@ -984,7 +1010,8 @@ void plEditorUiAudioEventAutomation::Draw()
       sParam = "?";
 
     sHeader.SetFormat("Automation ({})", sParam);
-    sTarget = pAutomation->GetTypeAccessor().GetValue("Target").ConvertTo<plInt64>() == plAudioEventAutomationTarget::EventPitch ? "Event pitch \xC2\xB7 curve" : "Event volume \xC2\xB7 curve";
+    plAudioEventAssetDocument::FormatAutomationTarget(pAutomation, sTarget);
+    sTarget.Append(" \xC2\xB7 curve \xC2\xB7 change the target in Details");
   }
 
   plAudioEngineUi::SectionHeader(m_Writer, plRectFloat(0.0f, 0.0f, size.x, s_fHeader), sHeader, audio);
@@ -1072,22 +1099,29 @@ void plEditorUiAudioEventAutomation::ShowAddMenu()
     const plUInt32 uiIndex = names.GetCount();
     names.PushBack(sName);
 
+    // one action per target; the target is the id's remainder
     plStringBuilder sLabel;
     sLabel.SetFormat("Volume by {}", sName);
-    menu.AddAction(sLabel, uiIndex * 2);
+    menu.AddAction(sLabel, uiIndex * s_uiTargets + plAudioEventAutomationTarget::EventVolume);
     sLabel.SetFormat("Pitch by {}", sName);
-    menu.AddAction(sLabel, uiIndex * 2 + 1);
+    menu.AddAction(sLabel, uiIndex * s_uiTargets + plAudioEventAutomationTarget::EventPitch);
+    sLabel.SetFormat("Instrument volume by {}", sName);
+    menu.AddAction(sLabel, uiIndex * s_uiTargets + plAudioEventAutomationTarget::InstrumentVolume);
+    sLabel.SetFormat("Filter cutoff by {}", sName);
+    menu.AddAction(sLabel, uiIndex * s_uiTargets + plAudioEventAutomationTarget::FilterCutoff);
+    sLabel.SetFormat("Send level by {}", sName);
+    menu.AddAction(sLabel, uiIndex * s_uiTargets + plAudioEventAutomationTarget::SendLevel);
   }
 
   if (names.IsEmpty())
-    menu.AddAction("add a parameter first ('+ Parameter' tab)", 0).m_bEnabled = false;
+    menu.AddAction("add a parameter first ('+ Sheet' tab)", 0).m_bEnabled = false;
 
   plEditorUiMenuView::Show(*GetSurface(), plVec2(s_fPad, s_fCurveTop + s_fCurveHeight + 8.0f + plEditorUi::ControlHeight), menu, [this, names](plUInt32 uiId)
     {
-      if (uiId / 2 >= names.GetCount() || !m_OnAddAutomation.IsValid())
+      if (uiId / s_uiTargets >= names.GetCount() || !m_OnAddAutomation.IsValid())
         return;
 
-      m_OnAddAutomation((uiId % 2) == 0 ? plAudioEventAutomationTarget::EventVolume : plAudioEventAutomationTarget::EventPitch, names[uiId / 2]);
+      m_OnAddAutomation(static_cast<plUInt8>(uiId % s_uiTargets), names[uiId / s_uiTargets]);
     });
 }
 

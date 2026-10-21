@@ -8,6 +8,7 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plAudioAuditionCommand, 1)
   PL_ENUM_CONSTANT(plAudioAuditionCommand::Stop),
   PL_ENUM_CONSTANT(plAudioAuditionCommand::SetParameters),
   PL_ENUM_CONSTANT(plAudioAuditionCommand::Poll),
+  PL_ENUM_CONSTANT(plAudioAuditionCommand::KeyOff),
 PL_END_STATIC_REFLECTED_ENUM;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioAuditionMsgToEngine, 1, plRTTIDefaultAllocator<plAudioAuditionMsgToEngine>)
@@ -41,6 +42,9 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioAuditionStatusMsgToEditor, 1, plRTTIDefau
     PL_MEMBER_PROPERTY("Peak", m_fPeak),
     PL_ARRAY_MEMBER_PROPERTY("InstrumentSounding", m_InstrumentSounding),
     PL_ARRAY_MEMBER_PROPERTY("InstrumentRangeGains", m_InstrumentRangeGains),
+    PL_MEMBER_PROPERTY("SustainsLeft", m_uiSustainsLeft),
+    PL_MEMBER_PROPERTY("Holding", m_bHolding),
+    PL_ARRAY_MEMBER_PROPERTY("Markers", m_Markers),
     PL_MEMBER_PROPERTY("Error", m_sError),
   }
   PL_END_PROPERTIES;

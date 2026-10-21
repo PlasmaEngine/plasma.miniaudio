@@ -88,7 +88,8 @@ PL_DECLARE_REFLECTABLE_TYPE(PL_PLASMAAUDIOPLUGIN_DLL, plAudioEventVirtualMode);
 
 /// \brief One entry of an instrument playlist.
 ///
-/// An entry plays the audio clip m_sClip when set, otherwise the embedded sample m_uiSample (or silence).
+/// An entry plays the nested event m_sEvent when set, else the audio clip m_sClip when set, otherwise the embedded sample
+/// m_uiSample (or silence).
 struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventPlaylistEntryDesc
 {
   /// \brief Index into plAudioEventDesc::m_SampleNames, or 0xFFFF for a silence entry. Unused when m_sClip is set.
@@ -97,6 +98,10 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventPlaylistEntryDesc
 
   /// \brief Resource id of the plAudioClipResource this entry plays. Empty = the embedded sample m_uiSample.
   plString m_sClip;
+
+  /// \brief Resource id of a plAudioEventResource this entry plays as a nested event, on the same entity. It gets the
+  /// parent's parameter values by name, and stops with the parent. Empty = not nested.
+  plString m_sEvent;
 
   void Save(plStreamWriter& inout_stream) const;
   void Load(plStreamReader& inout_stream, plTypeVersion uiVersion);
@@ -141,6 +146,10 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventInstrumentDesc
   float m_fRangeMax = 1.0f;
   float m_fRangeFade = 0.0f;
 
+  /// \brief How long a nested event of a non-looping instrument plays before it is stopped with its stop fade; zero
+  /// plays one pass of the nested event's timeline. A looping instrument's nested event plays until the event stops.
+  plTime m_NestedLength = plTime::MakeZero();
+
   /// \brief Volume factor of the parameter range at a parameter value.
   PL_NODISCARD float GetRangeGain(float fValue) const;
 
@@ -159,6 +168,9 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventParameterDesc
   float m_fMax = 1.0f;
   float m_fDefault = 0.0f;
 
+  /// \brief How fast the value follows what the game sets, in parameter units per second. 0 jumps.
+  float m_fSeekSpeed = 0.0f;
+
   void Save(plStreamWriter& inout_stream) const;
   void Load(plStreamReader& inout_stream);
 };
@@ -170,8 +182,11 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventAutomationTarget
 
   enum Enum : StorageType
   {
-    EventVolume = 0, ///< curve value = linear volume multiplier
-    EventPitch = 1,  ///< curve value = pitch factor multiplier
+    EventVolume = 0,      ///< curve value = linear volume multiplier
+    EventPitch = 1,       ///< curve value = pitch factor multiplier
+    InstrumentVolume = 2, ///< curve value = linear volume multiplier of the instrument m_uiInstrument
+    FilterCutoff = 3,     ///< curve value = low-pass cutoff in Hz (the lower of it and the occlusion cutoff applies)
+    SendLevel = 4,        ///< curve value = linear level of a send to the aux bus m_sBus
 
     Default = EventVolume
   };
@@ -179,12 +194,21 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventAutomationTarget
 
 PL_DECLARE_REFLECTABLE_TYPE(PL_PLASMAAUDIOPLUGIN_DLL, plAudioEventAutomationTarget);
 
+/// \brief A named point on an event's timeline.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventMarkerDesc
+{
+  plString m_sName;
+  plTime m_Time = plTime::MakeZero();
+};
+
 /// \brief A curve driven by an event parameter, modulating a target property of the instance.
 struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventAutomationDesc
 {
   plUInt8 m_uiParameter = 0; ///< index into plAudioEventDesc::m_Parameters
   plAudioEventAutomationTarget::Enum m_eTarget = plAudioEventAutomationTarget::Default;
-  plCurve1D m_Curve; ///< x = parameter value (in parameter range), y = multiplier
+  plCurve1D m_Curve; ///< x = parameter value (in parameter range), y = the target's value
+  plUInt8 m_uiInstrument = 0; ///< InstrumentVolume: index into plAudioEventDesc::m_Instruments
+  plString m_sBus;            ///< SendLevel: name of the aux bus
 
   void Save(plStreamWriter& inout_stream) const;
   void Load(plStreamReader& inout_stream);
@@ -256,6 +280,13 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventDesc
   plDynamicArray<plAudioEventParameterDesc> m_Parameters;
   plDynamicArray<plAudioEventAutomationDesc> m_Automations;
 
+  /// \brief Named points on the timeline; the game object of the entity gets a message when the playhead passes one.
+  plDynamicArray<plAudioEventMarkerDesc> m_Markers;
+
+  /// \brief Timeline positions where the playhead waits until the game sends key-off (in time order). Instruments that
+  /// start later wait with it; those already playing go on.
+  plDynamicArray<plTime> m_SustainPoints;
+
   /// \brief Original file names of the embedded samples (debug / editor roundtrip).
   plDynamicArray<plString> m_SampleNames;
 
@@ -301,6 +332,10 @@ public:
   /// \brief The clip of playlist entry uiEntry of instrument uiInstrument; an invalid handle when the entry has no clip.
   const plAudioClipResourceHandle& GetClip(plUInt32 uiInstrument, plUInt32 uiEntry) const;
 
+  /// \brief The nested event of playlist entry uiEntry of instrument uiInstrument; an invalid handle when the entry
+  /// does not play an event.
+  plAudioEventResourceHandle GetNestedEvent(plUInt32 uiInstrument, plUInt32 uiEntry) const;
+
   /// \brief Replaces out_events with an entry per loaded event resource (name and embedded sample bytes). Any thread.
   ///
   /// Events are listed from their own registry of loaded events, not through the resource manager: an event enters it
@@ -326,7 +361,7 @@ private:
   virtual plResourceLoadDesc UpdateContent(plStreamReader* pStream) override;
   virtual void UpdateMemoryUsage(MemoryUsage& out_NewMemoryUsage) override;
 
-  /// \brief Fills m_Clips and m_InstrumentClipOffsets from m_Desc and preloads the clips.
+  /// \brief Fills m_Clips, m_NestedEvents and m_InstrumentClipOffsets from m_Desc and preloads what they reference.
   void SetupClips();
 
   plAudioEventDesc m_Desc;
@@ -334,7 +369,8 @@ private:
 
   /// \brief One handle per playlist entry of every instrument, instrument major; invalid for entries without a clip.
   plDynamicArray<plAudioClipResourceHandle> m_Clips;
-  plDynamicArray<plUInt32> m_InstrumentClipOffsets; ///< index into m_Clips of the first entry of each instrument
+  plDynamicArray<plAudioEventResourceHandle> m_NestedEvents; ///< like m_Clips; invalid for entries without an event
+  plDynamicArray<plUInt32> m_InstrumentClipOffsets;          ///< index into m_Clips of the first entry of each instrument
 
   struct SampleLength
   {

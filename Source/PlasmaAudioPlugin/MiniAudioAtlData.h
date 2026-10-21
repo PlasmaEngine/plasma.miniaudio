@@ -143,6 +143,11 @@ public:
   /// \brief Where on its timeline the instance starts. Instruments that started earlier begin mid-sample. The offset is
   /// limited to the time the audio engine has been running.
   plTime m_StartOffset = plTime::MakeZero();
+
+  /// \brief The names of the timeline markers the instance passed and nobody took yet, in the order they were passed.
+  /// Kept here rather than on the instance, so the markers of an instance that ended still reach the game. Guarded by
+  /// the event manager's mutex.
+  plHybridArray<plString, 2> m_PassedMarkers;
 };
 
 class PL_PLASMAAUDIOPLUGIN_DLL plPlasmaAudioTriggerData final : public plAudioSystemTriggerData

@@ -22,6 +22,7 @@ struct plAudioAudition::Command
     Play,
     Stop,
     SetParameters,
+    KeyOff,
     Remove
   };
 
@@ -86,6 +87,31 @@ void plAudioAudition::SetParameters(plUInt64 uiKey, plArrayPtr<const plString> n
   cmd.m_uiKey = uiKey;
   cmd.m_ParameterNames = names;
   cmd.m_ParameterValues = values;
+}
+
+void plAudioAudition::KeyOff(plUInt64 uiKey)
+{
+  PL_LOCK(m_Mutex);
+
+  Command& cmd = m_Commands.ExpandAndGetRef();
+  cmd.m_Type = Command::Type::KeyOff;
+  cmd.m_uiKey = uiKey;
+}
+
+void plAudioAudition::TakeMarkers(plUInt64 uiKey, plDynamicArray<plString>& out_markers)
+{
+  PL_LOCK(m_Mutex);
+
+  plAudioAuditionStatus* pStatus = m_Status.GetValue(uiKey);
+  if (pStatus == nullptr)
+    return;
+
+  for (plString& sMarker : pStatus->m_Markers)
+  {
+    out_markers.PushBack(std::move(sMarker));
+  }
+
+  pStatus->m_Markers.Clear();
 }
 
 void plAudioAudition::Remove(plUInt64 uiKey)
@@ -335,6 +361,13 @@ void plAudioAudition::Update(plPlasmaAudioEventManager& ref_events, plMiniAudioB
         }
         break;
 
+      case Command::Type::KeyOff:
+        if (pSlot != nullptr)
+        {
+          ref_events.KeyOff(&(*pSlot)->m_Entity);
+        }
+        break;
+
       case Command::Type::Remove:
         if (pSlot != nullptr)
         {
@@ -367,12 +400,19 @@ void plAudioAudition::Update(plPlasmaAudioEventManager& ref_events, plMiniAudioB
 
   for (auto it = m_Slots.GetIterator(); it.IsValid(); ++it)
   {
-    const Slot& slot = *it.Value();
+    Slot& slot = *it.Value();
 
     // a key removed since the commands were taken has no status any more
     plAudioAuditionStatus* pStatus = m_Status.GetValue(it.Key());
     if (pStatus == nullptr)
       continue;
+
+    // the markers wait for the editor to take them; an editor that stopped asking does not grow the list forever
+    ref_events.TakeMarkers(&slot.m_EventData, pStatus->m_Markers);
+    if (pStatus->m_Markers.GetCount() > MaxQueuedMarkers)
+    {
+      pStatus->m_Markers.RemoveAtAndCopy(0, pStatus->m_Markers.GetCount() - MaxQueuedMarkers);
+    }
 
     // a play requested since the commands were taken keeps its waiting state until the next update
     bool bQueued = false;
@@ -385,6 +425,7 @@ void plAudioAudition::Update(plPlasmaAudioEventManager& ref_events, plMiniAudioB
 
     bool bWaiting = false;
     pStatus->m_bPlaying = ref_events.GetEventState(&slot.m_EventData, bWaiting, pStatus->m_fPosition, pStatus->m_InstrumentSounding, pStatus->m_InstrumentRangeGains);
+    ref_events.GetSustainState(&slot.m_EventData, pStatus->m_uiSustainsLeft, pStatus->m_bHolding);
     pStatus->m_bWaiting = bWaiting || slot.m_bPendingStart;
     pStatus->m_bPlaying |= slot.m_bPendingStart;
     pStatus->m_bHasMixer = ref_busGraph.IsBuilt();

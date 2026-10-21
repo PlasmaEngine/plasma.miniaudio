@@ -90,6 +90,10 @@ void plAudioEventContext::HandleMessage(const plEditorEngineDocumentMsg* pMsg)
       pAudition->SetParameters(m_uiKey, pAuditionMsg->m_ParameterNames, pAuditionMsg->m_ParameterValues);
       break;
 
+    case plAudioAuditionCommand::KeyOff:
+      pAudition->KeyOff(m_uiKey);
+      break;
+
     default:
       break;
   }
@@ -149,6 +153,10 @@ void plAudioEventContext::SendStatus(const plString& sError)
     {
       msg.m_InstrumentSounding[i] = status.m_InstrumentSounding[i] ? 1 : 0;
     }
+
+    msg.m_uiSustainsLeft = status.m_uiSustainsLeft;
+    msg.m_bHolding = status.m_bHolding;
+    pAudition->TakeMarkers(m_uiKey, msg.m_Markers);
   }
 
   SendProcessMessage(&msg);
