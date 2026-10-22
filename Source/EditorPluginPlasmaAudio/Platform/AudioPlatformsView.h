@@ -15,7 +15,7 @@ struct plEditorUiPointerEvent;
 /// policy and fade, and a button that simulates a suspend in the editor's engine process. The side shows what the
 /// engine process's output runs on and a log of its state changes.
 ///
-/// The view only shows and asks; plQtAudioPlatformsDlg owns the profiles and talks to the engine process.
+/// The view only shows and asks; plAudioPlatformsDlg owns the profiles and talks to the engine process.
 class PL_EDITORPLUGINPLASMAAUDIO_DLL plEditorUiAudioPlatformsView : public plEditorUiContent
 {
 public:

@@ -1,5 +1,6 @@
 #include <PlasmaAudioPlugin/PlasmaAudioPluginPCH.h>
 
+#include <AudioSystem/Core/AudioMiddleware.h>
 #include <Core/ResourceManager/ResourceManager.h>
 #include <Foundation/Algorithm/HashingUtils.h>
 #include <Foundation/Profiling/Profiling.h>
@@ -31,6 +32,7 @@ namespace
       {
         pSource->m_uiLeadFramesRemaining = static_cast<ma_uint64>(static_cast<double>(pSource->m_uiStartFrame - uiNow) * pSource->m_fSourceFramesPerEngineFrame + 0.5);
       }
+      pSource->m_fEnginePosition = static_cast<double>(uiNow);
       pSource->m_bLeadResolved = true;
     }
 
@@ -61,15 +63,50 @@ namespace
       pSource->m_uiLeadFramesRemaining -= uiRead;
     }
 
+    const double fSourcePerEngine = plMath::Max(pSource->m_fSourceFramesPerEngineFrame, 1e-6);
+
     if (uiRead < uiFrameCount && !pSource->m_bPadded)
     {
       void* pInnerOut = (pFramesOut != nullptr) ? ma_offset_pcm_frames_ptr(pFramesOut, uiRead, pSource->m_eFormat, pSource->m_uiChannels) : nullptr;
+
+      // an end frame limits the read to the source frames before it
+      const plInt64 iEndFrame = pSource->m_iEndFrame;
+      const double fInnerStart = pSource->m_fEnginePosition + static_cast<double>(uiRead) / fSourcePerEngine;
+      ma_uint64 uiWanted = uiFrameCount - uiRead;
+      bool bEndReached = false;
+
+      if (iEndFrame > 0)
+      {
+        const double fLeft = plMath::Max((static_cast<double>(iEndFrame) - fInnerStart) * fSourcePerEngine, 0.0);
+        const ma_uint64 uiLeft = static_cast<ma_uint64>(fLeft + 0.5);
+        if (uiLeft <= uiWanted)
+        {
+          uiWanted = uiLeft;
+          bEndReached = true;
+        }
+      }
 
       ma_uint64 uiCursorBefore = 0;
       const bool bCursorBefore = ma_data_source_get_cursor_in_pcm_frames(pSource->m_pInner, &uiCursorBefore) == MA_SUCCESS;
 
       ma_uint64 uiInnerRead = 0;
-      const ma_result res = ma_data_source_read_pcm_frames(pSource->m_pInner, pInnerOut, uiFrameCount - uiRead, &uiInnerRead);
+      const ma_result res = (uiWanted > 0) ? ma_data_source_read_pcm_frames(pSource->m_pInner, pInnerOut, uiWanted, &uiInnerRead) : MA_AT_END;
+
+      // the frames within the end fade fall to silence at the end frame
+      const plInt64 iEndFade = pSource->m_iEndFadeFrames;
+      if (iEndFrame > 0 && iEndFade > 0 && pInnerOut != nullptr)
+      {
+        const double fFadeStart = static_cast<double>(iEndFrame - iEndFade);
+        const double fFirst = plMath::Max((fFadeStart - fInnerStart) * fSourcePerEngine, 0.0);
+
+        for (ma_uint64 i = static_cast<ma_uint64>(fFirst); i < uiInnerRead; ++i)
+        {
+          const double fFrame = fInnerStart + static_cast<double>(i) / fSourcePerEngine;
+          const float fGain = static_cast<float>(plMath::Clamp((static_cast<double>(iEndFrame) - fFrame) / static_cast<double>(iEndFade), 0.0, 1.0));
+          ma_apply_volume_factor_pcm_frames(ma_offset_pcm_frames_ptr(pInnerOut, i, pSource->m_eFormat, pSource->m_uiChannels), 1, pSource->m_eFormat, pSource->m_uiChannels, fGain);
+        }
+      }
+
       uiRead += uiInnerRead;
 
       // Publish the position for the audio thread. Frames returned without the cursor advancing are the silence a
@@ -91,8 +128,8 @@ namespace
         return res;
       }
 
-      // the inner source is done: append the silent frame
-      if (uiRead < uiFrameCount && (res == MA_AT_END || uiInnerRead == 0))
+      // the inner source is done or the end frame came: append the silent frame
+      if (uiRead < uiFrameCount && (res == MA_AT_END || uiInnerRead == 0 || bEndReached))
       {
         if (pFramesOut != nullptr)
         {
@@ -103,6 +140,8 @@ namespace
         ++uiRead;
       }
     }
+
+    pSource->m_fEnginePosition += static_cast<double>(uiRead) / fSourcePerEngine;
 
     *pFramesRead = uiRead;
     return uiRead > 0 ? MA_SUCCESS : MA_AT_END;
@@ -149,6 +188,9 @@ namespace
     pSource->m_bStartFadeApplied = false;
     pSource->m_bPadded = false;
     pSource->m_iStarvedFrames = 0;
+    pSource->m_fEnginePosition = 0.0;
+    pSource->m_iEndFrame = 0;
+    pSource->m_iEndFadeFrames = 0;
 
     // the inner source may already have been sought to where a realized voice resumes
     ma_uint64 uiCursor = 0;
@@ -222,6 +264,12 @@ void plPlasmaAudioEventInstance::Reset()
   m_bRequestedLimit = false;
   m_RequestedLength = plTime::MakeZero();
   m_uiStopFrame = 0;
+
+  m_Music.Reset();
+  m_uiMusicStateParameter = plInvalidIndex;
+  m_MusicPlays.Clear();
+  m_MusicCuts.Clear();
+  m_MusicMessages.Clear();
 
   m_hResource.Invalidate();
   m_pBusGraph = nullptr;
@@ -405,8 +453,25 @@ plResult plPlasmaAudioEventInstance::Start(const plAudioEventResourceHandle& hEv
   if (m_bRequestedLimit && m_RequestedLength.IsPositive())
     m_uiStopFrame = m_uiTimelineOriginFrame + plMath::Max<ma_uint64>(ToFrames(m_RequestedLength), 1);
 
-  // every instrument whose start frame lies inside the look-ahead window is scheduled right away with its exact frame
   const ma_uint64 uiHorizon = m_uiStartFrame + plPlasmaAudioEventManager::GetLookAheadFrames(m_pEngine);
+
+  // music: the music player starts the stems, not the instruments' start delays; the first segment starts right away
+  if (desc.m_Music.IsMusic())
+  {
+    for (InstrumentState& state : m_Instruments)
+    {
+      state.m_bPendingTrigger = false;
+      state.m_bDone = true;
+    }
+
+    m_uiMusicStateParameter = desc.FindParameterByName(plAudioMusicDesc::StateParameter);
+    const float fState = (m_uiMusicStateParameter < m_ParameterTargets.GetCount()) ? m_ParameterTargets[m_uiMusicStateParameter] : 0.0f;
+
+    m_Music.Start(&desc.m_Music, m_uiStartFrame, m_uiSampleRate, static_cast<plUInt16>(plMath::Max(plMath::Round(fState), 0.0f)));
+    UpdateMusic(m_uiStartFrame, uiHorizon, ref_rng);
+  }
+
+  // every instrument whose start frame lies inside the look-ahead window is scheduled right away with its exact frame
   for (plUInt32 i = 0; i < desc.m_Instruments.GetCount(); ++i)
   {
     if (m_Instruments[i].m_bPendingTrigger && m_Instruments[i].m_uiNextTriggerFrame <= uiHorizon && !IsWaitingForKeyOff(i))
@@ -477,6 +542,17 @@ void plPlasmaAudioEventInstance::AdvanceVirtualCursor(Voice& voice, ma_uint64 ui
 }
 
 ma_uint64 plPlasmaAudioEventInstance::EstimateVoiceEndFrame(const Voice& voice, ma_uint64 uiNow) const
+{
+  const ma_uint64 uiDataEnd = EstimateVoiceDataEndFrame(voice, uiNow);
+
+  // a music voice's data ends at its end frame at the latest
+  if (!voice.m_bActive || voice.m_uiEndFrame == 0)
+    return uiDataEnd;
+
+  return (uiDataEnd == UnknownFrame) ? voice.m_uiEndFrame : plMath::Min(uiDataEnd, voice.m_uiEndFrame);
+}
+
+ma_uint64 plPlasmaAudioEventInstance::EstimateVoiceDataEndFrame(const Voice& voice, ma_uint64 uiNow) const
 {
   if (!voice.m_bActive || voice.m_bNativeLoop || voice.m_uiLengthSourceFrames == 0 || voice.m_uiSourceSampleRate == 0)
     return UnknownFrame;
@@ -811,7 +887,7 @@ float plPlasmaAudioEventInstance::GetOcclusionCutoff() const
   return plMath::Min(m_pResource->GetDescriptor().GetOcclusionCutoff(fOcclusion), m_fAutomationCutoff);
 }
 
-void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSlot, plRandom& ref_rng, ma_uint64 uiStartFrame)
+void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSlot, plRandom& ref_rng, ma_uint64 uiStartFrame, ma_uint64 uiOffsetFrames, ma_uint64 uiEndFrame)
 {
   const auto& desc = m_pResource->GetDescriptor();
   const auto& instrumentDesc = desc.m_Instruments[uiInstrument];
@@ -902,6 +978,12 @@ void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSl
   voice.m_uiEntry = uiEntry;
   voice.m_uiLastFlipFrame = UnknownFrame;
 
+  // a music voice may start inside its data and end at a frame; its timeline starts the offset before its start frame
+  voice.m_uiOffsetFrames = plMath::Min(uiOffsetFrames, uiStartFrame);
+  voice.m_uiEndFrame = uiEndFrame;
+  voice.m_uiEndFadeFrames = 0;
+  const ma_uint64 uiTimelineStart = uiStartFrame - voice.m_uiOffsetFrames;
+
   // randomized base volume / pitch
   const float fVolDb = instrumentDesc.m_fVolumeDb + static_cast<float>(ref_rng.DoubleMinMax(-instrumentDesc.m_fVolumeRandDb, instrumentDesc.m_fVolumeRandDb));
   const float fPitchSt = instrumentDesc.m_fPitchSemitones + static_cast<float>(ref_rng.DoubleMinMax(-instrumentDesc.m_fPitchRandSemitones, instrumentDesc.m_fPitchRandSemitones));
@@ -963,10 +1045,10 @@ void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSl
     }
 
     voice.m_hClip = hClip;
-    voice.m_uiStartFrame = uiStartFrame;
+    voice.m_uiStartFrame = uiTimelineStart;
     voice.m_fStartPitch = voice.m_fBasePitch * m_fCurrentPitchMultiplier;
     voice.m_fVirtualCursor = 0.0;
-    voice.m_uiVirtualCursorFrame = uiStartFrame;
+    voice.m_uiVirtualCursorFrame = uiTimelineStart;
     voice.m_bVirtual = true;
     voice.m_bActive = true;
     state.m_uiCurrentSlot = static_cast<plUInt8>(uiSlot);
@@ -1022,7 +1104,7 @@ void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSl
       return;
   }
 
-  voice.m_uiStartFrame = uiStartFrame;
+  voice.m_uiStartFrame = uiTimelineStart;
   voice.m_fStartPitch = voice.m_fBasePitch * m_fCurrentPitchMultiplier;
   voice.m_bActive = true;
   state.m_uiCurrentSlot = static_cast<plUInt8>(uiSlot);
@@ -1120,6 +1202,24 @@ plPlasmaAudioEventInstance::BuildResult plPlasmaAudioEventInstance::BuildVoiceCh
     ma_data_source_set_looping(voice.m_pInner, true);
   }
 
+  // a music voice that starts at a later position of its data starts there
+  if (bFreshStart && voice.m_uiOffsetFrames > 0 && voice.m_uiSourceSampleRate > 0)
+  {
+    const double fSourcePerEngine = static_cast<double>(voice.m_fBasePitch * m_fCurrentPitchMultiplier) * voice.m_uiSourceSampleRate / m_uiSampleRate;
+    uiSourceCursor = static_cast<ma_uint64>(static_cast<double>(voice.m_uiOffsetFrames) * fSourcePerEngine + 0.5);
+
+    if (voice.m_uiLengthSourceFrames > 0 && uiSourceCursor >= voice.m_uiLengthSourceFrames)
+    {
+      if (!voice.m_bNativeLoop)
+      {
+        ReleaseVoiceChain(voice);
+        return BuildResult::ClipFailed;
+      }
+
+      uiSourceCursor %= voice.m_uiLengthSourceFrames;
+    }
+  }
+
   // a realized voice continues where its timeline is; the data source's lead silence then ends exactly at uiDataStartFrame
   if (uiSourceCursor > 0 && ma_data_source_seek_to_pcm_frame(voice.m_pInner, uiSourceCursor) != MA_SUCCESS)
   {
@@ -1133,6 +1233,10 @@ plPlasmaAudioEventInstance::BuildResult plPlasmaAudioEventInstance::BuildVoiceCh
     return BuildResult::Failed;
   }
   voice.m_bSourceValid = true;
+
+  // the end of a music voice's data carries over to every chain the voice gets
+  voice.m_Source.m_iEndFadeFrames = static_cast<plInt64>(voice.m_uiEndFadeFrames);
+  voice.m_Source.m_iEndFrame = static_cast<plInt64>(voice.m_uiEndFrame);
 
   if (ma_sound_init_from_data_source(m_pEngine, &voice.m_Source, 0, nullptr, &voice.m_Sound) != MA_SUCCESS)
   {
@@ -1523,6 +1627,9 @@ void plPlasmaAudioEventInstance::StopVoice(Voice& voice)
   voice.m_bNativeLoop = false;
   voice.m_bLoopPoints = false;
   voice.m_uiLengthSourceFrames = 0;
+  voice.m_uiEndFrame = 0;
+  voice.m_uiEndFadeFrames = 0;
+  voice.m_uiOffsetFrames = 0;
 }
 
 void plPlasmaAudioEventInstance::ReleaseVoiceChain(Voice& voice)
@@ -1630,6 +1737,9 @@ void plPlasmaAudioEventInstance::OnEventUnloading()
     state.m_bPendingTrigger = false;
     state.m_bDone = true;
   }
+
+  // the music player reads the resource's desc
+  m_Music.Reset();
 
   if (m_pResource != nullptr)
   {
@@ -2317,6 +2427,12 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
     AddAutomationSends(environmentSends);
   }
 
+  // the music starts and cuts its stems before the voices are looked at
+  if (m_Music.IsStarted() && !m_bStopping)
+  {
+    UpdateMusic(uiNow, uiHorizon, ref_rng);
+  }
+
   bool bAnyActive = false;
   bool bAnyPending = false;
 
@@ -2562,7 +2678,192 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
   // nested events keep their parent alive
   const bool bAnyChild = m_uiLiveChildren > 0 || !m_ChildRequests.IsEmpty();
 
-  return bAnyActive || bAnyPending || bHoldOpen || bAnyChild || HasMarkersAhead();
+  // music plays until it is stopped
+  const bool bMusic = m_Music.IsStarted() && !m_bStopping;
+
+  return bAnyActive || bAnyPending || bHoldOpen || bAnyChild || bMusic || HasMarkersAhead();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Music
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+  /// A cut in the middle of a stem fades over at least this long, so it does not click.
+  const plTime s_MusicCutMinFade = plTime::MakeFromMilliseconds(3);
+} // namespace
+
+void plPlasmaAudioEventInstance::SetMusicState(plStringView sState)
+{
+  if (!m_Music.IsStarted() || m_pResource == nullptr)
+    return;
+
+  const auto& desc = m_pResource->GetDescriptor();
+  const plUInt32 uiState = desc.m_Music.FindState(sState);
+  if (uiState == plInvalidIndex)
+    return;
+
+  // through the state parameter, which the music follows; without one, straight to the player
+  if (m_uiMusicStateParameter < desc.m_Parameters.GetCount())
+    SetParameter(desc.m_Parameters[m_uiMusicStateParameter].m_sName, static_cast<float>(uiState));
+  else
+    m_Music.RequestState(static_cast<plUInt16>(uiState));
+}
+
+void plPlasmaAudioEventInstance::PlayStinger(plStringView sStinger)
+{
+  if (!m_Music.IsStarted() || m_pResource == nullptr)
+    return;
+
+  const plUInt32 uiStinger = m_pResource->GetDescriptor().m_Music.FindStinger(sStinger);
+  if (uiStinger != plInvalidIndex)
+    m_Music.RequestStinger(uiStinger);
+}
+
+plAudioMusicPlayer::Position plPlasmaAudioEventInstance::GetMusicPosition() const
+{
+  if (!m_Music.IsStarted() || m_pEngine == nullptr)
+    return plAudioMusicPlayer::Position();
+
+  return m_Music.GetPosition(ma_engine_get_time_in_pcm_frames(m_pEngine));
+}
+
+void plPlasmaAudioEventInstance::UpdateMusic(ma_uint64 uiNow, ma_uint64 uiHorizon, plRandom& ref_rng)
+{
+  // the state the game asks for: the value it set, not the one seeking toward it
+  if (m_uiMusicStateParameter < m_ParameterTargets.GetCount())
+  {
+    m_Music.RequestState(static_cast<plUInt16>(plMath::Max(plMath::Round(m_ParameterTargets[m_uiMusicStateParameter]), 0.0f)));
+  }
+
+  m_MusicPlays.Clear();
+  m_MusicCuts.Clear();
+  m_Music.Update(uiNow, uiHorizon, m_MusicPlays, m_MusicCuts);
+
+  // the cuts end what plays before the change; the plays that start there may use the same instruments
+  for (const plAudioMusicPlayer::StemCut& cut : m_MusicCuts)
+    CutMusicStem(cut);
+
+  for (const plAudioMusicPlayer::StemPlay& play : m_MusicPlays)
+    StartMusicStem(play, ref_rng);
+
+  m_MusicMessages.Clear();
+  m_Music.TakeMessages(uiNow, m_MusicMessages);
+
+  for (const plAudioMusicPlayer::Message& message : m_MusicMessages)
+  {
+    plStringBuilder sMarker;
+
+    switch (message.m_Type)
+    {
+      case plAudioMusicPlayer::Message::Type::Beat:
+        // the audio trigger component turns these into plMsgAudioBeat
+        sMarker.SetFormat("{}{}:{}:{}", plAudioSystemReservedMarker::BeatPrefix, message.m_uiBar, message.m_uiBeat, message.m_sText);
+        break;
+
+      case plAudioMusicPlayer::Message::Type::Stinger:
+        sMarker.SetFormat("Stinger: {}", message.m_sText);
+        Log(plAudioLogEventType::Marker, sMarker);
+        break;
+
+      default:
+        sMarker = message.m_sText;
+        Log(plAudioLogEventType::Marker, sMarker);
+        break;
+    }
+
+    if (m_pEventData != nullptr)
+      m_pEventData->m_PassedMarkers.PushBack(sMarker);
+  }
+
+  // an editor or a game that stopped taking the markers does not grow the list forever
+  if (m_pEventData != nullptr && m_pEventData->m_PassedMarkers.GetCount() > 256)
+    m_pEventData->m_PassedMarkers.RemoveAtAndCopy(0, m_pEventData->m_PassedMarkers.GetCount() - 256);
+}
+
+void plPlasmaAudioEventInstance::StartMusicStem(const plAudioMusicPlayer::StemPlay& play, plRandom& ref_rng)
+{
+  const auto& desc = m_pResource->GetDescriptor();
+  if (play.m_uiInstrument >= desc.m_Instruments.GetCount())
+    return;
+
+  const auto& instrumentDesc = desc.m_Instruments[play.m_uiInstrument];
+  if (instrumentDesc.m_bMute || instrumentDesc.m_Playlist.IsEmpty())
+    return;
+
+  // a free slot, else the slot of the voice that started first (a third voice of a stem in quick changes)
+  plUInt32 uiSlot = plInvalidIndex;
+  for (plUInt32 uiCandidate = 0; uiCandidate < VoiceSlotsPerInstrument; ++uiCandidate)
+  {
+    const Voice& voice = GetVoice(play.m_uiInstrument, uiCandidate);
+    if (!voice.m_bActive)
+    {
+      uiSlot = uiCandidate;
+      break;
+    }
+
+    if (uiSlot == plInvalidIndex || voice.m_uiStartFrame < GetVoice(play.m_uiInstrument, uiSlot).m_uiStartFrame)
+      uiSlot = uiCandidate;
+  }
+
+  Voice& voice = GetVoice(play.m_uiInstrument, uiSlot);
+  if (voice.m_bActive)
+    StopVoice(voice);
+
+  InstrumentState& state = m_Instruments[play.m_uiInstrument];
+  state.m_bDone = false;
+
+  StartVoice(play.m_uiInstrument, uiSlot, ref_rng, play.m_uiStartFrame, play.m_uiOffsetFrames, play.m_uiEndFrame);
+
+  // a stem whose clip still loads does not start late off the beat grid: it waits for its next segment
+  state.m_bPendingTrigger = false;
+  if (!voice.m_bActive)
+    state.m_bDone = true;
+}
+
+void plPlasmaAudioEventInstance::CutMusicStem(const plAudioMusicPlayer::StemCut& cut)
+{
+  if (cut.m_uiInstrument >= m_Instruments.GetCount())
+    return;
+
+  const ma_uint64 uiMinFade = ToFrames(s_MusicCutMinFade);
+
+  for (plUInt32 uiSlot = 0; uiSlot < VoiceSlotsPerInstrument; ++uiSlot)
+  {
+    Voice& voice = GetVoice(cut.m_uiInstrument, uiSlot);
+    if (!voice.m_bActive)
+      continue;
+
+    const ma_uint64 uiDataStart = voice.m_uiStartFrame + voice.m_uiOffsetFrames;
+
+    // a voice that would only begin at the cut never sounds
+    if (uiDataStart >= cut.m_uiFrame)
+    {
+      StopVoice(voice);
+      continue;
+    }
+
+    // a voice that ends before the cut anyway keeps its end
+    if (voice.m_uiEndFrame != 0 && voice.m_uiEndFrame <= cut.m_uiFrame)
+      continue;
+
+    const ma_uint64 uiFade = plMath::Min(plMath::Max(cut.m_uiFadeFrames, uiMinFade), cut.m_uiFrame - uiDataStart);
+    SetVoiceEnd(voice, cut.m_uiFrame, uiFade);
+  }
+}
+
+void plPlasmaAudioEventInstance::SetVoiceEnd(Voice& ref_voice, ma_uint64 uiEndFrame, ma_uint64 uiFadeFrames)
+{
+  ref_voice.m_uiEndFrame = uiEndFrame;
+  ref_voice.m_uiEndFadeFrames = uiFadeFrames;
+
+  // the fade first: the device thread may read the new end before the new fade otherwise
+  if (ref_voice.m_bSourceValid)
+  {
+    ref_voice.m_Source.m_iEndFadeFrames = static_cast<plInt64>(uiFadeFrames);
+    ref_voice.m_Source.m_iEndFrame = static_cast<plInt64>(uiEndFrame);
+  }
 }
 
 bool plPlasmaAudioEventInstance::HasMarkersAhead() const
@@ -3371,6 +3672,44 @@ void plPlasmaAudioEventManager::KeyOff(const plPlasmaAudioEntityData* pEntity)
       pInstance->KeyOff();
     }
   }
+}
+
+void plPlasmaAudioEventManager::SetMusicState(const plPlasmaAudioEntityData* pEntity, plStringView sState)
+{
+  PL_LOCK(m_Mutex);
+
+  for (auto& pInstance : m_Instances)
+  {
+    if (pInstance->m_pEntity == pEntity && pInstance->IsMusic())
+      pInstance->SetMusicState(sState);
+  }
+}
+
+void plPlasmaAudioEventManager::PlayStinger(const plPlasmaAudioEntityData* pEntity, plStringView sStinger)
+{
+  PL_LOCK(m_Mutex);
+
+  for (auto& pInstance : m_Instances)
+  {
+    if (pInstance->m_pEntity == pEntity && pInstance->IsMusic())
+      pInstance->PlayStinger(sStinger);
+  }
+}
+
+bool plPlasmaAudioEventManager::GetMusicPosition(const plPlasmaAudioEventData* pEventData, plAudioMusicPlayer::Position& out_position) const
+{
+  PL_LOCK(m_Mutex);
+
+  for (const auto& pInstance : m_Instances)
+  {
+    if (pInstance->m_pEventData == pEventData && pInstance->IsMusic())
+    {
+      out_position = pInstance->GetMusicPosition();
+      return true;
+    }
+  }
+
+  return false;
 }
 
 void plPlasmaAudioEventManager::TakeMarkers(plPlasmaAudioEventData* pEventData, plDynamicArray<plString>& out_markers)

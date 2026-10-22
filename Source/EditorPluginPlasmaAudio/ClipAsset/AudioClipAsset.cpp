@@ -319,7 +319,7 @@ plResult plAudioClipAssetUtils::ReadSourceInfo(plStringView sAbsolutePath, plAud
 
 plStatus plAudioClipAssetUtils::FindOrCreateClip(plStringView sSourceFile, plString& out_sClipGuid)
 {
-  auto pApp = plQtEditorApp::GetSingleton();
+  auto pApp = plEditorApp::GetSingleton();
 
   plStringBuilder sSourceAbs = sSourceFile;
   if (!pApp->MakeDataDirectoryRelativePathAbsolute(sSourceAbs))
@@ -452,7 +452,7 @@ void plAudioClipAssetUtils::MakeMetaInfo(const plAudioClipAssetProperties& props
   out_info = plAudioClipAssetMetaInfo();
 
   plStringBuilder sAbsPath = props.m_sSourceFile;
-  if (!sAbsPath.IsEmpty() && plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
+  if (!sAbsPath.IsEmpty() && plEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
   {
     ReadSourceInfo(sAbsPath, out_info).IgnoreResult();
   }
@@ -491,7 +491,7 @@ void plAudioClipAssetUtils::MakeMetaInfo(const plAudioClipAssetProperties& props
 
     plStringBuilder sVariantPath = variant.m_sFile;
     plAudioClipAssetMetaInfo variantInfo;
-    if (!sVariantPath.IsEmpty() && plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sVariantPath) && ReadSourceInfo(sVariantPath, variantInfo).Succeeded())
+    if (!sVariantPath.IsEmpty() && plEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sVariantPath) && ReadSourceInfo(sVariantPath, variantInfo).Succeeded())
     {
       language.m_fDuration = variantInfo.m_fDuration;
     }
@@ -755,7 +755,7 @@ plTransformStatus plAudioClipAssetDocument::InternalTransformAsset(plStreamWrite
   auto DecodeFile = [](plStringView sFile, plAudioClipSourcePcm& out_source) -> plStatus
   {
     plStringBuilder sAbsPath = sFile;
-    if (!plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
+    if (!plEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
       return plStatus(plFmt("Failed to make sound file path absolute: '{0}'", sFile));
 
     if (plAudioClipBuilder::DecodeSourceFile(sAbsPath, out_source).Failed())
@@ -847,7 +847,7 @@ plStatus plAudioClipAssetDocumentGenerator::Generate(plStringView sInputFileAbs,
   }
   else
   {
-    auto pApp = plQtEditorApp::GetSingleton();
+    auto pApp = plEditorApp::GetSingleton();
 
     plStringBuilder sInputFileRel = sInputFileAbs;
     pApp->MakePathDataDirectoryRelative(sInputFileRel);

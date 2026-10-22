@@ -5,21 +5,18 @@
 #include <EditorPluginPlasmaAudio/Platform/AudioPlatformsDlg.h>
 #include <EditorUi/Widgets.h>
 #include <Foundation/Time/Timestamp.h>
-#include <GuiFoundation/UIServices/UIServices.moc.h>
 #include <PlasmaAudioPlugin/Platform/AudioBackends.h>
-
-#include <QTimer>
 
 namespace
 {
   /// Often enough to see a fade-out of the default length as its own state.
-  constexpr int kPollIntervalMs = 100;
+  const plTime kPollInterval = plTime::MakeFromMilliseconds(100);
 
   /// A request without an answer after this long no longer blocks the next one.
   const plTime kRequestTimeout = plTime::MakeFromSeconds(2.0);
 
   /// How long Simulate suspend keeps the engine process suspended.
-  constexpr int kSimulatedSuspendMs = 1500;
+  const plTime kSimulatedSuspend = plTime::MakeFromMilliseconds(1500);
 
   /// The time each measurement of the benchmark takes.
   const plTime kBenchmarkBudget = plTime::MakeFromMilliseconds(400);
@@ -50,10 +47,10 @@ namespace
   }
 } // namespace
 
-plQtAudioPlatformsDlg::plQtAudioPlatformsDlg(QWidget* pParent)
-  : plQtEngineDialog(pParent, "AudioPlatforms", "Audio Platforms")
+plAudioPlatformsDlg::plAudioPlatformsDlg()
+  : plEngineDialog("AudioPlatforms", "Audio Platforms")
 {
-  setWindowIcon(plQtUiServices::GetCachedIconResource(":/AssetIcons/AudioMixer.svg"));
+  SetIcon(":/AssetIcons/AudioMixer.svg");
 
   plAudioBackendRegistry::GetBackendNames(m_Backends);
   m_uiShownProfile = plAssetCurator::GetSingleton()->GetActiveAssetProfileIndex();
@@ -80,21 +77,22 @@ plQtAudioPlatformsDlg::plQtAudioPlatformsDlg(QWidget* pParent)
   m_pView->SetSimdName(plAudioCodecBenchmark::GetOpusSimdName());
   RefreshView();
 
-  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plQtAudioPlatformsDlg::EngineProcessMsgHandler, this));
+  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plAudioPlatformsDlg::EngineProcessMsgHandler, this));
 
-  m_pTimer = new QTimer(this);
-  m_pTimer->setInterval(kPollIntervalMs);
-  connect(m_pTimer, &QTimer::timeout, this, [this]()
-    { OnTick(); });
-  m_pTimer->start();
+  m_Timers.Start(kPollInterval, [this]()
+    { OnTick(); }, true);
 }
 
-plQtAudioPlatformsDlg::~plQtAudioPlatformsDlg()
+plAudioPlatformsDlg::~plAudioPlatformsDlg()
 {
+  // the view's surface comes back from the window while the view lives
+  CloseWindow();
+  m_Timers.StopAll();
+
   if (m_pView == nullptr)
     return;
 
-  plEditorEngineProcessConnection::s_Events.RemoveEventHandler(plMakeDelegate(&plQtAudioPlatformsDlg::EngineProcessMsgHandler, this));
+  plEditorEngineProcessConnection::s_Events.RemoveEventHandler(plMakeDelegate(&plAudioPlatformsDlg::EngineProcessMsgHandler, this));
 
   // a suspend the dialog started does not outlive it
   if (m_bSuspendRunning)
@@ -104,36 +102,33 @@ plQtAudioPlatformsDlg::~plQtAudioPlatformsDlg()
     plTaskSystem::WaitForGroup(m_BenchmarkTask);
 }
 
-int plQtAudioPlatformsDlg::Run(QWidget* pParent)
+plEngineDialog::Result plAudioPlatformsDlg::Run()
 {
-  if (!plQtEngineDialog::IsEngineEnabled())
+  if (!plEngineDialog::IsEngineEnabled())
   {
     plLog::Error("The audio platforms dialog needs the editor UI renderer.");
-    return QDialog::Rejected;
+    return Rejected;
   }
 
-  plQtAudioPlatformsDlg dlg(pParent);
-  return dlg.exec();
+  plAudioPlatformsDlg dlg;
+  return dlg.Exec();
 }
 
-void plQtAudioPlatformsDlg::BuildBody(plUiElement* pBody, const plVec2& vSize)
+void plAudioPlatformsDlg::BuildBody(plUiElement* pBody, const plVec2& vSize)
 {
-  // an engine window shows the view over the body; the Qt frame (tests without a shell) has nothing to show it with
-  if (IsInEngineWindow() && m_pView != nullptr)
-  {
-    SetBodyContent(m_pView.Borrow(), plRectFloat(0.0f, 0.0f, vSize.x, vSize.y));
-    return;
-  }
+  PL_IGNORE_UNUSED(pBody);
 
-  plEditorUi::TextAt(pBody, "The audio platforms show in the editor's engine window.", plRectFloat(12.0f, 12.0f, vSize.x - 24.0f, 20.0f), plEditorUi::Dim(), plEditorUi::FontSize - 1);
+  // the view fills the body
+  if (m_pView != nullptr)
+    SetBodyContent(m_pView.Borrow(), plRectFloat(0.0f, 0.0f, vSize.x, vSize.y));
 }
 
-plVec2 plQtAudioPlatformsDlg::GetPreferredSize() const
+plVec2 plAudioPlatformsDlg::GetPreferredSize() const
 {
   return plVec2(940.0f, 560.0f);
 }
 
-plEditorEngineProcessConnection* plQtAudioPlatformsDlg::GetLiveConnection()
+plEditorEngineProcessConnection* plAudioPlatformsDlg::GetLiveConnection()
 {
   plEditorEngineProcessConnection* pConnection = plEditorEngineProcessConnection::GetSingleton();
   if (pConnection == nullptr || pConnection->IsProcessCrashed() || !pConnection->IsEngineSetup())
@@ -142,7 +137,7 @@ plEditorEngineProcessConnection* plQtAudioPlatformsDlg::GetLiveConnection()
   return pConnection;
 }
 
-plPlasmaAudioPlatformConfig* plQtAudioPlatformsDlg::GetConfig(plUInt32 uiProfile)
+plPlasmaAudioPlatformConfig* plAudioPlatformsDlg::GetConfig(plUInt32 uiProfile)
 {
   plAssetCurator* pCurator = plAssetCurator::GetSingleton();
   if (uiProfile >= pCurator->GetNumAssetProfiles())
@@ -160,7 +155,7 @@ plPlasmaAudioPlatformConfig* plQtAudioPlatformsDlg::GetConfig(plUInt32 uiProfile
 //////////////////////////////////////////////////////////////////////////
 // Engine process
 
-void plQtAudioPlatformsDlg::OnTick()
+void plAudioPlatformsDlg::OnTick()
 {
   if (m_pBenchmark != nullptr && m_pBenchmark->m_bDone)
     FinishBenchmark();
@@ -193,7 +188,7 @@ void plQtAudioPlatformsDlg::OnTick()
   }
 }
 
-void plQtAudioPlatformsDlg::EngineProcessMsgHandler(const plEditorEngineProcessConnection::Event& e)
+void plAudioPlatformsDlg::EngineProcessMsgHandler(const plEditorEngineProcessConnection::Event& e)
 {
   switch (e.m_Type)
   {
@@ -221,7 +216,7 @@ void plQtAudioPlatformsDlg::EngineProcessMsgHandler(const plEditorEngineProcessC
   }
 }
 
-void plQtAudioPlatformsDlg::ApplyStats(const plVariant& stats)
+void plAudioPlatformsDlg::ApplyStats(const plVariant& stats)
 {
   if (!stats.IsA<plVariantDictionary>())
     return;
@@ -259,7 +254,7 @@ void plQtAudioPlatformsDlg::ApplyStats(const plVariant& stats)
   m_pView->SetOutput(m_sDevice, m_sState);
 }
 
-void plQtAudioPlatformsDlg::SendCVar(plEditorEngineProcessConnection* pConnection, const char* szName, const plVariant& value)
+void plAudioPlatformsDlg::SendCVar(plEditorEngineProcessConnection* pConnection, const char* szName, const plVariant& value)
 {
   plChangeCVarMsgToEngine msg;
   msg.m_sCVarName = szName;
@@ -267,7 +262,7 @@ void plQtAudioPlatformsDlg::SendCVar(plEditorEngineProcessConnection* pConnectio
   pConnection->SendMessage(&msg);
 }
 
-void plQtAudioPlatformsDlg::PushActiveConfig()
+void plAudioPlatformsDlg::PushActiveConfig()
 {
   plEditorEngineProcessConnection* pConnection = GetLiveConnection();
   const plPlasmaAudioPlatformConfig* pConfig = GetConfig(plAssetCurator::GetSingleton()->GetActiveAssetProfileIndex());
@@ -287,7 +282,7 @@ void plQtAudioPlatformsDlg::PushActiveConfig()
 //////////////////////////////////////////////////////////////////////////
 // Actions
 
-void plQtAudioPlatformsDlg::ShowProfile(plUInt32 uiProfile)
+void plAudioPlatformsDlg::ShowProfile(plUInt32 uiProfile)
 {
   if (uiProfile == m_uiShownProfile)
     return;
@@ -296,7 +291,7 @@ void plQtAudioPlatformsDlg::ShowProfile(plUInt32 uiProfile)
   RefreshView();
 }
 
-void plQtAudioPlatformsDlg::OnConfigChanged(const plPlasmaAudioPlatformConfig& config)
+void plAudioPlatformsDlg::OnConfigChanged(const plPlasmaAudioPlatformConfig& config)
 {
   plAssetCurator* pCurator = plAssetCurator::GetSingleton();
   plPlasmaAudioPlatformConfig* pConfig = GetConfig(m_uiShownProfile);
@@ -325,7 +320,7 @@ void plQtAudioPlatformsDlg::OnConfigChanged(const plPlasmaAudioPlatformConfig& c
   AddLog(s);
 }
 
-void plQtAudioPlatformsDlg::RunBenchmark()
+void plAudioPlatformsDlg::RunBenchmark()
 {
   if (m_pBenchmark != nullptr)
     return;
@@ -342,7 +337,7 @@ void plQtAudioPlatformsDlg::RunBenchmark()
   m_pView->SetBenchmarkRunning(true);
 }
 
-void plQtAudioPlatformsDlg::FinishBenchmark()
+void plAudioPlatformsDlg::FinishBenchmark()
 {
   const BenchmarkJob& job = *m_pBenchmark;
   m_pView->SetBenchmarkRunning(false);
@@ -363,7 +358,7 @@ void plQtAudioPlatformsDlg::FinishBenchmark()
   m_pBenchmark = nullptr;
 }
 
-void plQtAudioPlatformsDlg::SimulateSuspend()
+void plAudioPlatformsDlg::SimulateSuspend()
 {
   plEditorEngineProcessConnection* pConnection = GetLiveConnection();
   if (pConnection == nullptr)
@@ -385,11 +380,11 @@ void plQtAudioPlatformsDlg::SimulateSuspend()
   m_bSuspendRunning = true;
   m_pView->SetSuspendRunning(true);
 
-  QTimer::singleShot(kSimulatedSuspendMs, this, [this]()
+  m_Timers.Start(kSimulatedSuspend, [this]()
     { EndSimulatedSuspend(); });
 }
 
-void plQtAudioPlatformsDlg::EndSimulatedSuspend()
+void plAudioPlatformsDlg::EndSimulatedSuspend()
 {
   if (!m_bSuspendRunning)
     return;
@@ -410,12 +405,12 @@ void plQtAudioPlatformsDlg::EndSimulatedSuspend()
 //////////////////////////////////////////////////////////////////////////
 // View
 
-void plQtAudioPlatformsDlg::AddLog(plStringView sText, plEditorUiAudioPlatformsView::LogKind kind)
+void plAudioPlatformsDlg::AddLog(plStringView sText, plEditorUiAudioPlatformsView::LogKind kind)
 {
   m_pView->AddLog(Stamped(sText), kind);
 }
 
-void plQtAudioPlatformsDlg::RefreshView()
+void plAudioPlatformsDlg::RefreshView()
 {
   plAssetCurator* pCurator = plAssetCurator::GetSingleton();
 

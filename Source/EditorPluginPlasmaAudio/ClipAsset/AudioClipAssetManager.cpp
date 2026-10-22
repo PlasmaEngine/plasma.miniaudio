@@ -3,8 +3,7 @@
 #include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAssetManager.h>
-#include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAssetWindow.moc.h>
-#include <GuiFoundation/UIServices/ImageCache.moc.h>
+#include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAssetWindow.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioClipProfileConfig, 1, plRTTIDefaultAllocator<plAudioClipProfileConfig>)
@@ -26,8 +25,6 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 plAudioClipAssetDocumentManager::plAudioClipAssetDocumentManager()
 {
   plDocumentManager::s_Events.AddEventHandler(plMakeDelegate(&plAudioClipAssetDocumentManager::OnDocumentManagerEvent, this));
-
-  plQtImageCache::GetSingleton()->RegisterTypeImage("Audio Clip", plSvgThumbnailToPixmap(":/AssetIcons/AudioClip.svg"));
 
   m_DocTypeDesc.m_sDocumentTypeName = "Audio Clip";
   m_DocTypeDesc.m_sFileExtension = "plAudioClipAsset";

@@ -73,7 +73,7 @@ plTransformStatus plMiniAudioSoundAssetDocument::InternalTransformAsset(plStream
   for (const auto& sFile : pProp->m_SoundFiles)
   {
     plStringBuilder sAssetFile = sFile;
-    if (!plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAssetFile))
+    if (!plEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAssetFile))
       return plStatus(plFmt("Failed to make sound file path absolute: '{0}'", sFile));
 
     plFileReader SoundFile;

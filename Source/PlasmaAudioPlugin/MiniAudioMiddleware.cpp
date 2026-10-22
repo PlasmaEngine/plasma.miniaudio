@@ -710,6 +710,22 @@ plResult plPlasmaAudioMiddleware::SetEventParameter(plAudioSystemEntityData* pEn
     return PL_SUCCESS;
   }
 
+  // music: a state or a stinger by name
+  plStringView sName = sParamName;
+  if (sName.StartsWith(plAudioSystemReservedParameter::MusicStatePrefix))
+  {
+    sName.Shrink(plStringUtils::GetCharacterCount(plAudioSystemReservedParameter::MusicStatePrefix), 0);
+    m_EventManager.SetMusicState(pEntity, sName);
+    return PL_SUCCESS;
+  }
+
+  if (sName.StartsWith(plAudioSystemReservedParameter::StingerPrefix))
+  {
+    sName.Shrink(plStringUtils::GetCharacterCount(plAudioSystemReservedParameter::StingerPrefix), 0);
+    m_EventManager.PlayStinger(pEntity, sName);
+    return PL_SUCCESS;
+  }
+
   m_EventManager.SetEventParameter(pEntity, sParamName, fValue);
   return PL_SUCCESS;
 }

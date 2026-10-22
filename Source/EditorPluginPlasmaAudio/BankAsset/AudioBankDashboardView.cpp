@@ -6,11 +6,10 @@
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorUi/Drawings.h>
 #include <EditorUi/Menu.h>
+#include <EditorUi/Runtime.h>
 #include <EditorUi/Surface.h>
 #include <EditorUi/Widgets.h>
 #include <ToolsFoundation/Object/ObjectCommandAccessor.h>
-
-#include <QTimer>
 
 namespace
 {
@@ -966,6 +965,6 @@ void plEditorUiAudioBankDashboard::OpenAsset(plStringView sGuid)
   }
 
   // a new document frame subscribes to the platform events this click is being dispatched by; open after it
-  QTimer::singleShot(0, [sPath]()
-    { plQtEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::RequestWindow | plDocumentFlags::AddToRecentFilesList); });
+  plEditorUiRuntime::RunAfterFrame([sPath]()
+    { plEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::RequestWindow | plDocumentFlags::AddToRecentFilesList); });
 }

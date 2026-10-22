@@ -7,6 +7,7 @@
 #include <Foundation/Time/Time.h>
 #include <Foundation/Types/UniquePtr.h>
 #include <PlasmaAudioPlugin/Banks/AudioBankResource.h>
+#include <PlasmaAudioPlugin/Music/AudioMusicPlayer.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
 
 class plMiniAudioBusGraph;
@@ -55,6 +56,11 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioAuditionStatus
 
   /// \brief The markers the event passed that plAudioAudition::TakeMarkers did not take yet, oldest first.
   plDynamicArray<plString> m_Markers;
+
+  /// \brief Music: what plays, and a change that was asked for.
+  bool m_bMusic = false;
+  plAudioMusicPlayer::Position m_Music;
+  double m_fMusicPendingIn = -1.0; ///< seconds until the change lands; negative while none is decided
 };
 
 /// \brief Live state of the loaded mixer, for the editor's mixer console.

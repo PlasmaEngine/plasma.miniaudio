@@ -3,8 +3,7 @@
 #include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAsset.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAssetManager.h>
-#include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAssetWindow.moc.h>
-#include <GuiFoundation/UIServices/ImageCache.moc.h>
+#include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAssetWindow.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioMixerAssetDocumentManager, 1, plRTTIDefaultAllocator<plAudioMixerAssetDocumentManager>)
@@ -14,8 +13,6 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 plAudioMixerAssetDocumentManager::plAudioMixerAssetDocumentManager()
 {
   plDocumentManager::s_Events.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentManager::OnDocumentManagerEvent, this));
-
-  plQtImageCache::GetSingleton()->RegisterTypeImage("Audio Mixer", plSvgThumbnailToPixmap(":/AssetIcons/AudioMixer.svg"));
 
   m_DocTypeDesc.m_sDocumentTypeName = "Audio Mixer";
   m_DocTypeDesc.m_sFileExtension = "plAudioMixerAsset";

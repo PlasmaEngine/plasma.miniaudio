@@ -7,7 +7,7 @@
 #include <EditorPluginPlasmaAudio/Platform/AudioPlatformsDlg.h>
 #include <EditorPluginPlasmaAudio/Preferences/MiniAudioPreferences.h>
 #include <GuiFoundation/Action/ActionManager.h>
-#include <GuiFoundation/UIServices/UIServices.moc.h>
+#include <GuiFoundation/UIServices/UIServices.h>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plPlasmaAudioAction, 0, plRTTINoAllocator)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -157,7 +157,7 @@ void plPlasmaAudioAction::Execute(const plVariant& value)
   }
   else if (m_Type == ActionType::Platforms)
   {
-    plQtAudioPlatformsDlg::Run(nullptr);
+    plAudioPlatformsDlg::Run();
   }
 }
 
@@ -171,7 +171,7 @@ void plPlasmaAudioAction::ExecuteExtractClips()
   const plStatus res = pEvent->ExtractClips(uiConverted);
   if (res.Failed())
   {
-    plQtUiServices::MessageBoxStatus(res, "Extracting the clips failed.");
+    plEditorUiServices::MessageBoxStatus(res, "Extracting the clips failed.");
     return;
   }
 
@@ -231,7 +231,7 @@ void plPlasmaAudioAction::ExecuteMigrateAllEvents()
     const bool bOpenedHere = pDoc == nullptr;
 
     if (bOpenedHere)
-      pDoc = plQtEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::None);
+      pDoc = plEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::None);
 
     plAudioEventAssetDocument* pEvent = plDynamicCast<plAudioEventAssetDocument*>(pDoc);
     if (pEvent != nullptr)
@@ -273,7 +273,7 @@ void plPlasmaAudioAction::ExecuteMigrateAllEvents()
     sMsg.AppendFormat("\n{0} event(s) failed, see the log.", uiFailed);
 
   plLog::Info("{}", sMsg);
-  plQtUiServices::MessageBoxInformation(plFmt("{}", sMsg));
+  plEditorUiServices::MessageBoxInformation(plFmt("{}", sMsg));
 }
 
 void plPlasmaAudioAction::OnPreferenceChange(plPreferences* pref)

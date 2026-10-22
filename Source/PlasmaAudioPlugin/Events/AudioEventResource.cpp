@@ -17,7 +17,9 @@
 // version 6: voice priority + virtual mode
 // version 7: instrument parameter range
 // version 8: attenuation curve, cone, spread, occlusion settings
-static constexpr plTypeVersion kAudioEventDescVersion = 9;
+// version 9: seek speeds, automation targets' settings, nested events, markers, sustain points
+// version 10: music
+static constexpr plTypeVersion kAudioEventDescVersion = 10;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventResource, 1, plRTTIDefaultAllocator<plAudioEventResource>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -259,6 +261,8 @@ plResult plAudioEventDesc::Save(plStreamWriter& inout_stream) const
   for (plTime time : m_SustainPoints)
     inout_stream << time;
 
+  m_Music.Save(inout_stream);
+
   return PL_SUCCESS;
 }
 
@@ -350,6 +354,7 @@ plResult plAudioEventDesc::Load(plStreamReader& inout_stream)
 
   m_Markers.Clear();
   m_SustainPoints.Clear();
+  m_Music = plAudioMusicDesc();
 
   if (uiVersion < 9)
     return PL_SUCCESS;
@@ -383,6 +388,9 @@ plResult plAudioEventDesc::Load(plStreamReader& inout_stream)
   m_SustainPoints.SetCount(uiCount);
   for (plTime& time : m_SustainPoints)
     inout_stream >> time;
+
+  if (uiVersion >= 10)
+    m_Music.Load(inout_stream);
 
   return PL_SUCCESS;
 }

@@ -1,42 +1,41 @@
 #pragma once
 
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
+#include <EditorUi/Runtime.h>
 #include <Foundation/Basics.h>
 #include <Foundation/Math/Random.h>
 #include <Foundation/Types/UniquePtr.h>
-#include <GuiFoundation/DocumentWindow/DocumentWindow.moc.h>
+#include <GuiFoundation/DocumentWindow/DocumentWindow.h>
 #include <ToolsFoundation/Object/DocumentObjectManager.h>
 
-class QTimer;
-class QVBoxLayout;
 class plEditorUiAudioAttenuation;
 class plEditorUiAudioEventAutomation;
 class plEditorUiAudioEventDeck;
 class plEditorUiAudioEventTimeline;
-class plQtEngineUiContentWidget;
 class plEditorUiAudioMessageList;
 class plEditorUiAudioMeter;
+class plEditorUiAudioShellStack;
 class plEditorUiAudioStatusRow;
-class plQtEngineControlStrip;
-class plQtPropertyGridWidget;
+class plEditorUiControlStrip;
+class plEditorUiDockManager;
 struct plDocumentObjectPropertyEvent;
 struct plDocumentObjectStructureEvent;
 struct plSelectionManagerEvent;
 
 /// \brief FMOD-style audio event editor: multi-track timeline on top, mockup deck below
-/// (instrument playlist with weights, playback controls, automation curve), macros dock right.
+/// (instrument playlist with weights, playback controls, automation curve), macros panel right.
 ///
-/// The toolbar row with the OUT meter, the parameter tabs and timeline, the deck and the status row are
-/// engine-drawn.
-class plAudioEventAssetDocumentWindow : public plQtDocumentWindow
+/// The panels: "AudioEventTimelineDockWidget" (the toolbar row with the OUT meter, the parameter tabs and timeline,
+/// the deck, AUTOMATION, MESSAGES TO GAME and DETAILS of the selection, and the status row) and "AudioEventAssetDockWidget"
+/// (the asset's status and the event macros over the attenuation curve).
+class plAudioEventAssetDocumentWindow : public plDocumentWindow
 {
-  Q_OBJECT
-
 public:
   plAudioEventAssetDocumentWindow(plDocument* pDocument);
   ~plAudioEventAssetDocumentWindow();
 
-  virtual const char* GetGroupName() const { return "AudioEventAsset"; }
+  /// The Event Macros panel on the right of the event.
+  static void ArrangePanels(plEditorUiDockManager& ref_panels);
 
 private:
   void PropertyEventHandler(const plDocumentObjectPropertyEvent& e);
@@ -53,7 +52,10 @@ private:
   /// \brief The automation shown in the deck: the selected one, else the first.
   const plDocumentObject* GetActiveAutomation() const;
 
-  void CreateEngineCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout);
+  void CreateEventPanel();
+  void CreateToolRow(plEditorUiAudioShellStack& ref_main);
+  void CreateLowerRow(plEditorUiAudioShellStack& ref_main);
+  void CreateMacrosPanel();
 
   /// Session solo of the timeline tracks.
   bool HasSoloTracks() const;
@@ -101,6 +103,7 @@ private:
   bool PickSoundFiles(plHybridArray<plString, 8>& out_files);
 
   void QueueRefresh();
+  void Refresh();
 
   plAudioEventAssetDocument* m_pAssetDoc = nullptr;
 
@@ -115,10 +118,8 @@ private:
   plUInt32 m_uiSeed = 1;
   plEventSubscriptionID m_AuditionSubscription = 0;
 
-  QTimer* m_pMeterTimer = nullptr;
-
   // engine-drawn views
-  plQtEngineControlStrip* m_pToolStrip = nullptr;
+  plEditorUiControlStrip* m_pToolStrip = nullptr;
   plUInt32 m_uiPlay = 0;
   plUInt32 m_uiStop = 0;
   plUInt32 m_uiKeyOff = 0;
@@ -130,10 +131,11 @@ private:
   plEditorUiAudioMeter* m_pMeterView = nullptr;
   plEditorUiAudioEventTimeline* m_pTimelineView = nullptr;
   plEditorUiAudioEventDeck* m_pDeckView = nullptr;
-  plQtEngineUiContentWidget* m_pDeckWidget = nullptr; ///< takes the height the deck's playlist needs
   plEditorUiAudioEventAutomation* m_pAutomationView = nullptr;
   plEditorUiAudioAttenuation* m_pAttenuationView = nullptr;
-  plQtEngineUiContentWidget* m_pAttenuationWidget = nullptr; ///< under the event macros; hidden for a 2D event
+  bool m_bAttenuationShown = true; ///< the curve under the event macros; hidden for a 2D event
   plEditorUiAudioStatusRow* m_pStatusView = nullptr;
   plEditorUiAudioMessageList* m_pMessagesView = nullptr; ///< what the audition sends to the game: markers, sustain, key-off
+
+  plEditorUiTimerGroup m_Timers; ///< the audition poll, the queued refresh and opening a nested event
 };

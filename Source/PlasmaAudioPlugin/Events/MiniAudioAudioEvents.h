@@ -13,6 +13,7 @@
 #include <Foundation/Threading/Mutex.h>
 #include <PlasmaAudioPlugin/Events/AudioVoiceManager.h>
 #include <PlasmaAudioPlugin/Mixer/MiniAudioDspNodes.h>
+#include <PlasmaAudioPlugin/Music/AudioMusicPlayer.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
 #include <PlasmaAudioPlugin/Profiling/AudioEventLog.h>
 #include <PlasmaAudioPlugin/Resources/MiniAudioSoundResource.h>
@@ -44,6 +45,10 @@ struct plAudioVoiceSnapshotEntry;
 /// mixed in. Only the first read knows which, so the first read sets the sound's fader, which the sound applies to the
 /// frames of that same read. A fade anchored at an engine frame from outside the device thread could instead start
 /// behind the chunk the sound is first mixed in and be skipped in part or whole.
+///
+/// The data can also end at an engine frame (music segments and their cuts): the source stops reading the inner source
+/// there and fades the frames before it to silence over the end fade. miniaudio's stop times would stop the sound for
+/// the whole chunk that reaches them. The audio thread may move the end while the voice plays.
 struct plMaVoiceDataSource
 {
   ma_data_source_base m_Base;
@@ -60,6 +65,13 @@ struct plMaVoiceDataSource
   bool m_bLeadResolved = false;
   bool m_bStartFadeApplied = false;
   bool m_bPadded = false;
+  double m_fEnginePosition = 0.0;              ///< engine frame of the next frame the source emits; set by the first read
+
+  /// \name Set by the audio thread at any time
+  ///@{
+  plAtomicInteger64 m_iEndFrame;      ///< absolute engine frame at which the data ends; 0 for none
+  plAtomicInteger64 m_iEndFadeFrames; ///< engine frames before m_iEndFrame over which the data fades to silence
+  ///@}
 
   /// \name Published by the device thread after every read, for the audio thread
   /// The audio thread never reads the inner source's cursor itself: the device thread advances it concurrently.
@@ -166,6 +178,24 @@ public:
 
   /// \brief The sustain points not released yet, and whether the playhead waits at one.
   void GetSustainState(plUInt32& out_uiSustainsLeft, bool& out_bHolding) const;
+
+  /// \name Music
+  /// An event whose desc has music plays it (see plAudioMusicDesc): its instruments start and end when the music player
+  /// says, the state follows the parameter plAudioMusicDesc::StateParameter, and the instance plays until it is stopped.
+  ///@{
+
+  PL_NODISCARD bool IsMusic() const { return m_Music.IsStarted(); }
+
+  /// \brief Asks for the state of that name (by setting the state parameter). Unknown names are ignored.
+  void SetMusicState(plStringView sState);
+
+  /// \brief Plays the stinger of that name at its quantized point. Unknown names are ignored.
+  void PlayStinger(plStringView sStinger);
+
+  /// \brief What the music plays at the engine time.
+  PL_NODISCARD plAudioMusicPlayer::Position GetMusicPosition() const;
+
+  ///@}
 
   /// \brief Sets m_vListenerPos to the listener closest to the entity (or the first one for a global entity).
   void SelectListener(plArrayPtr<const plVec3> listeners);
@@ -349,6 +379,9 @@ private:
     ma_uint64 m_uiLengthSourceFrames = 0;  ///< inner source length in source frames; 0 when unknown
     ma_uint64 m_uiLastFlipFrame = UnknownFrame; ///< engine frame of the last real/virtual change; UnknownFrame when there was none
     ma_uint64 m_uiTeardownFrame = 0;       ///< engine frame at which the virtualization fade-out ends; only valid when m_bTeardownPending
+    ma_uint64 m_uiEndFrame = 0;            ///< music: engine frame at which the voice's data ends; 0 for none
+    ma_uint64 m_uiEndFadeFrames = 0;       ///< music: the data fades to silence over these frames before m_uiEndFrame
+    ma_uint64 m_uiOffsetFrames = 0;        ///< music: engine frames into the data at which the voice starts
     ma_uint64 m_uiLoopStart = 0;           ///< loop start in source frames; only valid when m_bLoopPoints
     ma_uint64 m_uiLoopEnd = 0;             ///< loop end in source frames; only valid when m_bLoopPoints
     ma_uint32 m_uiSourceSampleRate = 0;    ///< inner source sample rate (clip header rate or decoder output rate)
@@ -421,7 +454,21 @@ private:
 
   Voice& GetVoice(plUInt32 uiInstrument, plUInt32 uiSlot) { return m_Voices[uiInstrument * VoiceSlotsPerInstrument + uiSlot]; }
 
-  void StartVoice(plUInt32 uiInstrument, plUInt32 uiSlot, plRandom& ref_rng, ma_uint64 uiStartFrame);
+  /// \brief Starts the instrument's next playlist entry on the slot at uiStartFrame. Music voices also give the engine
+  /// frames into the data they start at and the frame their data ends (0: none).
+  void StartVoice(plUInt32 uiInstrument, plUInt32 uiSlot, plRandom& ref_rng, ma_uint64 uiStartFrame, ma_uint64 uiOffsetFrames = 0, ma_uint64 uiEndFrame = 0);
+
+  /// \brief Runs the music player and starts and cuts the stems it decided; queues its messages that are due.
+  void UpdateMusic(ma_uint64 uiNow, ma_uint64 uiHorizon, plRandom& ref_rng);
+
+  /// \brief Starts a stem or stinger the music player placed, on a free slot of its instrument (or the slot of its older voice).
+  void StartMusicStem(const plAudioMusicPlayer::StemPlay& play, plRandom& ref_rng);
+
+  /// \brief Ends the instrument's voices that would sound past the cut's frame there, with its fade.
+  void CutMusicStem(const plAudioMusicPlayer::StemCut& cut);
+
+  /// \brief Sets the end of the voice's data (also on its data source, while it has one).
+  void SetVoiceEnd(Voice& ref_voice, ma_uint64 uiEndFrame, ma_uint64 uiFadeFrames);
 
   /// \brief Builds the decoding chain of voice (m_uiInstrument, m_uiEntry, base volume and pitch set) and starts its
   /// sound, with the inner source sought to uiSourceCursor and its data starting at engine frame uiDataStartFrame.
@@ -498,6 +545,9 @@ private:
   /// miniaudio are not accounted for.
   ma_uint64 EstimateVoiceEndFrame(const Voice& voice, ma_uint64 uiNow) const;
 
+  /// \brief EstimateVoiceEndFrame without the voice's end frame: where its data runs out.
+  ma_uint64 EstimateVoiceDataEndFrame(const Voice& voice, ma_uint64 uiNow) const;
+
   /// \brief Source frames the voice advances per engine frame at the current pitch.
   double GetSourceFramesPerEngineFrame(const Voice& voice) const;
 
@@ -549,6 +599,15 @@ private:
   /// \brief Generator of a seeded instance (plPlasmaAudioEventData::m_bSeeded); the others use the manager's.
   plRandom m_SeededRng;
   bool m_bSeeded = false;
+
+  /// \name Music
+  ///@{
+  plAudioMusicPlayer m_Music;
+  plUInt32 m_uiMusicStateParameter = plInvalidIndex; ///< index of the state parameter, or plInvalidIndex
+  plDynamicArray<plAudioMusicPlayer::StemPlay> m_MusicPlays;   ///< scratch of UpdateMusic
+  plDynamicArray<plAudioMusicPlayer::StemCut> m_MusicCuts;     ///< scratch of UpdateMusic
+  plDynamicArray<plAudioMusicPlayer::Message> m_MusicMessages; ///< scratch of UpdateMusic
+  ///@}
 
   plTime m_Elapsed;
   bool m_bStopping = false;
@@ -630,6 +689,15 @@ public:
 
   /// \brief Releases the next sustain point of every instance of the entity (see plPlasmaAudioEventInstance::KeyOff).
   void KeyOff(const plPlasmaAudioEntityData* pEntity);
+
+  /// \brief Asks the music instances of the entity for the state of that name (see plPlasmaAudioEventInstance::SetMusicState).
+  void SetMusicState(const plPlasmaAudioEntityData* pEntity, plStringView sState);
+
+  /// \brief Plays the stinger of that name over the music instances of the entity.
+  void PlayStinger(const plPlasmaAudioEntityData* pEntity, plStringView sStinger);
+
+  /// \brief What the music started for the event data plays now; false when no music plays for it.
+  bool GetMusicPosition(const plPlasmaAudioEventData* pEventData, plAudioMusicPlayer::Position& out_position) const;
 
   /// \brief Moves the markers the instances of the event data passed and nobody took yet into out_markers.
   void TakeMarkers(plPlasmaAudioEventData* pEventData, plDynamicArray<plString>& out_markers);

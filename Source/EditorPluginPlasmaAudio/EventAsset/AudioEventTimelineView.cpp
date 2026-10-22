@@ -2,7 +2,7 @@
 
 #include <AudioSystem/Mixer/AudioMixerData.h>
 #include <EditorFramework/Assets/AssetCurator.h>
-#include <EditorFramework/EditorApp/EditorApp.moc.h>
+#include <EditorFramework/EditorApp/EditorApp.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAsset.h>
@@ -152,7 +152,7 @@ double plEditorUiAudioEventTimeline::GetSampleDuration(plStringView sFile) const
   double fDuration = 0.0;
 
   plStringBuilder sAbsPath = sFile;
-  if (plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
+  if (plEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
   {
     ma_decoder decoder;
     if (ma_decoder_init_file(sAbsPath.GetData(), nullptr, &decoder) == MA_SUCCESS)
@@ -254,7 +254,7 @@ const plDynamicArray<float>& plEditorUiAudioEventTimeline::GetEntryPeaks(const p
     sAbsPath = plAudioClipAssetUtils::GetClipInfo(sClip, info) ? info.m_sSourceFile : plString();
   }
 
-  if (sAbsPath.IsEmpty() || !plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
+  if (sAbsPath.IsEmpty() || !plEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAbsPath))
     return peaks;
 
   ma_decoder_config config = ma_decoder_config_init(ma_format_f32, 0, 0);

@@ -11,6 +11,7 @@
 #include <Foundation/Time/Time.h>
 #include <Foundation/Tracks/Curve1D.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipResource.h>
+#include <PlasmaAudioPlugin/Music/AudioMusicDesc.h>
 
 using plAudioEventResourceHandle = plTypedResourceHandle<class plAudioEventResource>;
 using plDataBuffer = plDynamicArray<plUInt8>;
@@ -289,6 +290,10 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventDesc
 
   /// \brief Original file names of the embedded samples (debug / editor roundtrip).
   plDynamicArray<plString> m_SampleNames;
+
+  /// \brief With states, the event plays as interactive music: the instruments are the stems and stingers (see
+  /// plAudioMusicDesc).
+  plAudioMusicDesc m_Music;
 
   plResult Save(plStreamWriter& inout_stream) const;
   plResult Load(plStreamReader& inout_stream);

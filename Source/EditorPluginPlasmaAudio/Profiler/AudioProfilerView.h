@@ -28,8 +28,8 @@ struct plAudioProfilerLogLine
 ///
 /// The panel polls the target and hands every snapshot and the new log lines to this view, and records them into the
 /// capture the view draws. Without a range the tabs show the live state; with a range, Voices, Buses and Memory show the
-/// snapshot at its end, and Instances and Event log what happened in it. The Qt panel shows one view, the engine shell's
-/// Audio Profiler panel another, fed by the same panel.
+/// snapshot at its end, and Instances and Event log what happened in it. The engine shell's Audio Profiler panel shows
+/// it, fed by plAudioProfilerPanel.
 class plEditorUiAudioProfilerView : public plEditorUiContent
 {
 public:

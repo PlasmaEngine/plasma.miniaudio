@@ -45,6 +45,16 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioAuditionStatusMsgToEditor, 1, plRTTIDefau
     PL_MEMBER_PROPERTY("SustainsLeft", m_uiSustainsLeft),
     PL_MEMBER_PROPERTY("Holding", m_bHolding),
     PL_ARRAY_MEMBER_PROPERTY("Markers", m_Markers),
+    PL_MEMBER_PROPERTY("Music", m_bMusic),
+    PL_MEMBER_PROPERTY("MusicState", m_uiMusicState),
+    PL_MEMBER_PROPERTY("MusicSegment", m_uiMusicSegment),
+    PL_MEMBER_PROPERTY("MusicTransitionSegment", m_bMusicTransitionSegment),
+    PL_MEMBER_PROPERTY("MusicBar", m_uiMusicBar),
+    PL_MEMBER_PROPERTY("MusicBeat", m_uiMusicBeat),
+    PL_MEMBER_PROPERTY("MusicTempo", m_fMusicTempo),
+    PL_MEMBER_PROPERTY("MusicBeatsPerBar", m_uiMusicBeatsPerBar),
+    PL_MEMBER_PROPERTY("MusicPendingState", m_uiMusicPendingState),
+    PL_MEMBER_PROPERTY("MusicPendingIn", m_fMusicPendingIn),
     PL_MEMBER_PROPERTY("Error", m_sError),
   }
   PL_END_PROPERTIES;

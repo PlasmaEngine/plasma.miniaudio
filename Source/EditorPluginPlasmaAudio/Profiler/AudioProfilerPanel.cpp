@@ -2,28 +2,25 @@
 
 #include <EditorEngineProcessFramework/EngineProcess/EngineProcessMessages.h>
 #include <EditorFramework/Assets/AssetCurator.h>
-#include <EditorFramework/EditorApp/EditorApp.moc.h>
+#include <EditorFramework/EditorApp/EditorApp.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
-#include <EditorPluginPlasmaAudio/Profiler/AudioProfilerPanel.moc.h>
+#include <EditorPluginPlasmaAudio/Profiler/AudioProfilerPanel.h>
 #include <EditorUi/FileDialog.h>
 #include <Foundation/Communication/Telemetry.h>
 #include <Foundation/Configuration/CVar.h>
 #include <Foundation/IO/MemoryStream.h>
 #include <Foundation/IO/OSFile.h>
 #include <Foundation/Time/Timestamp.h>
-#include <GuiFoundation/DocumentWindow/DocumentWindow.moc.h>
+#include <GuiFoundation/DocumentWindow/DocumentWindow.h>
 #include <GuiFoundation/EngineUi/ApplicationPanels.h>
-#include <GuiFoundation/EngineUi/EngineUiContentWidget.h>
-#include <GuiFoundation/UIServices/UIServices.moc.h>
+#include <GuiFoundation/UIServices/UIServices.h>
 #include <ToolsFoundation/Project/ToolsProject.h>
 
-#include <QTimer>
-
-PL_IMPLEMENT_SINGLETON(plQtAudioProfilerPanel);
+PL_IMPLEMENT_SINGLETON(plAudioProfilerPanel);
 
 namespace
 {
-  constexpr int kPollIntervalMs = 250;
+  const plTime kPollInterval = plTime::MakeFromMilliseconds(250);
   constexpr plInt32 kSnapshotHz = 10;
 
   /// A request without an answer after this long no longer blocks the next one.
@@ -37,13 +34,13 @@ namespace
   constexpr const char* s_szSnapshotCVar = "PlasmaAudio.ProfilerSnapshotHz";
   constexpr const char* s_szCaptureFilter = "Audio captures (*.plAudioCapture)";
 
-  /// The scene document the user works in: the visible scene window.
+  /// The scene document the user works in: the scene whose tab shows in the engine shell.
   plDocument* FindActiveSceneDocument()
   {
-    for (plQtDocumentWindow* pWindow : plQtDocumentWindow::GetAllDocumentWindows())
+    for (plDocumentWindow* pWindow : plDocumentWindow::GetAllDocumentWindows())
     {
       plDocument* pDocument = pWindow->GetDocument();
-      if (pDocument != nullptr && pWindow->isVisible() && pDocument->GetDocumentTypeName() == "Scene")
+      if (pDocument != nullptr && pWindow->IsShownInEngineShell() && pDocument->GetDocumentTypeName() == "Scene")
         return pDocument;
     }
 
@@ -64,38 +61,28 @@ namespace
   }
 } // namespace
 
-plQtAudioProfilerPanel::plQtAudioProfilerPanel()
-  : plQtApplicationPanel(ShellPanelId) // the Panels menu opens the engine shell's panel of the same name
-  , m_SingletonRegistrar(this)
+plAudioProfilerPanel::plAudioProfilerPanel()
+  : m_SingletonRegistrar(this)
 {
-  setWindowTitle("Audio Profiler");
-  setIcon(plQtUiServices::GetCachedIconResource(":/AssetIcons/AudioMixer.svg"));
-
-  plQtEngineUiContentWidget* pViewWidget = nullptr;
-  m_pView = plQtEngineUiContentWidget::Create<plEditorUiAudioProfilerView>(this, "AudioProfiler", &pViewWidget);
-  ConnectView(m_pView);
-  setWidget(pViewWidget, ads::CDockWidget::ForceNoScrollArea);
-
   RegisterShellPanel();
 
-  m_pTimer = new QTimer(this);
-  m_pTimer->setInterval(kPollIntervalMs);
-  connect(m_pTimer, &QTimer::timeout, this, &plQtAudioProfilerPanel::OnTick);
-  m_pTimer->start();
+  m_Timers.Start(kPollInterval, [this]()
+    { OnTick(); }, true);
 
-  connect(this, &ads::CDockWidget::viewToggled, this, [this](bool) { OnTick(); });
-
-  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plQtAudioProfilerPanel::EngineProcessMsgHandler, this));
+  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plAudioProfilerPanel::EngineProcessMsgHandler, this));
+  plToolsProject::s_Events.AddEventHandler(plMakeDelegate(&plAudioProfilerPanel::ToolsProjectEventHandler, this));
 
   UpdateLinkIndicator();
 }
 
-plQtAudioProfilerPanel::~plQtAudioProfilerPanel()
+plAudioProfilerPanel::~plAudioProfilerPanel()
 {
   // the shell destroys its view now, while the panel still exists
   plEditorUiApplicationPanels::Unregister(ShellPanelId);
+  m_Timers.StopAll();
 
-  plEditorEngineProcessConnection::s_Events.RemoveEventHandler(plMakeDelegate(&plQtAudioProfilerPanel::EngineProcessMsgHandler, this));
+  plToolsProject::s_Events.RemoveEventHandler(plMakeDelegate(&plAudioProfilerPanel::ToolsProjectEventHandler, this));
+  plEditorEngineProcessConnection::s_Events.RemoveEventHandler(plMakeDelegate(&plAudioProfilerPanel::EngineProcessMsgHandler, this));
 
   if (m_bSnapshotsEnabled)
   {
@@ -109,30 +96,29 @@ plQtAudioProfilerPanel::~plQtAudioProfilerPanel()
   }
 }
 
-void plQtAudioProfilerPanel::RegisterShellPanel()
+void plAudioProfilerPanel::RegisterShellPanel()
 {
   // the engine shell shows a view of its own, fed by this panel
   plEditorUiApplicationPanelDesc desc;
   desc.m_sId = ShellPanelId;
-  desc.m_CreateContent = [](QWidget*) -> plUniquePtr<plEditorUiContent>
+  desc.m_sMenuIcon = ":/AssetIcons/AudioMixer.svg";
+  desc.m_CreateContent = []() -> plUniquePtr<plEditorUiContent>
   {
-    plQtAudioProfilerPanel* pPanel = plQtAudioProfilerPanel::GetSingleton();
+    plAudioProfilerPanel* pPanel = plAudioProfilerPanel::GetSingleton();
     return pPanel != nullptr ? pPanel->CreateShellView() : plUniquePtr<plEditorUiContent>();
   };
   plEditorUiApplicationPanels::SetIcon(ShellPanelId, plAudioEngineUi::IconSliders);
   plEditorUiApplicationPanels::Register(desc);
 }
 
-void plQtAudioProfilerPanel::ToolsProjectEventHandler(const plToolsProjectEvent& e)
+void plAudioProfilerPanel::ToolsProjectEventHandler(const plToolsProjectEvent& e)
 {
   // the shell translates the panel's title when it is registered; the package's strings load with the project
   if (e.m_Type == plToolsProjectEvent::Type::ProjectOpened)
     RegisterShellPanel();
-
-  plQtApplicationPanel::ToolsProjectEventHandler(e);
 }
 
-plEditorEngineProcessConnection* plQtAudioProfilerPanel::GetLiveConnection()
+plEditorEngineProcessConnection* plAudioProfilerPanel::GetLiveConnection()
 {
   plEditorEngineProcessConnection* pConnection = plEditorEngineProcessConnection::GetSingleton();
   if (pConnection == nullptr || pConnection->IsProcessCrashed() || !pConnection->IsEngineSetup())
@@ -141,7 +127,7 @@ plEditorEngineProcessConnection* plQtAudioProfilerPanel::GetLiveConnection()
   return pConnection;
 }
 
-void plQtAudioProfilerPanel::SendSnapshotRate(plInt32 iHz)
+void plAudioProfilerPanel::SendSnapshotRate(plInt32 iHz)
 {
   if (m_Target == Target::Player)
   {
@@ -168,7 +154,7 @@ void plQtAudioProfilerPanel::SendSnapshotRate(plInt32 iHz)
   pConnection->SendMessage(&msg);
 }
 
-void plQtAudioProfilerPanel::OnTick()
+void plAudioProfilerPanel::OnTick()
 {
   if (m_Target == Target::Player)
     TickPlayer();
@@ -176,12 +162,12 @@ void plQtAudioProfilerPanel::OnTick()
     TickEngineProcess();
 }
 
-void plQtAudioProfilerPanel::TickEngineProcess()
+void plAudioProfilerPanel::TickEngineProcess()
 {
   plEditorEngineProcessConnection* pConnection = GetLiveConnection();
 
-  // the engine process produces snapshots only while the panel is open, here or in the engine shell
-  const bool bWantSnapshots = pConnection != nullptr && (!isClosed() || !m_ShellViews.IsEmpty());
+  // the engine process produces snapshots only while the panel shows them or records them
+  const bool bWantSnapshots = pConnection != nullptr && (IsShown() || m_bRecording);
   if (bWantSnapshots != m_bSnapshotsEnabled)
   {
     SendSnapshotRate(bWantSnapshots ? kSnapshotHz : 0);
@@ -195,7 +181,7 @@ void plQtAudioProfilerPanel::TickEngineProcess()
     return;
   }
 
-  if (!IsShown())
+  if (!bWantSnapshots)
     return;
 
   if (m_bRequestPending && plTime::Now() - m_LastRequest < kRequestTimeout)
@@ -212,7 +198,7 @@ void plQtAudioProfilerPanel::TickEngineProcess()
   }
 }
 
-void plQtAudioProfilerPanel::TickPlayer()
+void plAudioProfilerPanel::TickPlayer()
 {
   const plTime tNow = plTime::Now();
 
@@ -261,7 +247,7 @@ void plQtAudioProfilerPanel::TickPlayer()
     SetLinkState(LinkState::NoData);
 }
 
-void plQtAudioProfilerPanel::EngineProcessMsgHandler(const plEditorEngineProcessConnection::Event& e)
+void plAudioProfilerPanel::EngineProcessMsgHandler(const plEditorEngineProcessConnection::Event& e)
 {
   if (m_Target != Target::EngineProcess)
     return;
@@ -302,7 +288,7 @@ void plQtAudioProfilerPanel::EngineProcessMsgHandler(const plEditorEngineProcess
   }
 }
 
-void plQtAudioProfilerPanel::ApplyStats(const plVariant& stats)
+void plAudioProfilerPanel::ApplyStats(const plVariant& stats)
 {
   if (stats.IsA<plVariantDictionary>())
   {
@@ -319,7 +305,7 @@ void plQtAudioProfilerPanel::ApplyStats(const plVariant& stats)
   SetLinkState(LinkState::NoData);
 }
 
-void plQtAudioProfilerPanel::ApplySnapshotData(const plDataBuffer& data)
+void plAudioProfilerPanel::ApplySnapshotData(const plDataBuffer& data)
 {
   {
     plRawMemoryStreamReader reader(data);
@@ -357,7 +343,7 @@ void plQtAudioProfilerPanel::ApplySnapshotData(const plDataBuffer& data)
   }
 }
 
-void plQtAudioProfilerPanel::CollectNewLogLines(plHybridArray<LogLine, 32>& out_lines)
+void plAudioProfilerPanel::CollectNewLogLines(plHybridArray<LogLine, 32>& out_lines)
 {
   const plAudioProfilingSnapshot& s = m_Snapshot;
 
@@ -399,7 +385,7 @@ void plQtAudioProfilerPanel::CollectNewLogLines(plHybridArray<LogLine, 32>& out_
   m_bLogSequenceKnown = true;
 }
 
-void plQtAudioProfilerPanel::SetLinkState(LinkState state)
+void plAudioProfilerPanel::SetLinkState(LinkState state)
 {
   if (state == m_LinkState)
     return;
@@ -408,7 +394,7 @@ void plQtAudioProfilerPanel::SetLinkState(LinkState state)
   UpdateLinkIndicator();
 }
 
-void plQtAudioProfilerPanel::UpdateLinkIndicator()
+void plAudioProfilerPanel::UpdateLinkIndicator()
 {
   using ViewState = plEditorUiAudioProfilerView::LinkState;
   const ViewState state = m_LinkState == LinkState::Live ? ViewState::Live : (m_LinkState == LinkState::NoData ? ViewState::NoData : ViewState::NoEngine);
@@ -429,7 +415,7 @@ void plQtAudioProfilerPanel::UpdateLinkIndicator()
 //////////////////////////////////////////////////////////////////////////
 // Capture
 
-void plQtAudioProfilerPanel::SetTarget(Target target)
+void plAudioProfilerPanel::SetTarget(Target target)
 {
   if (target == m_Target)
     return;
@@ -465,7 +451,7 @@ void plQtAudioProfilerPanel::SetTarget(Target target)
   OnTick();
 }
 
-void plQtAudioProfilerPanel::SetRecording(bool bRecording)
+void plAudioProfilerPanel::SetRecording(bool bRecording)
 {
   // a capture from a file or a full one is not continued
   if (bRecording && (m_bCaptureFromFile || m_Capture.IsFull()))
@@ -486,7 +472,7 @@ void plQtAudioProfilerPanel::SetRecording(bool bRecording)
     pView->SetRecording(m_bRecording);
 }
 
-void plQtAudioProfilerPanel::CaptureChanged()
+void plAudioProfilerPanel::CaptureChanged()
 {
   plHybridArray<plEditorUiAudioProfilerView*, 2> views;
   GatherViews(views);
@@ -494,7 +480,7 @@ void plQtAudioProfilerPanel::CaptureChanged()
     pView->OnCaptureChanged();
 }
 
-void plQtAudioProfilerPanel::ShowToast(plStringView sText)
+void plAudioProfilerPanel::ShowToast(plStringView sText)
 {
   plHybridArray<plEditorUiAudioProfilerView*, 2> views;
   GatherViews(views);
@@ -502,7 +488,7 @@ void plQtAudioProfilerPanel::ShowToast(plStringView sText)
     pView->ShowToast(sText);
 }
 
-void plQtAudioProfilerPanel::SaveCapture()
+void plAudioProfilerPanel::SaveCapture()
 {
   if (m_Capture.IsEmpty())
     return;
@@ -535,7 +521,7 @@ void plQtAudioProfilerPanel::SaveCapture()
   if (m_Capture.Save(writer).Failed() || plOSFile::CreateDirectoryStructure(sPath.GetFileDirectory()).Failed() || file.Open(sPath, plFileOpenMode::Write).Failed() ||
       file.Write(bytes.GetData(), bytes.GetCount()).Failed())
   {
-    plQtUiServices::MessageBoxWarning(plFmt("Saving the audio capture to '{}' failed.", sPath));
+    plEditorUiServices::MessageBoxWarning(plFmt("Saving the audio capture to '{}' failed.", sPath));
     return;
   }
 
@@ -546,7 +532,7 @@ void plQtAudioProfilerPanel::SaveCapture()
   ShowToast(sToast);
 }
 
-void plQtAudioProfilerPanel::OpenCapture()
+void plAudioProfilerPanel::OpenCapture()
 {
   plEditorUiFileDialog::Desc desc;
   desc.m_Mode = plEditorUiFileDialog::Mode::OpenFile;
@@ -563,7 +549,7 @@ void plQtAudioProfilerPanel::OpenCapture()
   plDynamicArray<plUInt8> content;
   if (file.Open(result.m_Paths[0], plFileOpenMode::Read).Failed())
   {
-    plQtUiServices::MessageBoxWarning(plFmt("The audio capture '{}' could not be opened.", result.m_Paths[0]));
+    plEditorUiServices::MessageBoxWarning(plFmt("The audio capture '{}' could not be opened.", result.m_Paths[0]));
     return;
   }
 
@@ -575,7 +561,7 @@ void plQtAudioProfilerPanel::OpenCapture()
   plRawMemoryStreamReader reader(content.GetData(), content.GetCount());
   if (m_Capture.Load(reader).Failed())
   {
-    plQtUiServices::MessageBoxWarning(plFmt("'{}' is not an audio capture this version can read.", result.m_Paths[0]));
+    plEditorUiServices::MessageBoxWarning(plFmt("'{}' is not an audio capture this version can read.", result.m_Paths[0]));
   }
 
   m_bCaptureFromFile = true;
@@ -586,7 +572,7 @@ void plQtAudioProfilerPanel::OpenCapture()
   ShowToast(sToast);
 }
 
-void plQtAudioProfilerPanel::SelectEntity(plStringView sEntity)
+void plAudioProfilerPanel::SelectEntity(plStringView sEntity)
 {
   plDocument* pScene = FindActiveSceneDocument();
   if (pScene == nullptr || sEntity.IsEmpty())
@@ -612,7 +598,7 @@ void plQtAudioProfilerPanel::SelectEntity(plStringView sEntity)
   ShowToast(sToast);
 }
 
-void plQtAudioProfilerPanel::OpenEvent(plStringView sEvent)
+void plAudioProfilerPanel::OpenEvent(plStringView sEvent)
 {
   // the event's resource id or description: its GUID, or the path of its built file
   plString sPath;
@@ -642,13 +628,13 @@ void plQtAudioProfilerPanel::OpenEvent(plStringView sEvent)
     return;
   }
 
-  plQtEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::RequestWindow | plDocumentFlags::AddToRecentFilesList);
+  plEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::RequestWindow | plDocumentFlags::AddToRecentFilesList);
 }
 
 //////////////////////////////////////////////////////////////////////////
 // Views
 
-void plQtAudioProfilerPanel::ConnectView(plEditorUiAudioProfilerView* pView)
+void plAudioProfilerPanel::ConnectView(plEditorUiAudioProfilerView* pView)
 {
   pView->m_OnRecordToggled = [this](bool bRecording)
   { SetRecording(bRecording); };
@@ -667,11 +653,11 @@ void plQtAudioProfilerPanel::ConnectView(plEditorUiAudioProfilerView* pView)
   pView->SetRecording(m_bRecording);
 }
 
-plUniquePtr<plEditorUiContent> plQtAudioProfilerPanel::CreateShellView()
+plUniquePtr<plEditorUiContent> plAudioProfilerPanel::CreateShellView()
 {
   plEditorUiAudioProfilerView* pView = PL_DEFAULT_NEW(plEditorUiAudioProfilerView);
   ConnectView(pView);
-  pView->m_OnDestroyed = plMakeDelegate(&plQtAudioProfilerPanel::OnShellViewDestroyed, this);
+  pView->m_OnDestroyed = plMakeDelegate(&plAudioProfilerPanel::OnShellViewDestroyed, this);
   m_ShellViews.PushBack(pView);
 
   // the state so far; the next poll brings a snapshot
@@ -682,20 +668,26 @@ plUniquePtr<plEditorUiContent> plQtAudioProfilerPanel::CreateShellView()
   return plUniquePtr<plEditorUiContent>(pView, plFoundation::GetDefaultAllocator());
 }
 
-void plQtAudioProfilerPanel::OnShellViewDestroyed(plEditorUiAudioProfilerView* pView)
+void plAudioProfilerPanel::OnShellViewDestroyed(plEditorUiAudioProfilerView* pView)
 {
   m_ShellViews.RemoveAndCopy(pView);
 }
 
-bool plQtAudioProfilerPanel::IsShown() const
+bool plAudioProfilerPanel::IsShown() const
 {
-  return (!isClosed() && isVisible()) || !m_ShellViews.IsEmpty();
+  // a view in a closed panel or behind another tab draws nothing
+  for (const plEditorUiAudioProfilerView* pView : m_ShellViews)
+  {
+    const plEditorUiWindowHost* pHost = pView->GetWindowHost();
+    if (pHost != nullptr && pHost->IsSurfaceShown(pView->GetSurface()))
+      return true;
+  }
+
+  return false;
 }
 
-void plQtAudioProfilerPanel::GatherViews(plHybridArray<plEditorUiAudioProfilerView*, 2>& out_views) const
+void plAudioProfilerPanel::GatherViews(plHybridArray<plEditorUiAudioProfilerView*, 2>& out_views) const
 {
   out_views.Clear();
-  if (m_pView != nullptr)
-    out_views.PushBack(m_pView);
   out_views.PushBackRange(m_ShellViews);
 }

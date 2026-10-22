@@ -1,5 +1,6 @@
 #include <PlasmaAudioPlugin/PlasmaAudioPluginPCH.h>
 
+#include <AudioSystem/Core/AudioMiddleware.h>
 #include <AudioSystem/Core/AudioSystem.h>
 #include <AudioSystem/Core/AudioSystemRequests.h>
 #include <AudioSystem/Mixer/AudioMixerService.h>
@@ -356,6 +357,22 @@ void plAudioAudition::Update(plPlasmaAudioEventManager& ref_events, plMiniAudioB
               continue;
             }
 
+            // music: a state or a stinger by name, as the game sends them
+            plStringView sName = cmd.m_ParameterNames[i];
+            if (sName.StartsWith(plAudioSystemReservedParameter::MusicStatePrefix))
+            {
+              sName.Shrink(plStringUtils::GetCharacterCount(plAudioSystemReservedParameter::MusicStatePrefix), 0);
+              ref_events.SetMusicState(&(*pSlot)->m_Entity, sName);
+              continue;
+            }
+
+            if (sName.StartsWith(plAudioSystemReservedParameter::StingerPrefix))
+            {
+              sName.Shrink(plStringUtils::GetCharacterCount(plAudioSystemReservedParameter::StingerPrefix), 0);
+              ref_events.PlayStinger(&(*pSlot)->m_Entity, sName);
+              continue;
+            }
+
             ref_events.SetEventParameter(&(*pSlot)->m_Entity, cmd.m_ParameterNames[i], cmd.m_ParameterValues[i]);
           }
         }
@@ -430,6 +447,16 @@ void plAudioAudition::Update(plPlasmaAudioEventManager& ref_events, plMiniAudioB
     pStatus->m_bPlaying |= slot.m_bPendingStart;
     pStatus->m_bHasMixer = ref_busGraph.IsBuilt();
     pStatus->m_fPeak = fMasterPeak;
+
+    // music: the position, and how far off a decided change is
+    pStatus->m_bMusic = ref_events.GetMusicPosition(&slot.m_EventData, pStatus->m_Music);
+    pStatus->m_fMusicPendingIn = -1.0;
+    if (pStatus->m_bMusic && pStatus->m_Music.m_uiPendingFrame != 0 && pEngine != nullptr)
+    {
+      const ma_uint64 uiNow = ma_engine_get_time_in_pcm_frames(pEngine);
+      const ma_uint64 uiAhead = (pStatus->m_Music.m_uiPendingFrame > uiNow) ? pStatus->m_Music.m_uiPendingFrame - uiNow : 0;
+      pStatus->m_fMusicPendingIn = static_cast<double>(uiAhead) / plMath::Max(ma_engine_get_sample_rate(pEngine), 1u);
+    }
   }
 }
 

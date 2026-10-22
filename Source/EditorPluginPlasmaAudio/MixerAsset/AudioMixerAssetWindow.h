@@ -1,18 +1,18 @@
-﻿#pragma once
+#pragma once
 
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAsset.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerConsoleViews.h>
+#include <EditorUi/Runtime.h>
 #include <Foundation/Basics.h>
 #include <Foundation/Containers/HashTable.h>
-#include <GuiFoundation/DocumentWindow/DocumentWindow.moc.h>
+#include <GuiFoundation/DocumentWindow/DocumentWindow.h>
 #include <ToolsFoundation/Object/DocumentObjectManager.h>
 
-class QTimer;
 class plEditorUiAudioMixerRouting;
 class plEditorUiAudioMixerStrips;
 class plEditorUiAudioStatusRow;
-class plQtDocumentPanel;
-class plQtEngineControlStrip;
+class plEditorUiControlStrip;
+class plEditorUiDockManager;
 struct plDocumentEvent;
 struct plDocumentObjectPropertyEvent;
 struct plDocumentObjectStructureEvent;
@@ -27,15 +27,18 @@ struct plSelectionManagerEvent;
 /// shows whichever mixer plays (a running scene's), live only when that is this one. Meters, gain reduction, mute,
 /// solo and snapshot intensities come back from the engine process. Invalid routing is shown as a banner and outlined
 /// strips and is not applied.
-class plAudioMixerAssetDocumentWindow : public plQtDocumentWindow
+///
+/// The panels: "AudioMixerConsoleDockWidget" (Mixer Console: the tool strip, the strips, the snapshot rail, the status
+/// row), "AudioMixerRoutingDockWidget" (Routing), "AudioMixerInsertDockWidget" (Insert) and "AudioMixerAssetDockWidget"
+/// (Properties).
+class plAudioMixerAssetDocumentWindow : public plDocumentWindow
 {
-  Q_OBJECT
-
 public:
   plAudioMixerAssetDocumentWindow(plDocument* pDocument);
   ~plAudioMixerAssetDocumentWindow();
 
-  virtual const char* GetGroupName() const { return "AudioMixerAsset"; }
+  /// Routing on the left, Insert first on the right with Properties as its neighbour tab.
+  static void ArrangePanels(plEditorUiDockManager& ref_panels);
 
 private:
   enum class Source : plUInt8
@@ -103,7 +106,7 @@ private:
   plAudioMixerAssetDocument* m_pAssetDoc = nullptr;
   bool m_bRefreshQueued = false;
 
-  plQtEngineControlStrip* m_pToolStrip = nullptr;
+  plEditorUiControlStrip* m_pToolStrip = nullptr;
   plUInt32 m_uiAddBus = 0;
   plUInt32 m_uiAddAuxBus = 0;
   plUInt32 m_uiAddVca = 0;
@@ -117,7 +120,6 @@ private:
   plEditorUiAudioMixerSnapshotRail* m_pRailView = nullptr;
   plEditorUiAudioMixerRouting* m_pRoutingView = nullptr;
   plEditorUiAudioMixerInsertEditor* m_pInsertView = nullptr;
-  plQtDocumentPanel* m_pInsertPanel = nullptr;
   plEditorUiAudioStatusRow* m_pStatusView = nullptr;
 
   // the console
@@ -129,7 +131,6 @@ private:
   plAudioMixerLiveEdit m_LiveEdit;
   plTime m_LastApply;
   bool m_bApplyPending = false;
-  QTimer* m_pPollTimer = nullptr;
   plEventSubscriptionID m_ConsoleSubscription = 0;
 
   /// The bus volumes Capture compares the faders against: when the window opened, saved or captured.
@@ -142,4 +143,6 @@ private:
 
   plString m_sToast;
   plTime m_ToastTime;
+
+  plEditorUiTimerGroup m_Timers; ///< the console poll and the queued refresh
 };

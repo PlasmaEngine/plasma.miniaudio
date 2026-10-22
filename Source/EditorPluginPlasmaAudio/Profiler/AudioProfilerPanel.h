@@ -3,19 +3,19 @@
 #include <EditorFramework/IPC/EngineProcessConnection.h>
 #include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioDLL.h>
 #include <EditorPluginPlasmaAudio/Profiler/AudioProfilerView.h>
+#include <EditorUi/Runtime.h>
 #include <Foundation/Configuration/Singleton.h>
 #include <Foundation/Time/Time.h>
 #include <Foundation/Types/VariantType.h>
-#include <GuiFoundation/DockPanels/ApplicationPanel.moc.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilerCapture.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
 
-class QTimer;
+struct plToolsProjectEvent;
 
 /// \brief The editor's Audio Profiler panel: the PlasmaAudio state of a target, live and recorded.
 ///
 /// The target is the editor's engine process or a Player on this computer. For the engine process the panel sets
-/// PlasmaAudio.ProfilerSnapshotHz there to 10 (back to 0 when it closes) and polls its stats map with
+/// PlasmaAudio.ProfilerSnapshotHz there to 10 while it is shown or recording (back to 0 otherwise) and polls its stats map with
 /// plStatsSnapshotMsgToEngine every 250 ms, with at most one request in flight. A Player is reached as a telemetry
 /// client on port 1040 (its Inspector plugin sends the stats and takes the cvar). Either way the stat
 /// "PlasmaAudio/VoiceSnapshot" carries a serialized plAudioProfilingSnapshot.
@@ -24,25 +24,17 @@ class QTimer;
 /// writes it as a .plAudioCapture file, Open reads one (and stops recording). Record after Open, after a full capture or
 /// after switching the target starts a new capture.
 ///
-/// The content is the engine-drawn plEditorUiAudioProfilerView. The engine shell's "Panel.AudioProfiler" shows a view of
-/// its own, which this panel feeds and polls for while it exists.
-class PL_EDITORPLUGINPLASMAAUDIO_DLL plQtAudioProfilerPanel : public plQtApplicationPanel
+/// The panel is an application panel of the engine shell ("Panel.AudioProfiler", listed in the Panels menu). Its
+/// content is the engine-drawn plEditorUiAudioProfilerView, which this panel feeds and polls for while it is shown.
+class PL_EDITORPLUGINPLASMAAUDIO_DLL plAudioProfilerPanel
 {
-  Q_OBJECT
-
-  PL_DECLARE_SINGLETON(plQtAudioProfilerPanel);
+  PL_DECLARE_SINGLETON(plAudioProfilerPanel);
 
 public:
-  plQtAudioProfilerPanel();
-  ~plQtAudioProfilerPanel();
+  plAudioProfilerPanel();
+  ~plAudioProfilerPanel();
 
   static constexpr const char* ShellPanelId = "Panel.AudioProfiler";
-
-protected:
-  virtual void ToolsProjectEventHandler(const plToolsProjectEvent& e) override;
-
-private Q_SLOTS:
-  void OnTick();
 
 private:
   enum class LinkState
@@ -58,6 +50,7 @@ private:
     Player,
   };
 
+  void ToolsProjectEventHandler(const plToolsProjectEvent& e);
   void EngineProcessMsgHandler(const plEditorEngineProcessConnection::Event& e);
 
   /// \brief Registers the engine shell's panel (again, which replaces it).
@@ -69,6 +62,7 @@ private:
   /// \brief Sends PlasmaAudio.ProfilerSnapshotHz to the target.
   void SendSnapshotRate(plInt32 iHz);
 
+  void OnTick();
   void TickEngineProcess();
   void TickPlayer();
 
@@ -104,20 +98,19 @@ private:
   /// Hooks a view to this panel and gives it the current state.
   void ConnectView(plEditorUiAudioProfilerView* pView);
 
-  /// Whether a view shows the snapshots: this panel, open and visible, or the engine shell's.
+  /// Whether a view shows the snapshots: the engine shell's panel is open and not behind another tab.
   bool IsShown() const;
 
-  /// This panel's view and the engine shell's.
+  /// The engine shell's views.
   void GatherViews(plHybridArray<plEditorUiAudioProfilerView*, 2>& out_views) const;
 
-  plEditorUiAudioProfilerView* m_pView = nullptr; ///< the engine-drawn content
   plHybridArray<plEditorUiAudioProfilerView*, 1> m_ShellViews;
 
   // event log
   plUInt64 m_uiLogNextSequence = 0; ///< sequence number of the next entry not seen yet
   bool m_bLogSequenceKnown = false;
 
-  QTimer* m_pTimer = nullptr;
+  plEditorUiTimerGroup m_Timers; ///< the 250 ms poll
 
   plAudioProfilingSnapshot m_Snapshot;
   bool m_bHasSnapshot = false;

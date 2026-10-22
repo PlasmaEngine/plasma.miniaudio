@@ -76,6 +76,21 @@ public:
   /// \brief The markers the audition passed since the last status, oldest first.
   plDynamicArray<plString> m_Markers;
 
+  /// \name Music
+  /// What the music plays (indices into the music's states and segments; 0xFFFF for none) and a change asked for.
+  ///@{
+  bool m_bMusic = false;
+  plUInt32 m_uiMusicState = 0xFFFF;
+  plUInt32 m_uiMusicSegment = 0xFFFF;
+  bool m_bMusicTransitionSegment = false;
+  plUInt32 m_uiMusicBar = 0;  ///< from 1
+  plUInt32 m_uiMusicBeat = 0; ///< from 1
+  float m_fMusicTempo = 0.0f;
+  plUInt32 m_uiMusicBeatsPerBar = 0;
+  plUInt32 m_uiMusicPendingState = 0xFFFF;
+  double m_fMusicPendingIn = -1.0; ///< seconds until the change lands; negative while none is decided
+  ///@}
+
   /// \brief Why the last Play did not start, if it failed.
   plString m_sError;
 };

@@ -13,8 +13,6 @@
 #include <GameUiPlugin/Components/UiCanvasComponent.h>
 #include <ToolsFoundation/Object/ObjectCommandAccessor.h>
 
-#include <QtMath>
-
 namespace
 {
   constexpr float s_fPad = 8.0f;

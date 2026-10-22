@@ -13,7 +13,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventContext, 1, plRTTIDefaultAllocator<p
 {
   PL_BEGIN_PROPERTIES
   {
-    PL_CONSTANT_PROPERTY("DocumentType", (const char*) "Audio Event;Audio Clip"),
+    PL_CONSTANT_PROPERTY("DocumentType", (const char*) "Audio Event;Audio Clip;Audio Music"),
   }
   PL_END_PROPERTIES;
 }
@@ -157,6 +157,17 @@ void plAudioEventContext::SendStatus(const plString& sError)
     msg.m_uiSustainsLeft = status.m_uiSustainsLeft;
     msg.m_bHolding = status.m_bHolding;
     pAudition->TakeMarkers(m_uiKey, msg.m_Markers);
+
+    msg.m_bMusic = status.m_bMusic;
+    msg.m_uiMusicState = status.m_Music.m_uiState;
+    msg.m_uiMusicSegment = status.m_Music.m_uiSegment;
+    msg.m_bMusicTransitionSegment = status.m_Music.m_bTransitionSegment;
+    msg.m_uiMusicBar = status.m_Music.m_uiBar;
+    msg.m_uiMusicBeat = status.m_Music.m_uiBeat;
+    msg.m_fMusicTempo = status.m_Music.m_fTempo;
+    msg.m_uiMusicBeatsPerBar = status.m_Music.m_uiBeatsPerBar;
+    msg.m_uiMusicPendingState = status.m_Music.m_uiPendingState;
+    msg.m_fMusicPendingIn = status.m_fMusicPendingIn;
   }
 
   SendProcessMessage(&msg);

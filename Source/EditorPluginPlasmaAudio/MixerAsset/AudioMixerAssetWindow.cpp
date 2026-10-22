@@ -1,27 +1,25 @@
 ﻿#include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
 #include <EditorFramework/Assets/AssetCurator.h>
-#include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
-#include <EditorFramework/EditorApp/EditorApp.moc.h>
+#include <EditorFramework/EditorApp/EditorApp.h>
+#include <EditorFramework/EngineShell/DocumentFrame.h>
+#include <EditorFramework/EngineShell/EngineShell.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineViews.h>
-#include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAssetWindow.moc.h>
+#include <EditorPluginPlasmaAudio/EngineUi/AudioShellPanels.h>
+#include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerAssetWindow.h>
 #include <EditorPluginPlasmaAudio/MixerAsset/AudioMixerViews.h>
 #include <EditorPluginPlasmaAudio/Preview/AudioEnumRegistry.h>
+#include <EditorUi/DockManager.h>
 #include <Foundation/IO/FileSystem/FileReader.h>
 #include <Foundation/IO/MemoryStream.h>
-#include <GuiFoundation/ActionViews/MenuBarActionMapView.moc.h>
-#include <GuiFoundation/ActionViews/ToolBarActionMapView.moc.h>
-#include <GuiFoundation/DockPanels/DocumentPanel.moc.h>
 #include <GuiFoundation/EngineUi/EngineUiControlStrip.h>
 #include <ToolsFoundation/Object/ObjectCommandAccessor.h>
-
-#include <QTimer>
 
 namespace
 {
   /// How often the console asks the engine process for its meters.
-  constexpr int s_iPollMs = 50;
+  constexpr plTime s_PollInterval = plTime::MakeFromMilliseconds(50);
 
   /// How often a dragged value is sent to the engine process at most.
   constexpr plTime s_LiveEditInterval = plTime::MakeFromMilliseconds(40);
@@ -117,38 +115,15 @@ namespace
 } // namespace
 
 plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDocument)
-  : plQtDocumentWindow(pDocument)
+  : plDocumentWindow(pDocument)
 {
   m_pAssetDoc = static_cast<plAudioMixerAssetDocument*>(pDocument);
 
-  // Menu Bar
-  {
-    plQtMenuBarActionMapView* pMenuBar = static_cast<plQtMenuBarActionMapView*>(menuBar());
-    plActionContext context;
-    context.m_sMapping = "AudioMixerAssetMenuBar";
-    context.m_pDocument = pDocument;
-    context.m_pWindow = this;
-    pMenuBar->SetActionContext(context);
-  }
-
-  // Tool Bar
-  {
-    plQtToolBarActionMapView* pToolBar = new plQtToolBarActionMapView("Toolbar", this);
-    plActionContext context;
-    context.m_sMapping = "AudioMixerAssetToolBar";
-    context.m_pDocument = pDocument;
-    context.m_pWindow = this;
-    pToolBar->SetActionContext(context);
-    pToolBar->setObjectName("AudioMixerAssetWindowToolBar");
-    addToolBar(pToolBar);
-  }
+  SetMenuBarActions("AudioMixerAssetMenuBar");
+  SetToolBarActions("AudioMixerAssetToolBar");
 
   CreateViews();
   CreatePropertyDock();
-
-  // the insert editor is the right column's first tab
-  if (m_pInsertPanel != nullptr)
-    m_pInsertPanel->setAsCurrentTab();
 
   pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
 
@@ -159,9 +134,7 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
   m_ConsoleSubscription = m_pAssetDoc->m_ConsoleEvents.AddEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnConsoleStatus, this));
 
   // the engine process answers every request with its meters; a dragged value waits here for its turn
-  m_pPollTimer = new QTimer(this);
-  m_pPollTimer->setInterval(s_iPollMs);
-  connect(m_pPollTimer, &QTimer::timeout, this, [this]()
+  m_Timers.Start(s_PollInterval, [this]()
     {
       if (m_bApplyPending && plTime::Now() - m_LastApply >= s_LiveEditInterval)
         ApplyToEngine(true);
@@ -172,10 +145,8 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
       {
         m_sToast.Clear();
         UpdateStatusRow();
-      } });
-  m_pPollTimer->start();
-
-  FinishWindowCreation();
+      } },
+    true);
 
   TakeBaseline();
   QueueRefresh();
@@ -183,6 +154,11 @@ plAudioMixerAssetDocumentWindow::plAudioMixerAssetDocumentWindow(plDocument* pDo
 
 plAudioMixerAssetDocumentWindow::~plAudioMixerAssetDocumentWindow()
 {
+  // the tool strip and the views call back into this window
+  DestroyPanels();
+
+  m_Timers.StopAll();
+
   m_pAssetDoc->m_ConsoleEvents.RemoveEventHandler(m_ConsoleSubscription);
   GetDocument()->m_EventsOne.RemoveEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::DocumentEventHandler, this));
   GetDocument()->GetObjectManager()->m_PropertyEvents.RemoveEventHandler(plMakeDelegate(&plAudioMixerAssetDocumentWindow::PropertyEventHandler, this));
@@ -194,15 +170,12 @@ void plAudioMixerAssetDocumentWindow::CreateViews()
 {
   using plEditorUi::Icon;
 
-  // Central: the add buttons, the source and the validation, the strips, the snapshot rail, the status row
+  // Mixer Console: the add buttons, the source and the validation, the strips, the snapshot rail, the status row
   {
-    QWidget* pCentralWidget = new QWidget(this);
-    QVBoxLayout* pCentralLayout = new QVBoxLayout(pCentralWidget);
-    pCentralLayout->setContentsMargins(0, 0, 0, 0);
-    pCentralLayout->setSpacing(0);
+    auto* pConsole = AddPanel<plEditorUiAudioShellStack>({"AudioMixerConsoleDockWidget", "Mixer Console"});
 
-    m_pToolStrip = new plQtEngineControlStrip(pCentralWidget);
-    m_pToolStrip->setObjectName("AudioMixerToolStrip");
+    plUniquePtr<plEditorUiControlStrip> pToolStrip = PL_DEFAULT_NEW(plEditorUiControlStrip);
+    m_pToolStrip = pToolStrip.Borrow();
     m_uiAddBus = m_pToolStrip->AddIconTextButton(Icon::Add, "Bus", "Adds a mixer bus (the first bus is the Master bus)");
     m_uiAddAuxBus = m_pToolStrip->AddIconTextButton(Icon::Add, "Aux Bus", "Adds an aux/return bus (reverb; set its Environment name to feed it from environment components)");
     m_uiAddVca = m_pToolStrip->AddIconTextButton(Icon::Add, "VCA", "Adds a VCA (options-menu volume group over a set of buses)");
@@ -241,61 +214,30 @@ void plAudioMixerAssetDocumentWindow::CreateViews()
       }
     };
 
-    pCentralLayout->addWidget(m_pToolStrip);
+    // the row keeps the strip's own height
+    pConsole->AddOwnedPart(std::move(pToolStrip), m_pToolStrip->GetHeight());
 
-    plQtEngineUiContentWidget* pStripsWidget = nullptr;
-    m_pStripsView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerStrips>(pCentralWidget, "AudioMixerStrips", &pStripsWidget, GetDocument(), &m_State);
-    pCentralLayout->addWidget(pStripsWidget, 1);
+    m_pStripsView = static_cast<plEditorUiAudioMixerStrips*>(pConsole->AddOwnedPart(PL_DEFAULT_NEW(plEditorUiAudioMixerStrips, GetDocument(), &m_State), 0.0f));
 
     m_pStripsView->m_OnLiveEdit = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnLiveEdit, this);
     m_pStripsView->m_OnMute = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnMute, this);
     m_pStripsView->m_OnSolo = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnSolo, this);
     m_pStripsView->m_OnSelectInsert = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnSelectInsert, this);
 
-    plQtEngineUiContentWidget* pRailWidget = nullptr;
-    m_pRailView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerSnapshotRail>(pCentralWidget, "AudioMixerSnapshotRail", &pRailWidget, GetDocument(), &m_State);
-    pRailWidget->SetFixedLogicalHeight(plEditorUiAudioMixerSnapshotRail::GetHeight());
-    pCentralLayout->addWidget(pRailWidget);
+    m_pRailView = static_cast<plEditorUiAudioMixerSnapshotRail*>(pConsole->AddOwnedPart(PL_DEFAULT_NEW(plEditorUiAudioMixerSnapshotRail, GetDocument(), &m_State), plEditorUiAudioMixerSnapshotRail::GetHeight()));
 
     m_pRailView->m_OnIntensity = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnSnapshotIntensity, this);
     m_pRailView->m_OnCapture = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnCapture, this);
 
-    plQtEngineUiContentWidget* pStatusWidget = nullptr;
-    m_pStatusView = plQtEngineUiContentWidget::Create<plEditorUiAudioStatusRow>(pCentralWidget, "AudioMixerStatus", &pStatusWidget);
-    pStatusWidget->SetFixedLogicalHeight(plEditorUiAudioStatusRow::GetHeight());
-    pCentralLayout->addWidget(pStatusWidget);
-
-    plQtDocumentPanel* pCentral = new plQtDocumentPanel(this, GetDocument());
-    pCentral->setObjectName("AudioMixerConsoleDockWidget");
-    pCentral->setWindowTitle("Mixer Console");
-    pCentral->setWidget(pCentralWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->setCentralWidget(pCentral);
+    m_pStatusView = static_cast<plEditorUiAudioStatusRow*>(pConsole->AddOwnedPart(PL_DEFAULT_NEW(plEditorUiAudioStatusRow), plEditorUiAudioStatusRow::GetHeight()));
   }
 
-  // Left dock: routing tree
+  // Routing: the routing tree
+  m_pRoutingView = AddPanel<plEditorUiAudioMixerRouting>({"AudioMixerRoutingDockWidget", "Routing"}, GetDocument());
+
+  // Insert: the insert editor
   {
-    plQtDocumentPanel* pRoutingPanel = new plQtDocumentPanel(this, GetDocument());
-    pRoutingPanel->setObjectName("AudioMixerRoutingDockWidget");
-    pRoutingPanel->setWindowTitle("Routing");
-    pRoutingPanel->show();
-
-    plQtEngineUiContentWidget* pRoutingWidget = nullptr;
-    m_pRoutingView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerRouting>(pRoutingPanel, "AudioMixerRouting", &pRoutingWidget, GetDocument());
-    pRoutingPanel->setWidget(pRoutingWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->addDockWidget(ads::LeftDockWidgetArea, pRoutingPanel);
-  }
-
-  // Right dock 1: the insert editor
-  {
-    m_pInsertPanel = new plQtDocumentPanel(this, GetDocument());
-    m_pInsertPanel->setObjectName("AudioMixerInsertDockWidget");
-    m_pInsertPanel->setWindowTitle("Insert");
-    m_pInsertPanel->show();
-
-    plQtEngineUiContentWidget* pInsertWidget = nullptr;
-    m_pInsertView = plQtEngineUiContentWidget::Create<plEditorUiAudioMixerInsertEditor>(m_pInsertPanel, "AudioMixerInsert", &pInsertWidget, GetDocument(), &m_State);
-    m_pInsertPanel->setWidget(pInsertWidget, ads::CDockWidget::ForceNoScrollArea);
-    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, m_pInsertPanel);
+    m_pInsertView = AddPanel<plEditorUiAudioMixerInsertEditor>({"AudioMixerInsertDockWidget", "Insert"}, GetDocument(), &m_State);
 
     m_pInsertView->m_OnLiveEdit = plMakeDelegate(&plAudioMixerAssetDocumentWindow::OnLiveEdit, this);
     m_pInsertView->m_OnRename = plMakeDelegate(&plAudioMixerAssetDocumentWindow::RenameBus, this);
@@ -304,25 +246,16 @@ void plAudioMixerAssetDocumentWindow::CreateViews()
 
 void plAudioMixerAssetDocumentWindow::CreatePropertyDock()
 {
-  // Right dock 2: properties of the current selection
-  plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, GetDocument());
-  pPropertyPanel->setObjectName("AudioMixerAssetDockWidget");
-  pPropertyPanel->setWindowTitle("Properties");
-  pPropertyPanel->show();
+  // Properties: the asset's status and the properties of the current selection (the selected bus, VCA or snapshot)
+  AddPropertiesPanel({"AudioMixerAssetDockWidget", "Properties"});
+}
 
-  plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, GetDocument());
-
-  QWidget* pWidget = new QWidget();
-  pWidget->setObjectName("Group");
-  pWidget->setLayout(new QVBoxLayout());
-  pWidget->setContentsMargins(0, 0, 0, 0);
-  pWidget->layout()->setContentsMargins(0, 0, 0, 0);
-  pWidget->layout()->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
-  pWidget->layout()->addWidget(pPropertyGrid);
-
-  pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
-
-  m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
+void plAudioMixerAssetDocumentWindow::ArrangePanels(plEditorUiDockManager& ref_panels)
+{
+  ref_panels.DockPanel("AudioMixerRoutingDockWidget", "AudioMixerConsoleDockWidget", plEditorUiDockSide::Left, 0.18f);
+  ref_panels.DockPanel("AudioMixerInsertDockWidget", "AudioMixerConsoleDockWidget", plEditorUiDockSide::Right, 0.24f);
+  ref_panels.DockPanel("AudioMixerAssetDockWidget", "AudioMixerInsertDockWidget", plEditorUiDockSide::Tab);
+  ref_panels.SetCurrentPanel("AudioMixerInsertDockWidget");
 }
 
 const plDocumentObject* plAudioMixerAssetDocumentWindow::GetPropertiesObject() const
@@ -392,7 +325,7 @@ void plAudioMixerAssetDocumentWindow::QueueRefresh()
 
   m_bRefreshQueued = true;
 
-  QTimer::singleShot(0, this, [this]()
+  m_Timers.Start(plTime::MakeZero(), [this]()
     {
       m_bRefreshQueued = false;
 
@@ -712,8 +645,12 @@ void plAudioMixerAssetDocumentWindow::OnSelectInsert(const plUuid& bus, plInt32 
   m_State.m_iSelectedEffect = iEffect;
 
   // the insert editor shows what was clicked
-  if (iEffect >= 0 && m_pInsertPanel != nullptr)
-    m_pInsertPanel->setAsCurrentTab();
+  if (iEffect >= 0)
+  {
+    const plEditorUiEngineShell* pShell = plEditorUiEngineShell::GetSingleton();
+    if (plEditorUiDocumentFrame* pFrame = pShell != nullptr ? pShell->FindFrame(GetDocument()) : nullptr)
+      pFrame->GetPanels().SetCurrentPanel("AudioMixerInsertDockWidget");
+  }
 
   m_pStripsView->Refresh();
   m_pInsertView->Refresh();
@@ -921,7 +858,7 @@ plUInt32 plAudioMixerAssetDocumentWindow::RenameEventOutputBuses(plStringView sO
       if (sContent.FindSubString(sNeedle) == nullptr)
         continue;
 
-      pDoc = plQtEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::None);
+      pDoc = plEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::None);
       if (pDoc == nullptr)
         continue;
     }

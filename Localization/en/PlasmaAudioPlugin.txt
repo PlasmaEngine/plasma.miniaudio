@@ -15,14 +15,39 @@ plMiniAudioListenerComponent;Listener (legacy)
 
 # UI
 
-PlasmaAudio.Mute;Mute Sounds
-PlasmaAudio.Volume;Volume
-PlasmaAudio.ExtractClips;Extract Clips
-PlasmaAudio.ExtractClips.Tooltip;Turns playlist entries that embed a sound file into Audio Clip references and saves the event
-PlasmaAudio.MigrateAllEvents;Migrate All Audio Events
-PlasmaAudio.MigrateAllEvents.Tooltip;Runs Extract Clips on every Audio Event of the project that embeds sound files
+PlasmaAudio.Mute;Mute Sounds;Mutes every sound the editor plays
+PlasmaAudio.Volume;Volume;The volume of every sound the editor plays
+PlasmaAudio.ExtractClips;Extract Clips;Turns playlist entries that embed a sound file into Audio Clip references and saves the event
+PlasmaAudio.MigrateAllEvents;Migrate All Audio Events;Runs Extract Clips on every Audio Event of the project that embeds sound files
 Panel.AudioProfiler;Audio Profiler
-PlasmaAudio.Platforms;Audio Platforms...
-PlasmaAudio.Platforms.Tooltip;The PlasmaAudio output of each asset profile: backend, speakers, sample rate, period and what happens on suspend
+PlasmaAudio.Platforms;Audio Platforms...;The PlasmaAudio output of each asset profile: backend, speakers, sample rate, period and what happens on suspend
+
+# Asset Profile Settings
+
+plAudioClipProfileConfig;Audio Clips
+plAudioBudgetProfileConfig;Audio Memory Budget
+plPlasmaAudioPlatformConfig;Audio Output
+
+# Types
+
+plAudioMixerVca;VCA
+
+# Enums
+
+plAudioClipCodec::Pcm16;PCM 16-bit
+plAudioClipCodec::ImaAdpcm;IMA ADPCM
+plAudioSpeakerLayout::Surround51;5.1 Surround
+plAudioSpeakerLayout::Surround71;7.1 Surround
 
 # Properties
+
+IsAux;Aux Return
+NormaliseLufs;Normalise Loudness
+PeriodMs;Period
+PreferAdpcmOverPcm;Prefer ADPCM over PCM
+VCAs;VCAs
+Via;Via Segment
+TotalMB;Total
+DecodedMB;Decoded
+CompressedMB;Compressed
+StreamingMB;Streaming

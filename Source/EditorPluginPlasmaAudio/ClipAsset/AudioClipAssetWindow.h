@@ -1,20 +1,20 @@
 #pragma once
 
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAsset.h>
+#include <EditorUi/Runtime.h>
 #include <Foundation/Threading/TaskSystem.h>
 #include <Foundation/Types/RefCounted.h>
 #include <Foundation/Types/SharedPtr.h>
-#include <GuiFoundation/DocumentWindow/DocumentWindow.moc.h>
+#include <GuiFoundation/DocumentWindow/DocumentWindow.h>
 #include <PlasmaAudioPlugin/Clips/AudioClipDesc.h>
 
 #include <atomic>
 
-class QTimer;
-class QVBoxLayout;
 class plEditorUiAudioClipUsedBy;
 class plEditorUiAudioClipWaveform;
-class plQtEngineControlStrip;
-class plQtPropertyGridWidget;
+class plEditorUiControlStrip;
+class plEditorUiDockManager;
+class plEditorUiPropertyGrid;
 struct plAssetCuratorEvent;
 struct plDocumentObjectPropertyEvent;
 struct plDocumentObjectStructureEvent;
@@ -49,16 +49,16 @@ struct plAudioClipPreviewJob : public plRefCounted
 /// \brief Audio Clip editor: waveform with loop markers, info and cost estimates for each platform tab, the property grid
 /// of the default settings or of the selected platform override, and the assets that use the clip.
 ///
-/// The toolbar row, waveform dock body, platform label and "Used by" list are engine-drawn.
-class plAudioClipAssetDocumentWindow : public plQtDocumentWindow
+/// The panels: "AudioClipWaveformDockWidget" (the transport and info row over the tabs, ruler, waveform and stat row)
+/// and "AudioClipAssetDockWidget" (the platform the grid edits, the asset's status and grid, and the "Used by" list).
+class plAudioClipAssetDocumentWindow : public plDocumentWindow
 {
-  Q_OBJECT
-
 public:
   plAudioClipAssetDocumentWindow(plDocument* pDocument);
   ~plAudioClipAssetDocumentWindow();
 
-  virtual const char* GetGroupName() const { return "AudioClipAsset"; }
+  /// The default layout of the panels: Clip Properties on the right of Audio Clip.
+  static void ArrangePanels(plEditorUiDockManager& ref_panels);
 
 private:
   void PropertyEventHandler(const plDocumentObjectPropertyEvent& e);
@@ -68,7 +68,8 @@ private:
   const plDocumentObject* GetPropertiesObject() const;
   const plDocumentObject* GetActiveOverrideObject() const;
 
-  void CreateEngineCentralWidget(QWidget* pCentralWidget, QVBoxLayout* pCentralLayout);
+  void CreateClipPanel();
+  void CreatePropertiesPanel();
 
   void RebuildTabs();
   void OnTabChanged(int iIndex);
@@ -90,13 +91,13 @@ private:
   void OnTimer();
   void StartPreviewIfNeeded();
   void ShowPreview(const plSharedPtr<plAudioClipPreview>& pPreview);
-  void ShowWaveformMessage(const QString& sMessage);
+  void ShowWaveformMessage(plStringView sMessage);
   void UpdateLoopLabel();
   void RefreshUsedBy();
 
-  void SetInfoText(const QString& sText);
-  void SetLoopText(const QString& sText);
-  void SetPlatformText(const QString& sText);
+  void SetInfoText(plStringView sText);
+  void SetLoopText(plStringView sText);
+  void SetPlatformText(plStringView sText);
   bool IsLoopEnabled() const;
 
   /// \brief Auditions the built clip in the editor's engine process, through the game's event manager and mixer.
@@ -112,19 +113,19 @@ private:
   plEventSubscriptionID m_AuditionSubscription = 0;
 
   // engine-drawn views
-  plQtEngineControlStrip* m_pToolStrip = nullptr;
+  plEditorUiControlStrip* m_pToolStrip = nullptr;
   plUInt32 m_uiPlay = 0;
   plUInt32 m_uiStop = 0;
   plUInt32 m_uiLoop = 0;
   plUInt32 m_uiInfo = 0;
   plUInt32 m_uiLoopLabel = 0;
-  plQtEngineControlStrip* m_pPlatformStrip = nullptr;
+  plEditorUiControlStrip* m_pPlatformStrip = nullptr;
   plUInt32 m_uiPlatform = 0;
   plEditorUiAudioClipWaveform* m_pWaveView = nullptr;
   plEditorUiAudioClipUsedBy* m_pUsedByView = nullptr;
+  plEditorUiPropertyGrid* m_pPropertyGrid = nullptr;
 
-  plQtPropertyGridWidget* m_pPropertyGrid = nullptr;
-  QTimer* m_pTimer = nullptr;
+  plEditorUiTimerGroup m_Timers; ///< polls the tabs, the "Used by" list, the preview builds and the audition
 
   plUuid m_ActiveOverrideGuid;              ///< invalid: the Default tab
   plHybridArray<plUuid, 8> m_TabOverrides;  ///< override object per tab, invalid for the Default tab

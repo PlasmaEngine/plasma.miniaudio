@@ -2,8 +2,7 @@
 
 #include <EditorPluginPlasmaAudio/BankAsset/AudioBankAsset.h>
 #include <EditorPluginPlasmaAudio/BankAsset/AudioBankAssetManager.h>
-#include <EditorPluginPlasmaAudio/BankAsset/AudioBankAssetWindow.moc.h>
-#include <GuiFoundation/UIServices/ImageCache.moc.h>
+#include <EditorPluginPlasmaAudio/BankAsset/AudioBankAssetWindow.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioBudgetProfileConfig, 1, plRTTIDefaultAllocator<plAudioBudgetProfileConfig>)
@@ -40,8 +39,6 @@ plUInt64 plAudioBankAssetDocumentManager::ComputeAssetProfileHashImpl(const plPl
 plAudioBankAssetDocumentManager::plAudioBankAssetDocumentManager()
 {
   plDocumentManager::s_Events.AddEventHandler(plMakeDelegate(&plAudioBankAssetDocumentManager::OnDocumentManagerEvent, this));
-
-  plQtImageCache::GetSingleton()->RegisterTypeImage("Audio Bank", plSvgThumbnailToPixmap(":/AssetIcons/AudioBank.svg"));
 
   m_DocTypeDesc.m_sDocumentTypeName = "Audio Bank";
   m_DocTypeDesc.m_sFileExtension = "plAudioBankAsset";

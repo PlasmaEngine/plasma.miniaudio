@@ -2,8 +2,7 @@
 
 #include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationAsset.h>
 #include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationAssetManager.h>
-#include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationAssetWindow.moc.h>
-#include <GuiFoundation/UIServices/ImageCache.moc.h>
+#include <EditorPluginPlasmaAudio/AttenuationAsset/AudioAttenuationAssetWindow.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioAttenuationAssetDocumentManager, 1, plRTTIDefaultAllocator<plAudioAttenuationAssetDocumentManager>)
@@ -13,8 +12,6 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 plAudioAttenuationAssetDocumentManager::plAudioAttenuationAssetDocumentManager()
 {
   plDocumentManager::s_Events.AddEventHandler(plMakeDelegate(&plAudioAttenuationAssetDocumentManager::OnDocumentManagerEvent, this));
-
-  plQtImageCache::GetSingleton()->RegisterTypeImage("Audio Attenuation", plSvgThumbnailToPixmap(":/AssetIcons/AudioAttenuation.svg"));
 
   m_DocTypeDesc.m_sDocumentTypeName = "Audio Attenuation";
   m_DocTypeDesc.m_sFileExtension = "plAudioAttenuationAsset";

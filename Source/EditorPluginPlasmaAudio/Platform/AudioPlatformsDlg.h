@@ -8,8 +8,6 @@
 #include <Foundation/Time/Time.h>
 #include <GuiFoundation/EngineUi/EngineDialog.h>
 
-class QTimer;
-
 /// \brief Project > Project Settings > Audio Platforms: the PlasmaAudio output settings saved with each asset profile.
 ///
 /// Every change is written to the profile (SaveAssetProfiles) and its runtime file (RuntimeConfigs/<profile>.plProfile),
@@ -21,14 +19,15 @@ class QTimer;
 /// process for a moment.
 ///
 /// The body is the engine-drawn plEditorUiAudioPlatformsView.
-class PL_EDITORPLUGINPLASMAAUDIO_DLL plQtAudioPlatformsDlg : public plQtEngineDialog
+class PL_EDITORPLUGINPLASMAAUDIO_DLL plAudioPlatformsDlg : public plEngineDialog
 {
 public:
-  plQtAudioPlatformsDlg(QWidget* pParent);
-  ~plQtAudioPlatformsDlg();
+  plAudioPlatformsDlg();
+  ~plAudioPlatformsDlg();
 
-  /// Runs the engine dialog; without a UI renderer it logs an error and rejects. Returns the QDialog result.
-  static int Run(QWidget* pParent);
+  /// Runs the engine dialog, modal over the window that owns dialogs now; without a UI renderer it logs an error and
+  /// rejects.
+  static Result Run();
 
 protected:
   void BuildBody(plUiElement* pBody, const plVec2& vSize) override;
@@ -63,7 +62,7 @@ private:
 
   plUniquePtr<plEditorUiAudioPlatformsView> m_pView;
 
-  QTimer* m_pTimer = nullptr;
+  plEditorUiTimerGroup m_Timers; ///< the stats poll and the end of a simulated suspend
   plUInt32 m_uiShownProfile = 0;
   plHybridArray<plString, 8> m_Backends;
 

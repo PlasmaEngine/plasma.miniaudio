@@ -2,21 +2,14 @@
 
 #include <EditorPluginPlasmaAudio/SoundAsset/MiniAudioSoundAsset.h>
 #include <Foundation/Basics.h>
-#include <GuiFoundation/DocumentWindow/DocumentWindow.moc.h>
+#include <GuiFoundation/DocumentWindow/DocumentWindow.h>
 #include <ToolsFoundation/Object/DocumentObjectManager.h>
 
-class QLabel;
-class QScrollArea;
-class QtImageWidget;
-
-class plMiniAudioSoundAssetDocumentWindow : public plQtDocumentWindow
+/// \brief The legacy sound asset's window: its properties.
+class plMiniAudioSoundAssetDocumentWindow : public plDocumentWindow
 {
-  Q_OBJECT
-
 public:
   plMiniAudioSoundAssetDocumentWindow(plDocument* pDocument);
-
-  virtual const char* GetGroupName() const { return "MiniAudioSoundAsset"; }
 
 private:
   plMiniAudioSoundAssetDocument* m_pAssetDoc;

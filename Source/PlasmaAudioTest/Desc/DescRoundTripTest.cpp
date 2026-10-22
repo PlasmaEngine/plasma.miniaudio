@@ -510,6 +510,79 @@ PL_CREATE_SIMPLE_TEST(Desc, EventRoundTrip)
     PL_TEST_INT(reader.ReadBytes(&uiExtra, 1), 0);
   }
 
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Music")
+  {
+    plAudioEventDesc music = reference;
+
+    plAudioMusicSegmentDesc& segment = music.m_Music.m_Segments.ExpandAndGetRef();
+    segment.m_sName = "Explore A";
+    segment.m_fTempo = 96.0f;
+    segment.m_uiBeatsPerBar = 3;
+    segment.m_uiBars = 8;
+    segment.m_ExitCues.PushBack(4);
+    segment.m_Stems.PushBack(1);
+    segment.m_Stems.PushBack(0);
+
+    plAudioMusicStateDesc& state = music.m_Music.m_States.ExpandAndGetRef();
+    state.m_sName = "Explore";
+    state.m_Segments.PushBack(0);
+
+    plAudioMusicTransitionDesc& transition = music.m_Music.m_Transitions.ExpandAndGetRef();
+    transition.m_uiFrom = plAudioMusicTransitionDesc::AnyState;
+    transition.m_uiTo = 0;
+    transition.m_eChangeAt = plAudioMusicQuantize::ExitCue;
+    transition.m_fFadeBeats = 1.5f;
+    transition.m_uiVia = 0;
+    transition.m_eStartAt = plAudioMusicStartAt::SamePosition;
+
+    plAudioMusicStingerDesc& stinger = music.m_Music.m_Stingers.ExpandAndGetRef();
+    stinger.m_sName = "Hit";
+    stinger.m_uiInstrument = 1;
+    stinger.m_eAt = plAudioMusicQuantize::NextBar;
+
+    music.m_Music.m_bBeatMessages = true;
+
+    plDefaultMemoryStreamStorage storage;
+    plMemoryStreamWriter writer(&storage);
+    PL_TEST_RESULT(music.Save(writer));
+
+    plMemoryStreamReader reader(&storage);
+    plAudioEventDesc loaded;
+    PL_TEST_RESULT(loaded.Load(reader));
+
+    const plAudioMusicDesc& m = loaded.m_Music;
+    PL_TEST_BOOL(m.IsMusic());
+    PL_TEST_BOOL(m.m_bBeatMessages);
+    if (PL_TEST_INT(m.m_Segments.GetCount(), 1))
+    {
+      PL_TEST_STRING(m.m_Segments[0].m_sName, "Explore A");
+      PL_TEST_FLOAT(m.m_Segments[0].m_fTempo, 96.0f, 0.0f);
+      PL_TEST_INT(m.m_Segments[0].m_uiBeatsPerBar, 3);
+      PL_TEST_INT(m.m_Segments[0].m_uiBars, 8);
+      PL_TEST_BOOL(m.m_Segments[0].m_ExitCues.GetCount() == 1 && m.m_Segments[0].m_ExitCues[0] == 4);
+      PL_TEST_BOOL(m.m_Segments[0].m_Stems.GetCount() == 2 && m.m_Segments[0].m_Stems[0] == 1 && m.m_Segments[0].m_Stems[1] == 0);
+    }
+    if (PL_TEST_INT(m.m_States.GetCount(), 1))
+      PL_TEST_STRING(m.m_States[0].m_sName, "Explore");
+    if (PL_TEST_INT(m.m_Transitions.GetCount(), 1))
+    {
+      PL_TEST_INT(m.m_Transitions[0].m_uiFrom, plAudioMusicTransitionDesc::AnyState);
+      PL_TEST_INT(m.m_Transitions[0].m_eChangeAt, plAudioMusicQuantize::ExitCue);
+      PL_TEST_FLOAT(m.m_Transitions[0].m_fFadeBeats, 1.5f, 0.0f);
+      PL_TEST_INT(m.m_Transitions[0].m_uiVia, 0);
+      PL_TEST_INT(m.m_Transitions[0].m_eStartAt, plAudioMusicStartAt::SamePosition);
+    }
+    if (PL_TEST_INT(m.m_Stingers.GetCount(), 1))
+    {
+      PL_TEST_STRING(m.m_Stingers[0].m_sName, "Hit");
+      PL_TEST_INT(m.m_Stingers[0].m_uiInstrument, 1);
+      PL_TEST_INT(m.m_Stingers[0].m_eAt, plAudioMusicQuantize::NextBar);
+    }
+
+    plUInt8 uiExtra = 0;
+    PL_TEST_INT(reader.ReadBytes(&uiExtra, 1), 0);
+  }
+
   for (plTypeVersion uiVersion = 1; uiVersion <= 5; ++uiVersion)
   {
     plStringBuilder sBlock;

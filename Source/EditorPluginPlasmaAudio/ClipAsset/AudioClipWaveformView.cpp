@@ -1,7 +1,7 @@
 #include <EditorPluginPlasmaAudio/EditorPluginPlasmaAudioPCH.h>
 
-#include <EditorFramework/EditorApp/EditorApp.moc.h>
-#include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAssetWindow.moc.h>
+#include <EditorFramework/EditorApp/EditorApp.h>
+#include <EditorPluginPlasmaAudio/ClipAsset/AudioClipAssetWindow.h>
 #include <EditorPluginPlasmaAudio/ClipAsset/AudioClipWaveformView.h>
 #include <EditorPluginPlasmaAudio/EngineUi/AudioEngineUi.h>
 #include <EditorUi/Surface.h>
@@ -679,7 +679,7 @@ public:
     if (m_Entries.IsEmpty() || uiItem == 0 || uiItem > m_Entries.GetCount())
       return;
 
-    plQtEditorApp::GetSingleton()->OpenDocument(m_Entries[static_cast<plUInt32>(uiItem - 1)].m_sAbsPath, plDocumentFlags::RequestWindow | plDocumentFlags::AddToRecentFilesList);
+    plEditorApp::GetSingleton()->OpenDocument(m_Entries[static_cast<plUInt32>(uiItem - 1)].m_sAbsPath, plDocumentFlags::RequestWindow | plDocumentFlags::AddToRecentFilesList);
   }
 
 private:

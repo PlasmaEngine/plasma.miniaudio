@@ -2,8 +2,7 @@
 
 #include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorPluginPlasmaAudio/EventAsset/AudioEventAssetManager.h>
-#include <EditorPluginPlasmaAudio/EventAsset/AudioEventAssetWindow.moc.h>
-#include <GuiFoundation/UIServices/ImageCache.moc.h>
+#include <EditorPluginPlasmaAudio/EventAsset/AudioEventAssetWindow.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plAudioEventAssetDocumentManager, 1, plRTTIDefaultAllocator<plAudioEventAssetDocumentManager>)
@@ -13,8 +12,6 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 plAudioEventAssetDocumentManager::plAudioEventAssetDocumentManager()
 {
   plDocumentManager::s_Events.AddEventHandler(plMakeDelegate(&plAudioEventAssetDocumentManager::OnDocumentManagerEvent, this));
-
-  plQtImageCache::GetSingleton()->RegisterTypeImage("Audio Event", plSvgThumbnailToPixmap(":/AssetIcons/AudioEvent.svg"));
 
   m_DocTypeDesc.m_sDocumentTypeName = "Audio Event";
   m_DocTypeDesc.m_sFileExtension = "plAudioEventAsset";

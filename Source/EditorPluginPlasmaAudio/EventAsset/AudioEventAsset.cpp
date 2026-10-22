@@ -743,7 +743,7 @@ plStatus plAudioEventAssetDocument::WriteEventData(plStreamWriter& stream, const
   for (const auto& sFile : desc.m_SampleNames)
   {
     plStringBuilder sAssetFile = sFile;
-    if (!plQtEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAssetFile))
+    if (!plEditorApp::GetSingleton()->MakeDataDirectoryRelativePathAbsolute(sAssetFile))
       return plStatus(plFmt("Failed to make sound file path absolute: '{0}'", sFile));
 
     plFileReader SoundFile;
@@ -808,7 +808,7 @@ plStatus plAudioEventAssetDocumentGenerator::GenerateForClip(plStringView sInput
     return plStatus(PL_SUCCESS);
   }
 
-  auto pApp = plQtEditorApp::GetSingleton();
+  auto pApp = plEditorApp::GetSingleton();
 
   plDocument* pDoc = pApp->CreateDocument(sOutFile, plDocumentFlags::None);
   if (pDoc == nullptr)

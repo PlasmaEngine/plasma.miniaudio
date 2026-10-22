@@ -2,8 +2,7 @@
 
 #include <EditorFramework/Assets/AssetCurator.h>
 #include <EditorPluginPlasmaAudio/SoundAsset/MiniAudioSoundAssetManager.h>
-#include <EditorPluginPlasmaAudio/SoundAsset/MiniAudioSoundAssetWindow.moc.h>
-#include <GuiFoundation/UIServices/ImageCache.moc.h>
+#include <EditorPluginPlasmaAudio/SoundAsset/MiniAudioSoundAssetWindow.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plMiniAudioSoundAssetDocumentManager, 1, plRTTIDefaultAllocator<plMiniAudioSoundAssetDocumentManager>)
@@ -28,11 +27,6 @@ plMiniAudioSoundAssetDocumentManager::plMiniAudioSoundAssetDocumentManager()
 
   m_DocTypeDesc.m_sResourceFileExtension = "plBinMiniAudioSound";
   m_DocTypeDesc.m_AssetDocumentFlags = plAssetDocumentFlags::AutoTransformOnSave;
-
-  // the key must be the document type name — that is what the asset browser looks up
-  // (QueryPixmapForType(m_sSubAssetsDocumentTypeName)); anything else falls through to the
-  // thumbnail path and shows the "no thumbnail" placeholder
-  plQtImageCache::GetSingleton()->RegisterTypeImage("MiniAudioSound", plSvgThumbnailToPixmap(":/AssetIcons/MiniAudioSound.svg"));
 }
 
 plMiniAudioSoundAssetDocumentManager::~plMiniAudioSoundAssetDocumentManager()

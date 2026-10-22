@@ -4,14 +4,13 @@
 #include <EditorPluginPlasmaAudio/Profiler/AudioProfilerView.h>
 #include <EditorUi/Drawings.h>
 #include <EditorUi/Menu.h>
+#include <EditorUi/Runtime.h>
 #include <EditorUi/Surface.h>
 #include <EditorUi/Tabs.h>
 #include <EditorUi/Widgets.h>
 #include <GameUiPlugin/Components/UiCanvasComponent.h>
 #include <PlasmaAudioPlugin/Codecs/AudioCodec.h>
 #include <PlasmaAudioPlugin/Profiling/AudioEventLog.h>
-
-#include <QTimer>
 
 namespace
 {
@@ -809,7 +808,7 @@ void plEditorUiAudioProfilerView::OnUiEvent(const plMsgUiEvent& event)
     // the file dialog runs its own loop; it opens after this click has been handled
     plDelegate<void()> action = sId == "Ap.Save" ? m_OnSave : m_OnOpen;
     if (action.IsValid())
-      QTimer::singleShot(0, [action]()
+      plEditorUiRuntime::RunAfterFrame([action]()
         { action(); });
     return;
   }
@@ -838,7 +837,7 @@ void plEditorUiAudioProfilerView::OnUiEvent(const plMsgUiEvent& event)
 
     // opening a document subscribes to the events this click is dispatched by
     if (action.IsValid())
-      QTimer::singleShot(0, [action, sTarget]()
+      plEditorUiRuntime::RunAfterFrame([action, sTarget]()
         { action(sTarget); });
     return;
   }
