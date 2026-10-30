@@ -253,6 +253,7 @@ void plPlasmaAudioEventInstance::Reset()
   m_pStreams = nullptr;
   m_pVoiceManager = nullptr;
   m_pEventLog = nullptr;
+  m_pEndedVoices = nullptr;
   m_vListenerPos = plVec3::MakeZero();
   m_uiSerial = 0;
   m_ChildRequests.Clear();
@@ -284,6 +285,7 @@ void plPlasmaAudioEventInstance::Reset()
 
   m_Elapsed = plTime::MakeZero();
   m_bStopping = false;
+  m_StopReason = plAudioStopReason::None;
   m_fCurrentVolumeMultiplier = 1.0f;
   m_fCurrentSpatialGain = 1.0f;
   m_fCurrentPitchMultiplier = 1.0f;
@@ -1007,7 +1009,7 @@ void plPlasmaAudioEventInstance::StartVoice(plUInt32 uiInstrument, plUInt32 uiSl
     if (!bAdmitted && desc.m_eVirtualMode == plAudioEventVirtualMode::Kill)
     {
       Log(plAudioLogEventType::Killed, "not admitted at start");
-      Stop(true);
+      Stop(true, plAudioStopReason::KilledAtStart);
       return;
     }
 
@@ -1437,7 +1439,7 @@ void plPlasmaAudioEventInstance::VirtualizeVoice(plUInt32 uiVoice)
   if (m_pResource->GetDescriptor().m_eVirtualMode == plAudioEventVirtualMode::Kill)
   {
     Log(plAudioLogEventType::Killed, "virtualised");
-    Stop(true);
+    Stop(true, plAudioStopReason::KilledVirtualised);
     return;
   }
 
@@ -1605,6 +1607,7 @@ void plPlasmaAudioEventInstance::KillVirtualVoice(plUInt32 uiVoice)
     return;
 
   Log(plAudioLogEventType::Killed, "virtual voice budget");
+  RecordEndedVoice(uiVoice, plAudioStopReason::KilledVirtualBudget);
 
   auto& state = m_Instruments[voice.m_uiInstrument];
   StopVoice(voice);
@@ -1713,6 +1716,7 @@ void plPlasmaAudioEventInstance::OnClipUnloading(const plAudioClipResource* pCli
         continue;
 
       bCurrentStopped |= voice.m_bActive && uiSlot == state.m_uiCurrentSlot;
+      RecordEndedVoice(i * VoiceSlotsPerInstrument + uiSlot, plAudioStopReason::Unloaded);
       StopVoice(voice);
     }
 
@@ -1727,9 +1731,10 @@ void plPlasmaAudioEventInstance::OnClipUnloading(const plAudioClipResource* pCli
 
 void plPlasmaAudioEventInstance::OnEventUnloading()
 {
-  for (auto& voice : m_Voices)
+  for (plUInt32 uiVoice = 0; uiVoice < m_Voices.GetCount(); ++uiVoice)
   {
-    StopVoice(voice);
+    RecordEndedVoice(uiVoice, plAudioStopReason::Unloaded);
+    StopVoice(m_Voices[uiVoice]);
   }
 
   for (auto& state : m_Instruments)
@@ -1821,24 +1826,31 @@ void plPlasmaAudioEventInstance::ReattachToBusGraph()
   }
 }
 
-void plPlasmaAudioEventInstance::Stop(bool bImmediate)
+void plPlasmaAudioEventInstance::Stop(bool bImmediate, plAudioStopReason::Enum reason)
 {
   if (m_bStopping && !bImmediate)
     return;
+
+  if (!m_bStopping)
+  {
+    m_StopReason = reason;
+  }
 
   m_bStopping = true;
 
   const plTime fadeOut = (m_pResource != nullptr) ? m_pResource->GetDescriptor().m_StopFadeOut : plTime::MakeZero();
   const ma_uint64 uiNow = (m_pEngine != nullptr) ? ma_engine_get_time_in_pcm_frames(m_pEngine) : 0;
 
-  for (auto& voice : m_Voices)
+  for (plUInt32 uiVoice = 0; uiVoice < m_Voices.GetCount(); ++uiVoice)
   {
+    Voice& voice = m_Voices[uiVoice];
     if (!voice.m_bActive)
       continue;
 
     // voices scheduled inside the look-ahead window that have not produced audio yet are dropped, as are virtual voices
     if (bImmediate || !voice.m_bSoundValid || fadeOut <= plTime::MakeZero() || voice.m_uiStartFrame > uiNow || voice.m_bVirtual)
     {
+      RecordEndedVoice(uiVoice, m_StopReason);
       StopVoice(voice);
     }
     else
@@ -2263,65 +2275,94 @@ void plPlasmaAudioEventInstance::Log(plAudioLogEventType::Enum type, plStringVie
 
 void plPlasmaAudioEventInstance::AppendSnapshotVoices(plDynamicArray<plAudioVoiceSnapshotEntry>& inout_voices) const
 {
-  const plStringView sEvent = GetDisplayName();
+  for (plUInt32 uiVoice = 0; uiVoice < m_Voices.GetCount(); ++uiVoice)
+  {
+    if (m_Voices[uiVoice].m_bActive)
+    {
+      FillVoiceSnapshot(uiVoice, inout_voices.ExpandAndGetRef());
+    }
+  }
+}
+
+void plPlasmaAudioEventInstance::FillVoiceSnapshot(plUInt32 uiVoice, plAudioVoiceSnapshotEntry& out_entry) const
+{
+  const Voice& voice = m_Voices[uiVoice];
+
   plStringView sBus = "Master";
-  plUInt8 uiPriority = 0;
+  out_entry.m_uiPriority = 0;
+  out_entry.m_Parameters.Clear();
 
   if (m_pResource != nullptr)
   {
-    uiPriority = m_pResource->GetDescriptor().m_uiPriority;
+    const plAudioEventDesc& desc = m_pResource->GetDescriptor();
+    out_entry.m_uiPriority = desc.m_uiPriority;
 
     if (m_pBusGraph != nullptr && m_pBusGraph->IsBuilt() && m_uiBus < m_pBusGraph->GetDesc().m_Buses.GetCount())
     {
       sBus = m_pBusGraph->GetDesc().m_Buses[m_uiBus].m_sName;
     }
-    else if (!m_pResource->GetDescriptor().m_sOutputBus.IsEmpty())
+    else if (!desc.m_sOutputBus.IsEmpty())
     {
-      sBus = m_pResource->GetDescriptor().m_sOutputBus;
+      sBus = desc.m_sOutputBus;
+    }
+
+    // the values the instance plays with, not the targets the game set
+    const plUInt32 uiParameters = plMath::Min(desc.m_Parameters.GetCount(), m_ParameterValues.GetCount());
+    for (plUInt32 uiParam = 0; uiParam < uiParameters && out_entry.m_Parameters.GetCount() < plAudioVoiceSnapshotEntry::MaxParameters; ++uiParam)
+    {
+      if (desc.m_Parameters[uiParam].m_sName.StartsWith("AudioSystem."))
+        continue;
+
+      plAudioVoiceParameterSnapshotEntry& parameter = out_entry.m_Parameters.ExpandAndGetRef();
+      parameter.m_sName = desc.m_Parameters[uiParam].m_sName;
+      parameter.m_fValue = m_ParameterValues[uiParam];
     }
   }
 
-  const float fOcclusion = (m_pEntity != nullptr) ? plMath::Clamp(m_pEntity->m_fCurrentOcclusion, 0.0f, 1.0f) : 0.0f;
+  out_entry.m_uiId = static_cast<plUInt32>((m_uiSerial << 8) | (uiVoice & 0xFFu));
+  out_entry.m_sEvent = GetDisplayName();
+  out_entry.m_uiEntityId = (m_pEntity != nullptr) ? static_cast<plUInt64>(m_pEntity->m_uiEntityId) : 0;
+  out_entry.m_sEntity = (m_pEntity != nullptr) ? m_pEntity->m_sName.GetView() : plStringView();
+  out_entry.m_uiState = m_bStopping ? plAudioVoiceSnapshotEntry::Stopping : (voice.m_bVirtual ? plAudioVoiceSnapshotEntry::Virtual : plAudioVoiceSnapshotEntry::Real);
+  out_entry.m_bVirtual = voice.m_bVirtual;
+  out_entry.m_uiStopReason = m_bStopping ? m_StopReason : plAudioStopReason::None;
+  out_entry.m_uiCodec = plAudioVoiceSnapshotEntry::Embedded;
+  out_entry.m_uiLoadMode = plAudioVoiceSnapshotEntry::Embedded;
+  out_entry.m_fAudibility = m_fAudibility;
+  out_entry.m_fDistance = m_fDistance;
+  out_entry.m_fOcclusion = (m_pEntity != nullptr) ? plMath::Clamp(m_pEntity->m_fCurrentOcclusion, 0.0f, 1.0f) : 0.0f;
+  out_entry.m_fVolume = m_fCurrentVolumeMultiplier * m_fCurrentSpatialGain * GetVoiceVolume(voice);
+  out_entry.m_fAge = static_cast<float>(m_Elapsed.GetSeconds());
+  out_entry.m_sBus = sBus;
 
-  for (plUInt32 uiVoice = 0; uiVoice < m_Voices.GetCount(); ++uiVoice)
+  // a virtual voice released its clip acquisition but keeps the handle; PointerOnly never blocks
+  if (voice.m_pClip != nullptr)
   {
-    const Voice& voice = m_Voices[uiVoice];
-    if (!voice.m_bActive)
-      continue;
-
-    plAudioVoiceSnapshotEntry& entry = inout_voices.ExpandAndGetRef();
-    entry.m_uiId = static_cast<plUInt32>((m_uiSerial << 8) | (uiVoice & 0xFFu));
-    entry.m_sEvent = sEvent;
-    entry.m_uiEntityId = (m_pEntity != nullptr) ? static_cast<plUInt64>(m_pEntity->m_uiEntityId) : 0;
-    entry.m_sEntity = (m_pEntity != nullptr) ? m_pEntity->m_sName.GetView() : plStringView();
-    entry.m_uiState = m_bStopping ? plAudioVoiceSnapshotEntry::Stopping : (voice.m_bVirtual ? plAudioVoiceSnapshotEntry::Virtual : plAudioVoiceSnapshotEntry::Real);
-    entry.m_uiPriority = uiPriority;
-    entry.m_uiCodec = plAudioVoiceSnapshotEntry::Embedded;
-    entry.m_uiLoadMode = plAudioVoiceSnapshotEntry::Embedded;
-    entry.m_fAudibility = m_fAudibility;
-    entry.m_fDistance = m_fDistance;
-    entry.m_fOcclusion = fOcclusion;
-    entry.m_fVolume = m_fCurrentVolumeMultiplier * m_fCurrentSpatialGain * GetVoiceVolume(voice);
-    entry.m_fAge = static_cast<float>(m_Elapsed.GetSeconds());
-    entry.m_sBus = sBus;
-
-    // a virtual voice released its clip acquisition but keeps the handle; PointerOnly never blocks
-    if (voice.m_pClip != nullptr)
-    {
-      entry.m_uiCodec = voice.m_pClip->GetCodec();
-      entry.m_uiLoadMode = voice.m_pClip->GetLoadMode();
-    }
-    else if (voice.m_hClip.IsValid())
-    {
-      plAudioClipResource* pClip = plResourceManager::BeginAcquireResource(voice.m_hClip, plResourceAcquireMode::PointerOnly);
-      if (pClip->GetLoadingState() == plResourceState::Loaded)
-      {
-        entry.m_uiCodec = pClip->GetCodec();
-        entry.m_uiLoadMode = pClip->GetLoadMode();
-      }
-      plResourceManager::EndAcquireResource(pClip);
-    }
+    out_entry.m_uiCodec = voice.m_pClip->GetCodec();
+    out_entry.m_uiLoadMode = voice.m_pClip->GetLoadMode();
   }
+  else if (voice.m_hClip.IsValid())
+  {
+    plAudioClipResource* pClip = plResourceManager::BeginAcquireResource(voice.m_hClip, plResourceAcquireMode::PointerOnly);
+    if (pClip->GetLoadingState() == plResourceState::Loaded)
+    {
+      out_entry.m_uiCodec = pClip->GetCodec();
+      out_entry.m_uiLoadMode = pClip->GetLoadMode();
+    }
+    plResourceManager::EndAcquireResource(pClip);
+  }
+}
+
+void plPlasmaAudioEventInstance::RecordEndedVoice(plUInt32 uiVoice, plAudioStopReason::Enum reason)
+{
+  if (m_pEndedVoices == nullptr || !m_pEndedVoices->IsEnabled() || !m_Voices[uiVoice].m_bActive)
+    return;
+
+  plAudioVoiceSnapshotEntry entry;
+  FillVoiceSnapshot(uiVoice, entry);
+  entry.m_uiStopReason = reason;
+
+  m_pEndedVoices->Add(entry, m_pEventLog != nullptr ? m_pEventLog->GetTime() : 0.0);
 }
 
 bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> listeners, plRandom& ref_sharedRng)
@@ -2349,7 +2390,7 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
   // a limited nested event ran its length: it ends with its stop fade (from the first update at or after the frame)
   if (m_uiStopFrame != 0 && !m_bStopping && uiNow >= m_uiStopFrame)
   {
-    Stop(false);
+    Stop(false, plAudioStopReason::Finished);
   }
 
   // virtual timelines advance at the pitch that applied since the last update, before this update changes it
@@ -2485,6 +2526,7 @@ bool plPlasmaAudioEventInstance::Update(plTime delta, plArrayPtr<const plVec3> l
         const ma_uint64 uiEstimatedEnd = EstimateVoiceEndFrame(voice, uiNow);
         const ma_uint64 uiEndFrame = (uiEstimatedEnd != UnknownFrame) ? plMath::Min(uiEstimatedEnd, uiNow) : uiNow;
 
+        RecordEndedVoice(i * VoiceSlotsPerInstrument + uiSlot, m_bStopping ? m_StopReason : plAudioStopReason::Finished);
         StopVoice(voice);
 
         if (!bWasCurrent || state.m_bPendingTrigger)
@@ -3399,7 +3441,7 @@ plResult plPlasmaAudioEventManager::ActivateEventInternal(const plAudioEventReso
               pOldest = pInstance;
           }
           m_EventLog.Add(plAudioLogEventType::Stolen, pOldest->GetDisplayName(), "oldest");
-          pOldest->Stop(false);
+          pOldest->Stop(false, plAudioStopReason::StolenOldest);
           break;
         }
 
@@ -3413,7 +3455,7 @@ plResult plPlasmaAudioEventManager::ActivateEventInternal(const plAudioEventReso
               pQuietest = pInstance;
           }
           m_EventLog.Add(plAudioLogEventType::Stolen, pQuietest->GetDisplayName(), "quietest");
-          pQuietest->Stop(false);
+          pQuietest->Stop(false, plAudioStopReason::StolenQuietest);
           break;
         }
       }
@@ -3426,6 +3468,7 @@ plResult plPlasmaAudioEventManager::ActivateEventInternal(const plAudioEventReso
   pInstance->m_pStreams = m_pStreamService;
   pInstance->m_pVoiceManager = &m_VoiceManager;
   pInstance->m_pEventLog = &m_EventLog;
+  pInstance->m_pEndedVoices = &m_EndedVoices;
   pInstance->m_pDeferredLoads = &m_DeferredLoads;
   pInstance->m_vListenerPos = GetClosestListener(pEntity);
   pInstance->m_uiSerial = m_uiNextInstanceSerial++;
@@ -4136,4 +4179,12 @@ void plPlasmaAudioEventManager::FillSnapshot(plAudioProfilingSnapshot& out_snaps
     out_snapshot.m_uiVirtualVoices += pInstance->GetVirtualVoiceCount();
     pInstance->AppendSnapshotVoices(out_snapshot.m_Voices);
   }
+
+  m_EndedVoices.Collect(m_EventLog.GetTime(), plAudioProfilingSnapshot::EndedWindow, out_snapshot.m_Ended);
+}
+
+void plPlasmaAudioEventManager::SetEndedVoicesEnabled(bool bEnabled)
+{
+  PL_LOCK(m_Mutex);
+  m_EndedVoices.SetEnabled(bEnabled);
 }

@@ -15,6 +15,7 @@
 #include <PlasmaAudioPlugin/Mixer/MiniAudioDspNodes.h>
 #include <PlasmaAudioPlugin/Music/AudioMusicPlayer.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
+#include <PlasmaAudioPlugin/Profiling/AudioEndedVoices.h>
 #include <PlasmaAudioPlugin/Profiling/AudioEventLog.h>
 #include <PlasmaAudioPlugin/Resources/MiniAudioSoundResource.h>
 
@@ -153,8 +154,12 @@ public:
   /// \param pGlobalParameters Manager-owned snapshot of the backend's global parameters (name hash -> value); may be null.
   plResult Start(const plAudioEventResourceHandle& hEvent, plPlasmaAudioEntityData* pEntity, plPlasmaAudioEventData* pEventData, plMiniAudioBusGraph* pBusGraph, ma_engine* pEngine, const plHashTable<plUInt64, float>* pGlobalParameters, plRandom& ref_rng);
 
-  /// \brief Begins the authored fade-out (or stops immediately). The instance finishes in a later Update.
-  void Stop(bool bImmediate);
+  /// \brief Begins the authored fade-out (or stops immediately). The instance finishes in a later Update. The reason of
+  /// the first stop is kept: the profiler shows it on the stopping voices and records it for the voices that end.
+  void Stop(bool bImmediate, plAudioStopReason::Enum reason = plAudioStopReason::Requested);
+
+  /// \brief Why the instance stops; None while it plays.
+  PL_NODISCARD plAudioStopReason::Enum GetStopReason() const { return m_StopReason; }
 
   /// \brief Advances scheduling/automation. Returns false when the instance has fully finished.
   ///
@@ -277,6 +282,9 @@ public:
   /// \brief Receives the voice changes and clip problems of the instance; null logs nothing.
   plAudioEventLog* m_pEventLog = nullptr;
 
+  /// \brief Receives the voices of the instance that end, for the profiler; null records nothing.
+  plAudioEndedVoices* m_pEndedVoices = nullptr;
+
   /// \brief Collects the clip loads the instance needs; the manager issues them outside its mutex. Null issues none.
   plPlasmaAudioDeferredLoads* m_pDeferredLoads = nullptr;
 
@@ -361,6 +369,12 @@ public:
   void AppendSnapshotVoices(plDynamicArray<plAudioVoiceSnapshotEntry>& inout_voices) const;
 
 private:
+  /// \brief The profiler entry of an active voice.
+  void FillVoiceSnapshot(plUInt32 uiVoice, plAudioVoiceSnapshotEntry& out_entry) const;
+
+  /// \brief Hands an active voice that is about to end to m_pEndedVoices, with the reason it ends.
+  void RecordEndedVoice(plUInt32 uiVoice, plAudioStopReason::Enum reason);
+
   static constexpr ma_uint64 UnknownFrame = ~static_cast<ma_uint64>(0);
 
   struct Voice
@@ -623,6 +637,7 @@ private:
 
   plTime m_Elapsed;
   bool m_bStopping = false;
+  plAudioStopReason::Enum m_StopReason = plAudioStopReason::None;
   float m_fCurrentVolumeMultiplier = 1.0f;
   float m_fCurrentSpatialGain = 1.0f; ///< ComputeSpatialGain of the last update
   float m_fCurrentPitchMultiplier = 1.0f;
@@ -758,9 +773,13 @@ public:
   /// \brief Number of voice changes between real and virtual so far.
   PL_NODISCARD plUInt64 GetVoiceFlipCount() const;
 
-  /// \brief Fills the voice counts, budgets, instance count and one entry per active voice of out_snapshot. The
-  /// middleware-level fields (DSP load, update time, streams, buses, memory, event log) are left untouched.
+  /// \brief Fills the voice counts, budgets, instance count, one entry per active voice and the recently ended voices
+  /// of out_snapshot. The middleware-level fields (DSP load, update time, streams, buses, memory, event log) are left
+  /// untouched.
   void FillSnapshot(plAudioProfilingSnapshot& out_snapshot) const;
+
+  /// \brief Whether the voices that end are recorded for plAudioProfilingSnapshot::m_Ended. Off drops the record.
+  void SetEndedVoicesEnabled(bool bEnabled);
 
   /// \brief The log of instance starts, stops and voice changes. The middleware adds its device, mixer, bank and
   /// language events to it as well.
@@ -863,6 +882,7 @@ private:
   plAudioStreamService* m_pStreamService = nullptr;
   plAudioVoiceManager m_VoiceManager;
   plAudioEventLog m_EventLog;
+  plAudioEndedVoices m_EndedVoices;
   plUInt64 m_uiNextInstanceSerial = 1; // 0 is no instance (see plPlasmaAudioEventInstance::m_uiParentSerial)
   plRandom m_Rng;
   plTime m_Now;

@@ -1,9 +1,43 @@
 #pragma once
 
 #include <Foundation/Containers/DynamicArray.h>
+#include <Foundation/Containers/HybridArray.h>
 #include <Foundation/IO/Stream.h>
 #include <Foundation/Strings/String.h>
 #include <PlasmaAudioPlugin/PlasmaAudioPluginDLL.h>
+
+/// \brief Why a voice stops or stopped, as the editor's Audio Profiler shows it.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioStopReason
+{
+  using StorageType = plUInt8;
+
+  enum Enum : plUInt8
+  {
+    None,                ///< the voice plays on
+    Requested,           ///< the game stopped the instance, its entity, or its parent event
+    Finished,            ///< the voice ran out of data, or a limited nested event ran its length
+    StolenOldest,        ///< a new instance of the event's polyphony group replaced the oldest one
+    StolenQuietest,      ///< a new instance of the event's polyphony group replaced the quietest one
+    KilledAtStart,       ///< an event with the Kill virtual mode was not admitted by the voice budget at start
+    KilledVirtualised,   ///< an event with the Kill virtual mode lost a real voice to the voice budget
+    KilledVirtualBudget, ///< the virtual voice budget was full
+    Unloaded,            ///< the event or clip resource the voice reads was unloaded
+    Count
+  };
+
+  /// \brief Short lowercase name, e.g. "stolen" or "killed" followed by a middle dot and the detail.
+  static const char* GetName(Enum reason);
+
+  /// \brief Whether the voice was ended against the game's will: stolen or killed.
+  static bool IsForced(Enum reason);
+};
+
+/// \brief A parameter value of an event instance.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioVoiceParameterSnapshotEntry
+{
+  plString m_sName;
+  float m_fValue = 0.0f;
+};
 
 /// \brief One active voice of an event instance, as shown by the editor's Audio Profiler.
 struct PL_PLASMAAUDIOPLUGIN_DLL plAudioVoiceSnapshotEntry
@@ -12,8 +46,12 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioVoiceSnapshotEntry
   {
     Real = 0,
     Virtual = 1,
-    Stopping = 2, ///< the voice's instance fades out (the voice itself may be real or virtual)
+    Stopping = 2, ///< the voice's instance fades out; m_bVirtual tells whether the voice is real or virtual
+    Ended = 3,    ///< only in plAudioProfilingSnapshot::m_Ended
   };
+
+  /// \brief The most parameters a voice entry carries.
+  static constexpr plUInt32 MaxParameters = 8;
 
   /// \brief m_uiCodec and m_uiLoadMode of a voice that decodes a sample embedded in the event (no audio clip).
   static constexpr plUInt8 Embedded = 0xFF;
@@ -32,6 +70,18 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioVoiceSnapshotEntry
   float m_fAge = 0.0f;         ///< seconds since the instance started
   plString m_sBus;             ///< name of the mixer bus the instance plays on
   plString m_sEntity;          ///< name the entity was registered with (its game object's name); empty without one
+  bool m_bVirtual = false;     ///< the voice plays without a decoding chain, also while its instance is stopping
+  plUInt8 m_uiStopReason = plAudioStopReason::None; ///< plAudioStopReason::Enum, set while stopping and once ended
+
+  /// The instance's parameter values (at most MaxParameters), in the order of the event's parameters.
+  plHybridArray<plAudioVoiceParameterSnapshotEntry, 2> m_Parameters;
+};
+
+/// \brief A voice that ended shortly before the snapshot, with its last values.
+struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEndedVoiceSnapshotEntry
+{
+  plAudioVoiceSnapshotEntry m_Voice; ///< m_uiState is plAudioVoiceSnapshotEntry::Ended
+  double m_fEndTime = 0.0;           ///< when the voice ended, on the event log's clock (seconds)
 };
 
 /// \brief One bus of the loaded mixer, as shown on the Buses tab of the editor's Audio Profiler.
@@ -146,20 +196,28 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioEventLogSnapshotEntry
 ///
 /// Version 2 adds the buses, memory and event log sections; data of version 1 reads with those sections empty.
 /// Version 3 adds the capture section (time, stream underruns, memory budget) and the voices' entity names.
+/// Version 4 adds the voices' virtual flag, stop reason and parameters, the ended voices, and the embedded sample bytes;
+/// m_uiMemoryBytes of older data is raised by the embedded samples of its events so that it means the same.
 struct PL_PLASMAAUDIOPLUGIN_DLL plAudioProfilingSnapshot
 {
-  static constexpr plUInt8 kSnapshotVersion = 3;
+  static constexpr plUInt8 kSnapshotVersion = 4;
 
-  plUInt32 m_uiRealVoices = 0;
+  /// \brief How long ended voices stay in m_Ended, in seconds.
+  static constexpr double EndedWindow = 5.0;
+
+  plUInt32 m_uiRealVoices = 0;  ///< real voices, including real voices of stopping instances
   plUInt32 m_uiVirtualVoices = 0;
   plUInt32 m_uiMaxReal = 0;
   plUInt32 m_uiMaxVirtual = 0;
   plUInt32 m_uiInstances = 0;
   plUInt32 m_uiStreams = 0;     ///< streamed clip voices reading from disk
-  float m_fDspLoad = 0.0f;      ///< fraction of the mix period spent mixing
-  float m_fUpdateMs = 0.0f;     ///< duration of the last audio update
-  plUInt64 m_uiMemoryBytes = 0; ///< resident clip sample data plus stream rings
+  float m_fDspLoad = 0.0f;      ///< time spent in the device callback mixing a period, as a fraction of the period
+  float m_fUpdateMs = 0.0f;     ///< wall time of the last audio update on the audio thread
+  plUInt64 m_uiMemoryBytes = 0; ///< audio data: clip sample data, stream rings and the events' embedded samples
   plDynamicArray<plAudioVoiceSnapshotEntry> m_Voices;
+
+  /// Voices that ended within EndedWindow before the snapshot, oldest first. Filled while snapshots are enabled.
+  plDynamicArray<plAudioEndedVoiceSnapshotEntry> m_Ended;
 
   /// \name Buses
   /// Empty while no mixer is loaded.
@@ -174,8 +232,9 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioProfilingSnapshot
   plDynamicArray<plAudioClipMemorySnapshotEntry> m_Clips;
   plDynamicArray<plAudioEventMemorySnapshotEntry> m_Events;
   plDynamicArray<plAudioBankMemorySnapshotEntry> m_Banks;
-  plUInt64 m_uiClipResidentBytes = 0; ///< sample data of all loaded clips
-  plUInt64 m_uiStreamRingBytes = 0;   ///< rings of the open and pooled streams
+  plUInt64 m_uiClipResidentBytes = 0;   ///< sample data of all loaded clips
+  plUInt64 m_uiStreamRingBytes = 0;     ///< rings of the open and pooled streams
+  plUInt64 m_uiEmbeddedSampleBytes = 0; ///< samples embedded in the loaded events (the sum of m_Events)
   plUInt32 m_uiPooledStreams = 0;
   ///@}
 
@@ -202,4 +261,7 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioProfilingSnapshot
 
   /// \brief Fails for data of a newer version or when the stream ends early.
   plResult Read(plStreamReader& inout_stream);
+
+private:
+  plResult ReadSections(plStreamReader& inout_stream, plUInt8 uiVersion);
 };

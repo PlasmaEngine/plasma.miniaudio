@@ -347,6 +347,9 @@ public:
   /// when its content finished loading and leaves it before its data is cleared or it is destroyed.
   static void GatherLoadedEvents(plDynamicArray<plAudioEventMemorySnapshotEntry>& out_events);
 
+  /// \brief The embedded sample bytes of every loaded event resource, as GatherLoadedEvents lists them. Any thread.
+  static plUInt64 GetTotalSampleBytes();
+
 private:
   /// Adds the event to the registry of loaded events.
   void LinkLoaded();

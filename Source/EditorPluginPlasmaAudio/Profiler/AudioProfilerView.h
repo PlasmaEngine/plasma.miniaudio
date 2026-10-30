@@ -6,6 +6,7 @@
 #include <Foundation/Types/UniquePtr.h>
 #include <GameUiPlugin/Elements/UiDrawList.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilerCapture.h>
+#include <PlasmaAudioPlugin/Profiling/AudioProfilerVoiceQuery.h>
 #include <PlasmaAudioPlugin/Profiling/AudioProfilingSnapshot.h>
 
 struct plEditorUiPointerEvent;
@@ -22,14 +23,22 @@ struct plAudioProfilerLogLine
   plString m_sDetail;
 };
 
-/// \brief The engine-drawn content of the Audio Profiler panel: Record, Save capture, Open and the target, the capture's
-/// graphs (voices, DSP load, streams with underruns, memory against the budget) with a draggable time range, the tabs
-/// Instances, Event log, Voices, Buses and Memory with their counts, the tab's content and the status line.
+/// \brief The engine-drawn content of the Audio Profiler panel: Record, Save capture, Open and the target, Pause view,
+/// the capture's graphs (voices, mix CPU, streams with underruns, audio data against the budget) with a draggable time
+/// range, the tabs Instances, Event log, Voices, Buses and Memory with their counts, the tab's content and the status
+/// line.
 ///
 /// The panel polls the target and hands every snapshot and the new log lines to this view, and records them into the
-/// capture the view draws. Without a range the tabs show the live state; with a range, Voices, Buses and Memory show the
-/// snapshot at its end, and Instances and Event log what happened in it. The engine shell's Audio Profiler panel shows
-/// it, fed by plAudioProfilerPanel.
+/// capture the view draws. The graphs show either the live window (the last LiveWindowSeconds of snapshots, kept by the
+/// view whether or not Record is on; older ones are dropped) or the capture (everything recorded). Record and Open
+/// switch to the capture, Live switches back. Without a range the tabs show the live state; with a range on the capture,
+/// Voices, Buses and Memory show the snapshot at its end, and Instances and Event log what happened in it. Pause view
+/// keeps the tabs on the snapshot they show while the panel goes on polling and recording. The engine shell's Audio
+/// Profiler panel shows it, fed by plAudioProfilerPanel.
+///
+/// The Voices tab has a summary strip (voices against their budgets, voices ended in the last seconds, mix CPU, audio
+/// update, audio data), state chips, a bus filter and a search over event, owner and bus above a sortable table that
+/// plAudioProfilerVoiceQuery fills, and the selected voice's details with its parameters.
 class plEditorUiAudioProfilerView : public plEditorUiContent
 {
 public:
@@ -42,6 +51,9 @@ public:
     NoData,   ///< the target answers, but without PlasmaAudio snapshot data
     Live,
   };
+
+  /// How far back the live graphs reach, in seconds of the target's clock.
+  static constexpr double LiveWindowSeconds = 60.0;
 
   void SetLinkState(LinkState state);
 
@@ -70,7 +82,8 @@ public:
   plDelegate<void()> m_OnOpen;
   plDelegate<void(plUInt32)> m_OnTargetChosen;
 
-  /// The selected instance's Select entity (the entity's name) and Open event (the event's resource name).
+  /// Select entity / Select owner (the entity's name) and Open event (the event's resource name) of the selected
+  /// instance or voice.
   plDelegate<void(plStringView)> m_OnSelectEntity;
   plDelegate<void(plStringView)> m_OnOpenEvent;
 
@@ -131,13 +144,29 @@ private:
   void DrawInstances();
   void DrawInstanceCard(const plRectFloat& rect);
   void DrawVoices();
+  void DrawVoiceSummary();
+  void DrawVoiceDetails(const plRectFloat& rect);
   void DrawBuses();
   void DrawMemory();
   void DrawLog();
   void DrawStatus();
   void DrawTableHeader(const plRectFloat& rect, plArrayPtr<const char* const> titles, plArrayPtr<const float> widths, plArrayPtr<const bool> rightAligned);
 
+  /// \name Voices tab layout
+  ///@{
+  plRectFloat GetVoiceSummaryRect() const;
+  plRectFloat GetVoiceCardRect(plUInt32 uiCard) const;
+  float GetVoiceRowsTop() const; ///< below the cap banner (when shown) and the table header
+  void LayoutVoiceColumns(plHybridArray<float, 12>& out_x, plHybridArray<float, 12>& out_w) const;
+  ///@}
+
+  /// Where Pause view sits in the capture bar, after Open...; the target follows it.
+  float GetPauseButtonX() const;
+
   void RebuildVoiceRows();
+  void SetPaused(bool bPaused);
+  void ShowBusMenu();
+  void SortVoicesBy(plUInt32 uiColumn);
   void RebuildMemoryRows();
   bool IsLogLineVisible(const plAudioProfilerLogLine& line) const;
   void RebuildVisibleLog();
@@ -150,7 +179,30 @@ private:
   void GetRange(double& out_fStart, double& out_fEnd) const;
   bool HasRange() const { return m_fRangeA >= 0.0 && m_fRangeB >= 0.0 && plMath::Abs(m_fRangeA - m_fRangeB) >= 0.05; }
 
-  /// The graphs' plot area (right of the row titles) and the capture time at an x in it.
+  /// \name Graph source
+  /// The graphs plot the live window or the capture; ranges and the hover line exist on the capture only.
+  ///@{
+  enum class GraphSource : plUInt8
+  {
+    Live,
+    Capture,
+  };
+
+  void SetGraphSource(GraphSource source);
+  bool IsGraphLive() const { return m_GraphSource == GraphSource::Live || m_pCapture == nullptr || m_pCapture->IsEmpty(); }
+  const plDynamicArray<plAudioProfilerCapture::Sample>& GetGraphSamples() const;
+
+  /// The time span the graphs plot: the live window up to the newest live sample, or the whole capture.
+  void GetGraphSpan(double& out_fStart, double& out_fEnd) const;
+
+  /// Adds the live snapshot to the live window and drops the samples that left it.
+  void AddLiveSample(const plAudioProfilingSnapshot& snapshot);
+
+  /// Where the Live and Capture buttons start in the capture bar, left of the range text.
+  float GetGraphSourceX() const;
+  ///@}
+
+  /// The graphs' plot area (right of the row titles) and the time at an x in it.
   plRectFloat GetGraphRect() const;
   float GetGraphHeight() const;
   double GraphTimeAt(float x) const;
@@ -186,10 +238,21 @@ private:
   plString m_sToast;
   plTime m_ToastTime;
 
+  // the live window the graphs plot without a capture; samples older than LiveWindowSeconds are dropped
+  GraphSource m_GraphSource = GraphSource::Live;
+  plDynamicArray<plAudioProfilerCapture::Sample> m_LiveSamples;
+  plUInt64 m_uiLiveUnderruns = 0; ///< the target's underrun total at the newest live sample
+
+  // pause: the live snapshots and log lines that arrived while paused
+  bool m_bPaused = false;
+  plDeque<plAudioProfilerLogLine> m_PausedLines;
+
   // voices
-  bool m_StateFilter[3] = {true, true, true};
+  plAudioProfilerVoiceQuery m_VoiceQuery;
   plString m_sVoiceFilter;
   plDynamicArray<const plAudioVoiceSnapshotEntry*> m_VoiceRows;
+  plUInt32 m_uiVoiceMatches = 0; ///< rows that matched before the query's cap
+  bool m_bBuiltVoiceBanner = false; ///< whether the document's sort headers sit below the cap banner
   bool m_bHasSelection = false;
   plUInt32 m_uiSelectedId = 0;
   plAudioVoiceSnapshotEntry m_SelectedVoice; ///< the selected voice as last seen
