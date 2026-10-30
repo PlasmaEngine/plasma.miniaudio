@@ -75,6 +75,9 @@ struct PL_PLASMAAUDIOPLUGIN_DLL plAudioBankDesc
 
   plResult Save(plStreamWriter& inout_stream) const;
   plResult Load(plStreamReader& inout_stream);
+
+  /// Rejects empty resource ids and invalid or ambiguous packed entries.
+  plResult Validate() const;
 };
 
 struct PL_PLASMAAUDIOPLUGIN_DLL plAudioBankResourceDescriptor

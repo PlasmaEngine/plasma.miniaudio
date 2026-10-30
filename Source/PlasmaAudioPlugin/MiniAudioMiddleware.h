@@ -136,9 +136,13 @@ public:
   /// Audio thread only.
   bool IsBankContentRequested(plAudioSystemDataID uiBankId) const;
 
-  /// \brief Whether every event and clip of the bank finished loading (or is missing), so playing them causes no load.
+  /// \brief Whether the bank and all its required events and clips loaded successfully, including event references.
   /// Audio thread only.
   bool IsBankReady(plAudioSystemDataID uiBankId) const;
+
+  /// \brief Whether an accepted asynchronous bank load failed. Missing content never counts as ready.
+  /// Audio thread only. LoadBank success accepts the request; poll this and IsBankReady for its outcome.
+  bool IsBankFailed(plAudioSystemDataID uiBankId) const;
 
   /// \brief Whether the loaded content was over a category of the memory budget when the bank finished loading. Audio
   /// thread only.
@@ -246,7 +250,8 @@ private:
     plDynamicArray<plAudioEventResourceHandle> m_Events;
     plDynamicArray<plAudioClipResourceHandle> m_Clips;
     bool m_bContentRequested = false;
-    bool m_bReady = false;      ///< every event and clip finished loading; the budget was checked then
+    bool m_bFailed = false;     ///< the bank or one of its required resources could not be loaded
+    bool m_bReady = false;      ///< every event and clip loaded successfully; the budget was checked then
     bool m_bOverBudget = false; ///< that check found the loaded content over a category of the budget
   };
 
@@ -262,10 +267,13 @@ private:
   /// Logs it when the loaded content is over a category of m_MemoryBudget.
   void CheckMemoryBudget(LoadedBank& ref_bank);
 
-  /// Whether every event and clip the bank holds a handle to has finished loading or is missing.
+  /// Whether the bank and all its required resources loaded successfully.
   static bool IsBankContentLoaded(const LoadedBank& bank);
 
-  /// The events and clips of the bank that finished loading or are missing.
+  /// Loaded, LoadedResourceMissing, or Unloaded (still loading), including transitive event references.
+  static plResourceState GetBankContentState(const LoadedBank& bank);
+
+  /// The listed events and clips that loaded successfully.
   static plUInt32 CountReadyItems(const LoadedBank& bank);
 
   plAudioMemoryBudget m_MemoryBudget;

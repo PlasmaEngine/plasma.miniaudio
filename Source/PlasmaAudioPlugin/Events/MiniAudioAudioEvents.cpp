@@ -1837,7 +1837,7 @@ void plPlasmaAudioEventInstance::Stop(bool bImmediate)
       continue;
 
     // voices scheduled inside the look-ahead window that have not produced audio yet are dropped, as are virtual voices
-    if (bImmediate || fadeOut <= plTime::MakeZero() || voice.m_uiStartFrame > uiNow || voice.m_bVirtual)
+    if (bImmediate || !voice.m_bSoundValid || fadeOut <= plTime::MakeZero() || voice.m_uiStartFrame > uiNow || voice.m_bVirtual)
     {
       StopVoice(voice);
     }
@@ -3632,7 +3632,95 @@ void plPlasmaAudioEventManager::StopAll(bool bImmediate)
     }
 
     m_Instances.Clear();
+    m_bDeviceRecovery = false;
   }
+}
+
+void plPlasmaAudioEventInstance::DetachForDeviceRecovery()
+{
+  if (m_pEngine == nullptr)
+    return;
+
+  const ma_uint64 uiNow = ma_engine_get_time_in_pcm_frames(m_pEngine);
+  for (Voice& voice : m_Voices)
+  {
+    if (voice.m_bActive && voice.m_bVirtual)
+      AdvanceVirtualCursor(voice, uiNow);
+
+    if (voice.m_bSoundValid && !voice.m_bVirtual)
+    {
+      voice.m_uiRecoveryCursor = static_cast<ma_uint64>(static_cast<plInt64>(voice.m_Source.m_iPublishedCursor));
+      voice.m_RecoveryFader = voice.m_Sound.engineNode.fader;
+      voice.m_bRecoveryFadeApplied = voice.m_Source.m_bStartFadeApplied;
+      voice.m_uiRecoveryStartFadeFrames = voice.m_Source.m_uiStartFadeFrames;
+      voice.m_fRecoveryStartFadeVolume = voice.m_Source.m_fStartFadeVolume;
+      voice.m_uiRecoveryStopFrame = ma_node_get_state_time(&voice.m_Sound, ma_node_state_stopped);
+    }
+    ReleaseVoiceChain(voice);
+  }
+  m_pEngine = nullptr;
+}
+
+plResult plPlasmaAudioEventInstance::RestoreAfterDeviceRecovery(ma_engine* pEngine)
+{
+  if (pEngine == nullptr || ma_engine_get_sample_rate(pEngine) != m_uiSampleRate)
+    return PL_FAILURE;
+
+  m_pEngine = pEngine;
+  const ma_uint64 uiNow = ma_engine_get_time_in_pcm_frames(pEngine);
+  bool bRestored = true;
+  for (Voice& voice : m_Voices)
+  {
+    if (!voice.m_bActive || voice.m_bVirtual || voice.m_bSoundValid)
+      continue;
+
+    if (BuildVoiceChain(voice, plMath::Max(uiNow, voice.m_uiStartFrame), voice.m_uiRecoveryCursor, false,
+          voice.m_uiRecoveryStartFadeFrames, voice.m_fRecoveryStartFadeVolume) != BuildResult::Success)
+    {
+      bRestored = false;
+      continue;
+    }
+
+    if (voice.m_bRecoveryFadeApplied)
+    {
+      // The new sound may have a different channel count; only the fade's progress belongs to the old graph.
+      const ma_fader_config config = voice.m_Sound.engineNode.fader.config;
+      voice.m_Sound.engineNode.fader = voice.m_RecoveryFader;
+      voice.m_Sound.engineNode.fader.config = config;
+      voice.m_Source.m_bStartFadeApplied = true;
+    }
+    ma_sound_set_stop_time_in_pcm_frames(&voice.m_Sound, voice.m_uiRecoveryStopFrame);
+    if (m_bStopping)
+      ma_data_source_set_looping(voice.m_pInner, false);
+  }
+  ReattachToBusGraph();
+  return bRestored ? PL_SUCCESS : PL_FAILURE;
+}
+
+void plPlasmaAudioEventManager::DetachForDeviceRecovery()
+{
+  PL_LOCK(m_Mutex);
+  m_bDeviceRecovery = true;
+  for (auto& pInstance : m_Instances)
+    pInstance->DetachForDeviceRecovery();
+}
+
+plResult plPlasmaAudioEventManager::RestoreAfterDeviceRecovery(ma_engine* pEngine)
+{
+  PL_LOCK(m_Mutex);
+  bool bRestored = pEngine != nullptr;
+  for (auto& pInstance : m_Instances)
+  {
+    if (pInstance->RestoreAfterDeviceRecovery(pEngine).Failed())
+      bRestored = false;
+  }
+  if (!bRestored)
+    return PL_FAILURE;
+
+  for (auto& pending : m_PendingActivations)
+    pending.m_pEngine = pEngine;
+  m_bDeviceRecovery = false;
+  return PL_SUCCESS;
 }
 
 void plPlasmaAudioEventManager::SetEventParameter(const plPlasmaAudioEntityData* pEntity, plStringView sParamName, float fValue)
@@ -3803,6 +3891,9 @@ void plPlasmaAudioEventManager::Update(plTime delta, plArrayPtr<const plVec3> li
 {
   {
     PL_LOCK(m_Mutex);
+
+    if (m_bDeviceRecovery)
+      return;
 
     m_Now += delta;
 

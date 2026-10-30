@@ -208,6 +208,9 @@ void plMiniAudioSingleton::Shutdown()
     }
 
     m_bReinitFailed = false;
+    m_bDeviceRecovery = false;
+    m_uiRecoveryFrame = 0;
+    m_uiRecoverySampleRate = 0;
     m_pData->m_SoundGroups.Clear();
 
     if (m_bCVarHandlersRegistered)
@@ -469,6 +472,7 @@ plResult plMiniAudioSingleton::InitEngine()
 
   m_bDeviceChangeRequested = false;
   m_bDeviceRerouted = false;
+  m_bDeviceLost = false;
   m_pData->m_fHeadlessFrameRemainder = 0.0;
 
   plString sRequested;
@@ -502,6 +506,8 @@ plResult plMiniAudioSingleton::InitEngine()
       plLog::Warning("PlasmaAudio: output device '{0}' not found, using the system default.", sRequested);
     }
   }
+
+  m_bFallbackDevice = !sRequested.IsEmpty() && !bDeviceFound;
 
   // miniaudio follows the system's default device only when it opened the default without a device id; naming the
   // current default by its id keeps the output on it
@@ -537,6 +543,14 @@ plResult plMiniAudioSingleton::InitEngine()
   // the output settings; 0 = the device's channel count, sample rate and period
   cfg.channels = plAudioSpeakerLayout::GetChannelCount(static_cast<plAudioSpeakerLayout::Enum>(plMath::Clamp<int>(cvar_PlasmaAudioSpeakers, 0, plAudioSpeakerLayout::Surround71)));
   cfg.sampleRate = static_cast<ma_uint32>(plMath::Clamp<int>(cvar_PlasmaAudioSampleRate, 0, 192000));
+  // Keep event and music frame units stable while their graph is rebuilt. miniaudio converts to the device rate.
+  // Changing the mixer rate itself requires a full restart; ordinary output changes preserve all timelines.
+  if (m_bDeviceRecovery && m_uiRecoverySampleRate != 0)
+  {
+    if (cfg.sampleRate != 0 && cfg.sampleRate != m_uiRecoverySampleRate)
+      plLog::Warning("PlasmaAudio: changing the mixing sample rate takes effect after restarting audio; preserving {} Hz during device recovery.", m_uiRecoverySampleRate);
+    cfg.sampleRate = m_uiRecoverySampleRate;
+  }
   cfg.periodSizeInMilliseconds = static_cast<ma_uint32>(plMath::Clamp<int>(cvar_PlasmaAudioPeriodMs, 0, 100));
 
   // volume changes (automation, snapshot fades, bus faders) are ramped over this many frames instead of stepping once
@@ -549,24 +563,37 @@ plResult plMiniAudioSingleton::InitEngine()
   m_fDspLoad.store(0.0f, std::memory_order_relaxed);
   m_fLastMixMicroseconds.store(0.0f, std::memory_order_relaxed);
 
-  bool bDeviceEngine = ma_engine_init(&cfg, &m_pData->m_Engine) == MA_SUCCESS;
-
-  if (bDeviceEngine)
+  const auto TryDevice = [&]() -> bool
   {
+    if (ma_engine_init(&cfg, &m_pData->m_Engine) != MA_SUCCESS)
+      return false;
+
     // the device is not running yet, so its data callback can be swapped for the timing wrapper
     ma_device* pDevice = ma_engine_get_device(&m_pData->m_Engine);
     m_OriginalDataCallback = pDevice->onData;
     pDevice->onData = &plMiniAudioSingleton::TimedDataCallback;
+    ma_engine_set_volume(&m_pData->m_Engine, cvar_MiniAudioMute ? 0.0f : cvar_MiniAudioMasterVolume * m_fSuspendGain);
 
-    if (ma_engine_start(&m_pData->m_Engine) != MA_SUCCESS)
+    if (!m_bDeviceRecovery && !cvar_MiniAudioPause && !m_bSuspendStopped && ma_engine_start(&m_pData->m_Engine) != MA_SUCCESS)
     {
       plLog::Warning("PlasmaAudio: the output device '{0}' could not be started.", pDevice->playback.name);
       m_bDeviceStopExpected = true;
       ma_engine_uninit(&m_pData->m_Engine);
       m_bDeviceStopExpected = false;
       m_OriginalDataCallback = nullptr;
-      bDeviceEngine = false;
+      return false;
     }
+    return true;
+  };
+
+  bool bDeviceEngine = TryDevice();
+  if (!bDeviceEngine && bDeviceFound && !sRequested.IsEmpty())
+  {
+    // An enumerated device can already be invalidated. Keep required playback on the default until it returns.
+    plLog::Warning("PlasmaAudio: selected output device '{0}' is unavailable, trying the system default.", sRequested);
+    cfg.pPlaybackDeviceID = nullptr;
+    m_bFallbackDevice = true;
+    bDeviceEngine = TryDevice();
   }
 
   if (bDeviceEngine)
@@ -594,8 +621,17 @@ plResult plMiniAudioSingleton::InitEngine()
     plLog::Warning("PlasmaAudio: no playback device available, audio output is silent.");
   }
 
-  m_bDeviceLost = false;
-  m_bEnginePaused = false;
+  m_bEnginePaused = m_bDeviceRecovery || cvar_MiniAudioPause || m_bSuspendStopped;
+  m_LastReinitCheck = plTime::Now();
+  m_bDeviceStopExpected = m_bEnginePaused;
+  ma_engine_set_volume(&m_pData->m_Engine, cvar_MiniAudioMute ? 0.0f : cvar_MiniAudioMasterVolume * m_fSuspendGain);
+  if (m_bDeviceRecovery && m_uiRecoverySampleRate != 0)
+  {
+    const ma_uint32 uiRate = ma_engine_get_sample_rate(&m_pData->m_Engine);
+    const ma_uint64 uiFrame = m_uiRecoveryFrame / m_uiRecoverySampleRate * uiRate +
+                             (m_uiRecoveryFrame % m_uiRecoverySampleRate) * uiRate / m_uiRecoverySampleRate;
+    ma_engine_set_time_in_pcm_frames(&m_pData->m_Engine, uiFrame);
+  }
 
   if (plMiniAudioDsp::InitClockNode(&m_pData->m_Engine, &m_pData->m_ClockNode).Failed())
   {
@@ -633,6 +669,15 @@ void plMiniAudioSingleton::UninitEngine()
 
 bool plMiniAudioSingleton::IsDeviceReinitRequired()
 {
+  // The engine was rebuilt but one of its voice chains could not be restored. Keep it stopped and retry.
+  if (m_bDeviceRecovery && m_bInitialized)
+  {
+    const plTime now = plTime::Now();
+    if (now - m_LastReinitCheck < plTime::MakeFromSeconds(s_fDeviceRetryIntervalSeconds))
+      return false;
+    m_LastReinitCheck = now;
+    return true;
+  }
   if (!m_bInitialized)
   {
     // a failed re-init left no engine at all: try again now and then
@@ -650,10 +695,10 @@ bool plMiniAudioSingleton::IsDeviceReinitRequired()
   if (m_bDeviceChangeRequested)
     return true;
 
-  if (!m_bDeviceLost && !m_bHeadless)
+  if (!m_bDeviceLost && !m_bHeadless && !m_bFallbackDevice)
     return false;
 
-  if (!m_bHeadless)
+  if (m_bDeviceLost && !m_bHeadless)
     return true;
 
   // without a device: re-init only once the context reports a playback device again
@@ -667,7 +712,42 @@ bool plMiniAudioSingleton::IsDeviceReinitRequired()
   EnsureComOnThread();
   ma_device_info* pPlaybackInfos = nullptr;
   ma_uint32 uiPlaybackCount = 0;
-  return ma_context_get_devices(&m_pData->m_Context, &pPlaybackInfos, &uiPlaybackCount, nullptr, nullptr) == MA_SUCCESS && uiPlaybackCount > 0;
+  if (ma_context_get_devices(&m_pData->m_Context, &pPlaybackInfos, &uiPlaybackCount, nullptr, nullptr) != MA_SUCCESS)
+    return false;
+
+  if (m_bHeadless)
+    return uiPlaybackCount > 0;
+
+  PL_LOCK(m_pData->m_OutputDeviceMutex);
+  for (ma_uint32 i = 0; i < uiPlaybackCount; ++i)
+  {
+    if (plStringView(pPlaybackInfos[i].name).IsEqual_NoCase(m_pData->m_sRequestedOutputDevice))
+      return true;
+  }
+  return false;
+}
+
+void plMiniAudioSingleton::BeginDeviceRecovery()
+{
+  if (m_bDeviceRecovery)
+    return;
+
+  m_bDeviceRecovery = true;
+  if (m_bInitialized)
+  {
+    m_bDeviceStopExpected = true;
+    if (!m_bHeadless)
+      ma_engine_stop(&m_pData->m_Engine);
+    m_uiRecoveryFrame = ma_engine_get_time_in_pcm_frames(&m_pData->m_Engine);
+    m_uiRecoverySampleRate = ma_engine_get_sample_rate(&m_pData->m_Engine);
+    m_bEnginePaused = true;
+  }
+}
+
+void plMiniAudioSingleton::EndDeviceRecovery()
+{
+  m_bDeviceRecovery = false;
+  UpdateSound(plTime::MakeZero());
 }
 
 plResult plMiniAudioSingleton::ReinitDevice()
@@ -788,7 +868,7 @@ void plMiniAudioSingleton::UpdateSound(plTime delta)
   }
 
   // a pause and a suspend both stop the device
-  if (cvar_MiniAudioPause || m_bSuspendStopped)
+  if (cvar_MiniAudioPause || m_bSuspendStopped || m_bDeviceRecovery)
   {
     if (!m_bEnginePaused && !m_bHeadless)
     {

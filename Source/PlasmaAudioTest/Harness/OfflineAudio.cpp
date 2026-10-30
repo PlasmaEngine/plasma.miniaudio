@@ -42,7 +42,9 @@ void plOfflineAudioEngine::Render(ma_uint32 uiFrames, plDynamicArray<float>* pCh
   m_Scratch.SetCountUninitialized(uiFrames * Channels);
 
   ma_uint64 uiRead = 0;
-  ma_engine_read_pcm_frames(&m_Engine, m_Scratch.GetData(), uiFrames, &uiRead);
+  const ma_result result = ma_engine_read_pcm_frames(&m_Engine, m_Scratch.GetData(), uiFrames, &uiRead);
+  PL_TEST_INT(result, MA_SUCCESS);
+  PL_TEST_INT(uiRead, uiFrames);
 
   if (pChannel0 != nullptr)
   {

@@ -254,6 +254,12 @@ public:
   /// are attached again by the next Update.
   void ReattachToBusGraph();
 
+  /// \brief The engine must be stopped before detaching. Keeps instances, native cursors, parameters, fades and
+  /// scheduling state while releasing nodes tied to the old engine. Restore on a stopped engine with the same
+  /// sample rate and clock before resuming output; failure retains the state for another attempt.
+  void DetachForDeviceRecovery();
+  plResult RestoreAfterDeviceRecovery(ma_engine* pEngine);
+
   /// \brief The bus graph the voices attach to; null without one.
   PL_NODISCARD const plMiniAudioBusGraph* GetBusGraph() const { return m_pBusGraph; }
   PL_NODISCARD plMiniAudioBusGraph* GetBusGraph() { return m_pBusGraph; }
@@ -402,6 +408,12 @@ private:
     bool m_bTeardownPending = false;
     bool m_bNativeLoop = false;           ///< inner source loops by itself (gapless loop or loop region)
     bool m_bLoopPoints = false;           ///< the native loop repeats [m_uiLoopStart, m_uiLoopEnd) (clip loop points or loop region) instead of the whole source
+    ma_fader m_RecoveryFader = {};
+    ma_uint64 m_uiRecoveryCursor = 0;
+    ma_uint64 m_uiRecoveryStopFrame = UnknownFrame;
+    ma_uint64 m_uiRecoveryStartFadeFrames = 0;
+    float m_fRecoveryStartFadeVolume = 1.0f;
+    bool m_bRecoveryFadeApplied = false;
   };
 
   enum class BuildResult : plUInt8
@@ -673,6 +685,11 @@ public:
   void StopAllOnEntity(const plPlasmaAudioEntityData* pEntity, bool bImmediate);
   void StopAll(bool bImmediate);
 
+  /// \brief Freezes updates and releases the native voice chains before the stopped engine is replaced.
+  /// Pending activations and live event state remain bound. Restore requires the same mixing rate and frame clock.
+  void DetachForDeviceRecovery();
+  plResult RestoreAfterDeviceRecovery(ma_engine* pEngine);
+
   /// \brief Fills the emitters, listeners and voice counts the Audio view mode draws.
   void GetDebugSnapshot(plAudioDebugSnapshot& out_snapshot) const;
 
@@ -850,5 +867,6 @@ private:
   plRandom m_Rng;
   plTime m_Now;
   bool m_bRngInitialized = false;
+  bool m_bDeviceRecovery = false;
   plEventSubscriptionID m_ResourceEventSubscription = 0;
 };

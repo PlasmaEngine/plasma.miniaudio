@@ -336,6 +336,188 @@ PL_CREATE_SIMPLE_TEST(Scheduler, ScattererGap)
 
 namespace
 {
+  struct SchedulerBudget
+  {
+    SchedulerBudget() { plAudioVoiceManager::SetBudgets(64, 64); }
+    ~SchedulerBudget() { plAudioVoiceManager::SetBudgets(-1, -1); }
+  };
+
+  // Every update remains inside the configured 960-frame look-ahead. Varying the block size prevents the
+  // fixture's starts and ends from accidentally passing because they coincide with an ATL update.
+  void RenderIrregular(plOfflineAudioEngine& engine, plPlasmaAudioEventManager& manager, plUInt32 uiFrames, plDynamicArray<float>& output)
+  {
+    constexpr plUInt32 blocks[] = {17, 743, 251, 959, 61, 480};
+    for (plUInt32 i = 0, uiRendered = 0; uiRendered < uiFrames; ++i)
+    {
+      const plUInt32 uiBlock = plMath::Min(blocks[i % PL_ARRAY_SIZE(blocks)], uiFrames - uiRendered);
+      engine.Render(uiBlock, &output);
+      manager.Update(plTime::MakeFromSeconds(static_cast<double>(uiBlock) / plOfflineAudioEngine::SampleRate), plVec3::MakeZero());
+      uiRendered += uiBlock;
+    }
+  }
+
+  void AddSchedulerLoad(plOfflineAudioEngine& engine, plPlasmaAudioEventManager& manager, plPlasmaAudioEventData (&events)[32], plStringView sId)
+  {
+    // Silent PCM still runs 32 real decoder/filter/voice chains without masking the measured event's onsets.
+    // The test's explicit 64-voice budget keeps all of them real throughout the render.
+    plAudioEventResourceDescriptor res = plAudioTestUtils::MakeSingleInstrumentEvent(plAudioTestUtils::MakeDc(997, 0.0f));
+    res.m_Desc.m_uiMaxInstances = 32;
+    res.m_Desc.m_Instruments[0].m_bLoop = true;
+    const auto hEvent = plAudioTestUtils::CreateEventResource(sId, std::move(res));
+    for (auto& event : events)
+    {
+      event.m_bLooping = true;
+      PL_TEST_RESULT(manager.ActivateEvent(sId, nullptr, &event, engine.GetBusGraph(), engine.GetEngine()));
+    }
+    PL_TEST_INT(manager.GetRealVoiceCount(), 32);
+  }
+
+  plDynamicArray<plUInt32> RenderLoadedRetriggers(plStringView sId, plUInt32 uiDelay, bool bLoad)
+  {
+    plOfflineAudioEngine engine;
+    if (!PL_TEST_BOOL(engine.IsValid()))
+      return {};
+
+    engine.Render(1000, nullptr);
+    plPlasmaAudioEventData loadEvents[32];
+    plPlasmaAudioEventData event;
+    plPlasmaAudioEventManager manager;
+    if (bLoad)
+    {
+      plStringBuilder sLoadId(sId, ":Load");
+      AddSchedulerLoad(engine, manager, loadEvents, sLoadId);
+    }
+
+    plAudioEventResourceDescriptor res = plAudioTestUtils::MakeSingleInstrumentEvent(plAudioTestUtils::MakeDc(4100, 0.5f));
+    auto& instrument = res.m_Desc.m_Instruments[0];
+    instrument.m_StartDelay = plTime::MakeFromSeconds(static_cast<double>(uiDelay) / plOfflineAudioEngine::SampleRate);
+    instrument.m_bLoop = true;
+    instrument.m_MinRetriggerDelay = plTime::MakeFromMilliseconds(50);
+    instrument.m_MaxRetriggerDelay = instrument.m_MinRetriggerDelay;
+    const auto hEvent = plAudioTestUtils::CreateEventResource(sId, std::move(res));
+    event.m_bLooping = true;
+    PL_TEST_RESULT(manager.ActivateEvent(sId, nullptr, &event, engine.GetBusGraph(), engine.GetEngine()));
+
+    plDynamicArray<float> output;
+    RenderIrregular(engine, manager, uiDelay + 5 * (4100 + 2400), output);
+    if (bLoad)
+      PL_TEST_BOOL(manager.GetRealVoiceCount() >= 32);
+    return plAudioTestUtils::FindOnsets(output, 1e-3f, 256);
+  }
+} // namespace
+
+PL_CREATE_SIMPLE_TEST(Scheduler, ExactFramesUnderLoad)
+{
+  SchedulerBudget budget;
+  const auto reference = RenderLoadedRetriggers("PlasmaAudioTest:TimingReference", 0, false);
+  const auto delayed = RenderLoadedRetriggers("PlasmaAudioTest:TimingLoaded", 4807, true);
+  if (!PL_TEST_INT(reference.GetCount(), 5) || !PL_TEST_INT(delayed.GetCount(), 5))
+    return;
+
+  for (plUInt32 i = 0; i < 5; ++i)
+  {
+    // Subtract only the fixed graph latency measured in the zero-delay control. No frame tolerance.
+    PL_TEST_INT(delayed[i] - reference[0], 4807 + i * 6500);
+    PL_TEST_INT(reference[i] - reference[0], i * 6500);
+  }
+  Report("ExactFramesUnderLoad: 32 real background voices, irregular 17..959 frame updates, 4807-frame start and 6500-frame retrigger period; required error 0 frames.");
+}
+
+PL_CREATE_SIMPLE_TEST(Scheduler, LoopSeamMinus80dBFS)
+{
+  SchedulerBudget budget;
+  constexpr plUInt32 uiCycleFrames = 4100;
+  constexpr plUInt32 uiLoops = 6;
+  constexpr plUInt32 uiGuard = 256;
+  constexpr float fLimit = 0.0001f; // 20 * log10(0.0001) = -80 dBFS; absolute, not relative to an inner step
+
+  // A separate acceptance fixture; the existing cosine seam regression above stays unchanged. A raised-cosine
+  // pulse with 256 zero frames at each end has exactly equal endpoints and zero slope. The guard lets the voice
+  // filters decay before a scheduled voice is replaced. Compare to the same six cycles in ONE continuous voice.
+  auto cycle = plAudioTestUtils::MakeDc(uiCycleFrames, 0.0f);
+  for (plUInt32 i = uiGuard; i < uiCycleFrames - uiGuard; ++i)
+  {
+    const double phase = 2.0 * plMath::Pi<double>() * (i - uiGuard) / (uiCycleFrames - 2 * uiGuard - 1);
+    cycle[i] = 0.25f * (1.0f - static_cast<float>(plMath::Cos(plAngle::MakeFromRadian(phase))));
+  }
+  PL_TEST_FLOAT(cycle[0], cycle.PeekBack(), 0.0f);
+
+  plDynamicArray<float> unrolled;
+  for (plUInt32 i = 0; i < uiLoops; ++i)
+    unrolled.PushBackRange(cycle);
+
+  plDynamicArray<float> reference;
+  {
+    plOfflineAudioEngine engine;
+    if (!PL_TEST_BOOL(engine.IsValid()))
+      return;
+    const auto hEvent = plAudioTestUtils::CreateEventResource("PlasmaAudioTest:SeamReference", plAudioTestUtils::MakeSingleInstrumentEvent(unrolled));
+    plPlasmaAudioEventData event;
+    plPlasmaAudioEventManager manager;
+    PL_TEST_RESULT(manager.ActivateEvent("PlasmaAudioTest:SeamReference", nullptr, &event, engine.GetBusGraph(), engine.GetEngine()));
+    RenderIrregular(engine, manager, unrolled.GetCount(), reference);
+  }
+
+  const char* modes[] = {"Region", "Native", "Scheduled"};
+  for (plUInt32 mode = 0; mode < PL_ARRAY_SIZE(modes); ++mode)
+  {
+    plOfflineAudioEngine engine;
+    if (!PL_TEST_BOOL(engine.IsValid()))
+      return;
+    plPlasmaAudioEventData loadEvents[32];
+    plPlasmaAudioEventData event;
+    plPlasmaAudioEventManager manager;
+    plStringBuilder id("PlasmaAudioTest:StrictSeam", modes[mode]);
+    plStringBuilder loadId(id, ":Load");
+    AddSchedulerLoad(engine, manager, loadEvents, loadId);
+
+    auto res = plAudioTestUtils::MakeSingleInstrumentEvent(cycle);
+    if (mode == 0)
+    {
+      res.m_Desc.m_bLoopRegion = true;
+      res.m_Desc.m_LoopEnd = plTime::MakeFromSeconds(static_cast<double>(uiCycleFrames) / plOfflineAudioEngine::SampleRate);
+    }
+    else
+    {
+      res.m_Desc.m_Instruments[0].m_bLoop = true;
+      if (mode == 2)
+      {
+        const auto entry = res.m_Desc.m_Instruments[0].m_Playlist[0];
+        res.m_Desc.m_Instruments[0].m_Playlist.PushBack(entry);
+      }
+    }
+    const auto hEvent = plAudioTestUtils::CreateEventResource(id, std::move(res));
+    event.m_bLooping = true;
+    PL_TEST_RESULT(manager.ActivateEvent(id, nullptr, &event, engine.GetBusGraph(), engine.GetEngine()));
+    plDynamicArray<float> output;
+    RenderIrregular(engine, manager, unrolled.GetCount(), output);
+    PL_TEST_BOOL(manager.GetRealVoiceCount() >= 33);
+    if (!PL_TEST_INT(output.GetCount(), reference.GetCount()))
+      continue;
+
+    float maxError = 0.0f;
+    float maxSeam = 0.0f;
+    float peak = 0.0f;
+    for (plUInt32 i = 0; i < output.GetCount(); ++i)
+    {
+      PL_TEST_BOOL(plMath::IsFinite(output[i]));
+      maxError = plMath::Max(maxError, plMath::Abs(output[i] - reference[i]));
+      peak = plMath::Max(peak, plMath::Abs(output[i]));
+    }
+    for (plUInt32 i = 1; i < uiLoops; ++i)
+      maxSeam = plMath::Max(maxSeam, plAudioTestUtils::MaxStep(output, i * uiCycleFrames - 64, i * uiCycleFrames + 64));
+
+    PL_TEST_BOOL_MSG(peak > 0.4f, "%s must render the pulse, not silence", modes[mode]);
+    PL_TEST_BOOL_MSG(maxError <= fLimit, "%s: max absolute residual %g exceeds -80 dBFS (%g)", modes[mode], maxError, fLimit);
+    PL_TEST_BOOL_MSG(maxSeam <= fLimit, "%s: max seam step %g exceeds -80 dBFS (%g)", modes[mode], maxSeam, fLimit);
+    plStringBuilder message;
+    message.SetFormat("LoopSeamMinus80dBFS/{}: max residual {}, max seam step {}, limit {}", modes[mode], maxError, maxSeam, fLimit);
+    Report(message);
+  }
+}
+
+namespace
+{
   /// \brief An engine set up like plMiniAudioSingleton's fallback without a playback device: no device, no mixer,
   /// only the clock node on the endpoint, advanced through plMiniAudioDsp::RenderWithoutDevice.
   class HeadlessEngine

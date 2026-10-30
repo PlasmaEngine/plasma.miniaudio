@@ -4,8 +4,8 @@ PluginInfo
 	string %Category{"Audio"}
 	string %Icon{"PlasmaAudioIcon.png"}
 	string %Banner{"PlasmaAudioBanner.png"}
-	string %MinEngineVersion{"0.7.0"}
-	string %MaxEngineVersion{"0.7.0"}
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
 	string %Description{"PlasmaAudio: event-based audio with mixer, snapshots and DSP. Built on miniaudio, compiled into the plugin."}
 	string %EditorPlugins{"plEditorPluginPlasmaAudio"}
 	string %EditorEnginePlugins{"plEnginePluginPlasmaAudio"}

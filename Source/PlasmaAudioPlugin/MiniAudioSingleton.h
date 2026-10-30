@@ -26,6 +26,7 @@ struct plCVarEvent;
 /// backend recreates the context too), PlasmaAudio.Speakers, PlasmaAudio.SampleRate, PlasmaAudio.PeriodMs,
 /// PlasmaAudio.FollowDefaultDevice, and the suspend cvars PlasmaAudio.SuspendPolicy and PlasmaAudio.SuspendFadeMs.
 /// Changing an output cvar re-initializes the device like a device change.
+/// The mixing sample rate remains stable during recovery; a changed SampleRate takes effect after a full restart.
 ///
 /// On Windows, every entry point that creates or queries the context, engine or device first initializes COM on the
 /// calling thread (once per thread, multithreaded apartment unless the thread already has a single-threaded one) and
@@ -64,6 +65,11 @@ public:
   /// Without a usable device the engine is recreated without output. Fails only when not even that engine
   /// can be created; the engine is then gone for good and GetEngine() returns nullptr.
   plResult ReinitDevice();
+
+  /// \brief Stops mixing while the middleware saves voices and rebuilds the graph. Retains the engine clock and
+  /// prevents ReinitDevice() from starting output before the voices and mixer are restored.
+  void BeginDeviceRecovery();
+  void EndDeviceRecovery();
 
   /// \brief Names of the playback devices the context currently reports.
   void GetPlaybackDeviceNames(plDynamicArray<plString>& out_names) const;
@@ -209,6 +215,8 @@ private:
   bool m_bListenerOverrideMode = false;
   bool m_bEnginePaused = false;
   bool m_bHeadless = false; ///< engine runs without a playback device
+  bool m_bFallbackDevice = false; ///< selected device is unavailable; retry it while playing on the default
+  bool m_bDeviceRecovery = false;
   bool m_bReinitFailed = false; ///< ReinitDevice() could not create any engine; retried periodically
   bool m_bCVarHandlersRegistered = false;
   bool m_bSuspendStopped = false; ///< a suspend stopped the device
@@ -223,6 +231,8 @@ private:
   std::atomic<bool> m_bDeviceChangeRequested = false;
   std::atomic<bool> m_bContextChangeRequested = false; ///< PlasmaAudio.Backend changed
   plTime m_LastReinitCheck;
+  ma_uint64 m_uiRecoveryFrame = 0;
+  ma_uint32 m_uiRecoverySampleRate = 0;
 
   // written by the device thread (or UpdateSound without a device), read anywhere
   std::atomic<float> m_fDspLoad = 0.0f;

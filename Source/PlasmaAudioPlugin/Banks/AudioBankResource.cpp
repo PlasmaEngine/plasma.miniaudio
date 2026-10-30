@@ -1,5 +1,6 @@
 #include <PlasmaAudioPlugin/PlasmaAudioPluginPCH.h>
 
+#include <Foundation/Containers/HashSet.h>
 #include <Foundation/IO/FileSystem/FileReader.h>
 #include <Foundation/IO/FileSystem/FileSystem.h>
 #include <Foundation/IO/MemoryStream.h>
@@ -11,6 +12,50 @@ static constexpr plTypeVersion kAudioBankDescVersion = 2;
 
 namespace
 {
+  // A corrupt count or string length must not allocate an unbounded amount of memory.
+  constexpr plUInt32 MaxBankItems = 65536;
+  constexpr plUInt32 MaxResourceIdBytes = 4096;
+
+  plResult ReadBankAssetHeader(plStreamReader& stream, plAssetFileHeader& out_header)
+  {
+    // plAssetFileHeader::Read asserts on malformed input. Banks are external files: validate the current
+    // asset-header format (v3: tag, hash, asset version, generator) with checked reads instead.
+    const plUInt8 expectedTag[] = {'p', 'l', 'A', 's', 's', 'e', 't', 3};
+    plUInt8 tag[PL_ARRAY_SIZE(expectedTag)];
+    if (stream.ReadBytes(tag, sizeof(tag)) != sizeof(tag) || !plMemoryUtils::IsEqual(tag, expectedTag, PL_ARRAY_SIZE(tag)))
+      return PL_FAILURE;
+
+    plUInt64 uiHash = 0;
+    plUInt16 uiVersion = 0;
+    plString sGenerator;
+    PL_SUCCEED_OR_RETURN(stream.ReadQWordValue(&uiHash));
+    PL_SUCCEED_OR_RETURN(stream.ReadWordValue(&uiVersion));
+    PL_SUCCEED_OR_RETURN(stream.ReadString(sGenerator, MaxResourceIdBytes));
+    if (uiHash == plMath::MaxValue<plUInt64>())
+      return PL_FAILURE;
+
+    out_header.SetFileHashAndVersion(uiHash, uiVersion);
+    out_header.SetGenerator(sGenerator);
+    return PL_SUCCESS;
+  }
+
+  plResult ReadResourceList(plStreamReader& stream, plDynamicArray<plString>& out_resources)
+  {
+    plUInt32 uiCount = 0;
+    PL_SUCCEED_OR_RETURN(stream.ReadDWordValue(&uiCount));
+    if (uiCount > MaxBankItems)
+      return PL_FAILURE;
+
+    out_resources.SetCount(uiCount);
+    for (plString& sResource : out_resources)
+    {
+      PL_SUCCEED_OR_RETURN(stream.ReadString(sResource, MaxResourceIdBytes));
+      if (sResource.IsEmpty())
+        return PL_FAILURE;
+    }
+    return PL_SUCCESS;
+  }
+
   /// Forwards reads to the file and counts the bytes, so the loader knows where the packed data starts.
   class CountingReader final : public plStreamReader
   {
@@ -112,41 +157,68 @@ plResult plAudioBankDesc::Save(plStreamWriter& inout_stream) const
 
 plResult plAudioBankDesc::Load(plStreamReader& inout_stream)
 {
-  const plTypeVersion uiVersion = inout_stream.ReadVersion(kAudioBankDescVersion);
+  plTypeVersion uiVersion = 0;
+  PL_SUCCEED_OR_RETURN(inout_stream.ReadWordValue(&uiVersion));
+  if (uiVersion == 0 || uiVersion > kAudioBankDescVersion)
+    return PL_FAILURE;
 
-  plUInt32 uiCount = 0;
+  plAudioBankDesc loaded;
+  PL_SUCCEED_OR_RETURN(ReadResourceList(inout_stream, loaded.m_Events));
+  PL_SUCCEED_OR_RETURN(ReadResourceList(inout_stream, loaded.m_Clips));
 
-  inout_stream >> uiCount;
-  m_Events.SetCount(uiCount);
-  for (plString& sEvent : m_Events)
-    inout_stream >> sEvent;
-
-  inout_stream >> uiCount;
-  m_Clips.SetCount(uiCount);
-  for (plString& sClip : m_Clips)
-    inout_stream >> sClip;
-
-  m_Budget = plAudioMemoryBudget();
-  m_Packed.Clear();
-
-  if (uiVersion < 2)
-    return PL_SUCCESS;
-
-  inout_stream >> m_Budget.m_uiDecodedBytes;
-  inout_stream >> m_Budget.m_uiCompressedBytes;
-  inout_stream >> m_Budget.m_uiStreamingBytes;
-  inout_stream >> m_Budget.m_uiTotalBytes;
-
-  inout_stream >> uiCount;
-  m_Packed.SetCount(uiCount);
-  for (plAudioBankPackedEntry& entry : m_Packed)
+  if (uiVersion >= 2)
   {
-    plUInt8 uiClip = 0;
-    inout_stream >> entry.m_sResourceId;
-    inout_stream >> uiClip;
-    inout_stream >> entry.m_uiOffset;
-    inout_stream >> entry.m_uiBytes;
-    entry.m_bClip = uiClip != 0;
+    PL_SUCCEED_OR_RETURN(inout_stream.ReadQWordValue(&loaded.m_Budget.m_uiDecodedBytes));
+    PL_SUCCEED_OR_RETURN(inout_stream.ReadQWordValue(&loaded.m_Budget.m_uiCompressedBytes));
+    PL_SUCCEED_OR_RETURN(inout_stream.ReadQWordValue(&loaded.m_Budget.m_uiStreamingBytes));
+    PL_SUCCEED_OR_RETURN(inout_stream.ReadQWordValue(&loaded.m_Budget.m_uiTotalBytes));
+
+    plUInt32 uiCount = 0;
+    PL_SUCCEED_OR_RETURN(inout_stream.ReadDWordValue(&uiCount));
+    if (uiCount > MaxBankItems)
+      return PL_FAILURE;
+
+    loaded.m_Packed.SetCount(uiCount);
+    for (plAudioBankPackedEntry& entry : loaded.m_Packed)
+    {
+      plUInt8 uiClip = 0;
+      PL_SUCCEED_OR_RETURN(inout_stream.ReadString(entry.m_sResourceId, MaxResourceIdBytes));
+      if (inout_stream.ReadBytes(&uiClip, sizeof(uiClip)) != sizeof(uiClip) || uiClip > 1)
+        return PL_FAILURE;
+      PL_SUCCEED_OR_RETURN(inout_stream.ReadQWordValue(&entry.m_uiOffset));
+      PL_SUCCEED_OR_RETURN(inout_stream.ReadQWordValue(&entry.m_uiBytes));
+      entry.m_bClip = uiClip != 0;
+    }
+  }
+
+  PL_SUCCEED_OR_RETURN(loaded.Validate());
+  *this = std::move(loaded);
+  return PL_SUCCESS;
+}
+
+plResult plAudioBankDesc::Validate() const
+{
+  if (m_Events.GetCount() > MaxBankItems || m_Clips.GetCount() > MaxBankItems || m_Packed.GetCount() > MaxBankItems)
+    return PL_FAILURE;
+
+  for (const plString& sId : m_Events)
+  {
+    if (sId.IsEmpty() || sId.GetElementCount() > MaxResourceIdBytes)
+      return PL_FAILURE;
+  }
+  for (const plString& sId : m_Clips)
+  {
+    if (sId.IsEmpty() || sId.GetElementCount() > MaxResourceIdBytes)
+      return PL_FAILURE;
+  }
+
+  plHashSet<plString> packedIds;
+  for (const plAudioBankPackedEntry& entry : m_Packed)
+  {
+    const auto& resources = entry.m_bClip ? m_Clips : m_Events;
+    if (!resources.Contains(entry.m_sResourceId) || packedIds.Insert(entry.m_sResourceId) || entry.m_uiBytes == 0 ||
+        entry.m_uiOffset > plMath::MaxValue<plUInt64>() - entry.m_uiBytes)
+      return PL_FAILURE;
   }
 
   return PL_SUCCESS;
@@ -190,11 +262,11 @@ plResourceLoadDesc plAudioBankResource::UpdateContent(plStreamReader* pStream)
     return res;
 
   // see plAudioBankResourceLoader
-  (*pStream) >> m_sFilePath;
-  (*pStream) >> m_uiPackedDataOffset;
+  if (pStream->ReadString(m_sFilePath, MaxResourceIdBytes).Failed() || pStream->ReadQWordValue(&m_uiPackedDataOffset).Failed())
+    return res;
 
   plAssetFileHeader assetHeader;
-  if (assetHeader.Read(*pStream).Failed())
+  if (ReadBankAssetHeader(*pStream, assetHeader).Failed())
     return res;
 
   m_Desc = plAudioBankDesc();
@@ -223,7 +295,8 @@ PL_RESOURCE_IMPLEMENT_CREATEABLE(plAudioBankResource, plAudioBankResourceDescrip
   plResourceLoadDesc res;
   res.m_uiQualityLevelsDiscardable = 0;
   res.m_uiQualityLevelsLoadable = 0;
-  res.m_State = plResourceState::Loaded;
+  // A descriptor-created resource has no file from which packed entries could be read.
+  res.m_State = m_Desc.Validate().Succeeded() && m_Desc.m_Packed.IsEmpty() ? plResourceState::Loaded : plResourceState::LoadedResourceMissing;
   return res;
 }
 
@@ -255,8 +328,18 @@ plResourceLoadData plAudioBankResourceLoader::OpenDataStream(const plResource* p
 
   plAssetFileHeader assetHeader;
   plAudioBankDesc desc;
-  if (assetHeader.Read(reader).Failed() || desc.Load(reader).Failed())
+  if (ReadBankAssetHeader(reader, assetHeader).Failed() || desc.Load(reader).Failed())
     return res;
+
+  const plUInt64 uiFileBytes = file.GetFileSize();
+  if (reader.m_uiPosition > uiFileBytes)
+    return res;
+  const plUInt64 uiPackedBytes = uiFileBytes - reader.m_uiPosition;
+  for (const plAudioBankPackedEntry& entry : desc.m_Packed)
+  {
+    if (entry.m_uiOffset > uiPackedBytes || entry.m_uiBytes > uiPackedBytes - entry.m_uiOffset)
+      return res;
+  }
 
   BankLoadData* pData = PL_DEFAULT_NEW(BankLoadData);
   {

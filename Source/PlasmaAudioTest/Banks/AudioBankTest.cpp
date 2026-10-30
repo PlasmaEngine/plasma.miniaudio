@@ -15,6 +15,7 @@
 #include <PlasmaAudioPlugin/Clips/AudioClipVoiceSource.h>
 #include <PlasmaAudioPlugin/Events/AudioEventResource.h>
 #include <PlasmaAudioPlugin/MiniAudioMiddleware.h>
+#include <TestFramework/Utilities/TestLogInterface.h>
 
 #include <cmath>
 
@@ -117,18 +118,22 @@ namespace
     return false;
   }
 
-  /// Updates the middleware until the bank's content is requested, for at most five seconds.
-  bool WaitForBankContent(plPlasmaAudioMiddleware& ref_middleware, plAudioSystemDataID uiBankId)
+  bool WaitForBankFailed(plPlasmaAudioMiddleware& ref_middleware, plAudioSystemDataID uiBankId)
   {
     for (plUInt32 i = 0; i < 5000; ++i)
     {
       ref_middleware.Update(plTime::MakeFromMilliseconds(1));
-      if (ref_middleware.IsBankContentRequested(uiBankId))
-        return true;
+      if (ref_middleware.IsBankFailed(uiBankId))
+      {
+        // A resource load may finish between Update and the query. Run the transition which records the failure.
+        ref_middleware.Update(plTime::MakeZero());
+        return !ref_middleware.IsBankReady(uiBankId);
+      }
+      if (ref_middleware.IsBankReady(uiBankId))
+        return false;
 
       plThreadUtils::Sleep(plTime::MakeFromMilliseconds(1));
     }
-
     return false;
   }
 } // namespace
@@ -191,6 +196,80 @@ PL_CREATE_SIMPLE_TEST(AudioBank, Desc)
     PL_TEST_BOOL(loaded.m_Packed.IsEmpty());
   }
 
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Every truncated descriptor is rejected")
+  {
+    plDynamicArray<plUInt8> bytes;
+    plMemoryStreamContainerWrapperStorage<plDynamicArray<plUInt8>> storage(&bytes);
+    plMemoryStreamWriter writer(&storage);
+    PL_TEST_RESULT(desc.Save(writer));
+    for (plUInt32 uiBytes = 0; uiBytes < bytes.GetCount(); ++uiBytes)
+    {
+      plRawMemoryStreamReader reader(bytes.GetData(), uiBytes);
+      plAudioBankDesc loaded = desc;
+      PL_TEST_BOOL_MSG(loaded.Load(reader).Failed(), "Truncated descriptor with %u bytes must fail", uiBytes);
+      PL_TEST_BOOL(loaded.m_Events == desc.m_Events && loaded.m_Clips == desc.m_Clips && loaded.m_Packed == desc.m_Packed);
+    }
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Unsupported versions and excessive counts")
+  {
+    for (plTypeVersion uiVersion : {plTypeVersion(0), plTypeVersion(3)})
+    {
+      plDefaultMemoryStreamStorage storage;
+      plMemoryStreamWriter writer(&storage);
+      writer << uiVersion;
+      plMemoryStreamReader reader(&storage);
+      plAudioBankDesc loaded;
+      PL_TEST_BOOL(loaded.Load(reader).Failed());
+    }
+
+    plDefaultMemoryStreamStorage storage;
+    plMemoryStreamWriter writer(&storage);
+    writer << plTypeVersion(2) << plMath::MaxValue<plUInt32>();
+    plMemoryStreamReader reader(&storage);
+    plAudioBankDesc loaded;
+    PL_TEST_BOOL(loaded.Load(reader).Failed());
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Invalid resource and packed-entry metadata")
+  {
+    auto Reject = [](const plAudioBankDesc& invalid)
+    {
+      plDefaultMemoryStreamStorage storage;
+      plMemoryStreamWriter writer(&storage);
+      PL_TEST_RESULT(invalid.Save(writer));
+      plMemoryStreamReader reader(&storage);
+      plAudioBankDesc loaded;
+      PL_TEST_BOOL(loaded.Load(reader).Failed());
+    };
+
+    plAudioBankDesc invalid = desc;
+    invalid.m_Clips[0].Clear();
+    Reject(invalid);
+    invalid = desc;
+    invalid.m_Packed[0].m_uiBytes = 0;
+    Reject(invalid);
+    invalid = desc;
+    invalid.m_Packed[0].m_uiOffset = plMath::MaxValue<plUInt64>();
+    Reject(invalid);
+    invalid = desc;
+    invalid.m_Packed[0].m_sResourceId = "NotListed";
+    Reject(invalid);
+    invalid = desc;
+    invalid.m_Packed.PushBack(desc.m_Packed[0]);
+    Reject(invalid);
+
+    // The packed-entry kind is a strict boolean, not an arbitrary nonzero byte.
+    plDefaultMemoryStreamStorage storage;
+    plMemoryStreamWriter writer(&storage);
+    writer << plTypeVersion(2) << plUInt32(0) << plUInt32(1) << plString("Clip");
+    writer << plUInt64(0) << plUInt64(0) << plUInt64(0) << plUInt64(0);
+    writer << plUInt32(1) << plString("Clip") << plUInt8(2) << plUInt64(0) << plUInt64(1);
+    plMemoryStreamReader reader(&storage);
+    plAudioBankDesc loaded;
+    PL_TEST_BOOL(loaded.Load(reader).Failed());
+  }
+
   PL_TEST_BLOCK(plTestBlock::Enabled, "Excess")
   {
     plAudioMemoryUsage usage;
@@ -217,7 +296,10 @@ PL_CREATE_SIMPLE_TEST(AudioBank, Desc)
 
   PL_TEST_BLOCK(plTestBlock::Enabled, "Resource from file")
   {
-    if (!PL_TEST_RESULT(WriteBankFile(":banktest/Desc.plBinAudioBank", desc)))
+    // This fixture writes a content list only. Packed-file loading is exercised by the Packed test below.
+    plAudioBankDesc fileDesc = desc;
+    fileDesc.m_Packed.Clear();
+    if (!PL_TEST_RESULT(WriteBankFile(":banktest/Desc.plBinAudioBank", fileDesc)))
       return;
 
     plAudioBankResourceHandle hBank = plResourceManager::LoadResource<plAudioBankResource>(":banktest/Desc.plBinAudioBank");
@@ -256,6 +338,8 @@ PL_CREATE_SIMPLE_TEST(AudioBank, LoadUnload)
 
     PL_TEST_RESULT(pMiddleware->LoadBank(&bankData));
     PL_TEST_BOOL(pMiddleware->IsBankContentRequested(uiBankId));
+    PL_TEST_BOOL(pMiddleware->IsBankReady(uiBankId));
+    PL_TEST_BOOL(!pMiddleware->IsBankFailed(uiBankId));
 
     // the bank's handles keep the resources alive
     plResourceManager::FreeAllUnusedResources();
@@ -287,7 +371,8 @@ PL_CREATE_SIMPLE_TEST(AudioBank, LoadUnload)
     PL_TEST_RESULT(pMiddleware->LoadBank(&bankData));
 
     // the content is requested by Update once the bank resource has been loaded
-    PL_TEST_BOOL(WaitForBankContent(*pMiddleware, uiBankId));
+    PL_TEST_BOOL(WaitForBankReady(*pMiddleware, uiBankId));
+    PL_TEST_BOOL(!pMiddleware->IsBankFailed(uiBankId));
 
     plResourceManager::FreeAllUnusedResources();
     PL_TEST_BOOL(plResourceManager::GetExistingResource<plAudioClipResource>("PlasmaAudioTest:FileBankClip").IsValid());
@@ -296,6 +381,219 @@ PL_CREATE_SIMPLE_TEST(AudioBank, LoadUnload)
 
     plResourceManager::FreeAllUnusedResources();
     PL_TEST_BOOL(!plResourceManager::GetExistingResource<plAudioClipResource>("PlasmaAudioTest:FileBankClip").IsValid());
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Shared content survives until its last owner releases it")
+  {
+    const plStringView sClip = "PlasmaAudioTest:SharedBankClip";
+    CreateTestClip(sClip);
+    plAudioClipResourceHandle hExternal = plResourceManager::GetExistingResource<plAudioClipResource>(sClip);
+    for (const char* szBank : {"PlasmaAudioTest:SharedBankA", "PlasmaAudioTest:SharedBankB"})
+    {
+      plAudioBankResourceDescriptor bank;
+      bank.m_Desc.m_Clips.PushBack(sClip);
+      plResourceManager::CreateResource<plAudioBankResource>(szBank, std::move(bank));
+    }
+    plAudioSystemStringBankData bankA(1010, "PlasmaAudioTest:SharedBankA");
+    plAudioSystemStringBankData bankB(1011, "PlasmaAudioTest:SharedBankB");
+    PL_TEST_RESULT(pMiddleware->LoadBank(&bankA));
+    PL_TEST_RESULT(pMiddleware->LoadBank(&bankB));
+    PL_TEST_BOOL(pMiddleware->IsBankReady(1010) && pMiddleware->IsBankReady(1011));
+
+    plAudioSystemStringBankData wrongIdentity(1010, "PlasmaAudioTest:SharedBankB");
+    PL_TEST_BOOL(pMiddleware->LoadBank(&wrongIdentity).Failed());
+    PL_TEST_BOOL(pMiddleware->UnloadBank(&wrongIdentity).Failed());
+    PL_TEST_BOOL(pMiddleware->IsBankReady(1010));
+
+    PL_TEST_RESULT(pMiddleware->UnloadBank(&bankA));
+    plResourceManager::FreeAllUnusedResources();
+    PL_TEST_BOOL(plResourceManager::GetExistingResource<plAudioClipResource>(sClip).IsValid());
+    PL_TEST_BOOL(pMiddleware->IsBankReady(1011));
+    PL_TEST_RESULT(pMiddleware->UnloadBank(&bankB));
+    plResourceManager::FreeAllUnusedResources();
+    PL_TEST_BOOL(plResourceManager::GetExistingResource<plAudioClipResource>(sClip).IsValid());
+    hExternal.Invalidate();
+    plResourceManager::FreeAllUnusedResources();
+    PL_TEST_BOOL(!plResourceManager::GetExistingResource<plAudioClipResource>(sClip).IsValid());
+  }
+}
+
+PL_CREATE_SIMPLE_TEST(AudioBank, Failure)
+{
+  if (!PL_TEST_RESULT(plFileSystem::AddDataDirectory(">pltest/", "PlasmaAudioBankTest", "banktest", plDataDirUsage::AllowWrites)))
+    return;
+
+  PL_SCOPE_EXIT(plFileSystem::RemoveDataDirectoryGroup("PlasmaAudioBankTest"));
+  plUniquePtr<plPlasmaAudioMiddleware> pMiddleware = PL_DEFAULT_NEW(plPlasmaAudioMiddleware);
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Unsupported bank data and empty identity fail immediately")
+  {
+    plAudioSystemBankData unsupported;
+    plAudioSystemStringBankData empty(1020, "");
+    PL_TEST_BOOL(pMiddleware->LoadBank(nullptr).Failed());
+    PL_TEST_BOOL(pMiddleware->UnloadBank(nullptr).Failed());
+    PL_TEST_BOOL(pMiddleware->LoadBank(&unsupported).Failed());
+    PL_TEST_BOOL(pMiddleware->UnloadBank(&unsupported).Failed());
+    PL_TEST_BOOL(pMiddleware->LoadBank(&empty).Failed());
+    PL_TEST_BOOL(!pMiddleware->IsBankReady(1020) && !pMiddleware->IsBankFailed(1020));
+  }
+
+  auto CheckFailedBank = [&](plStringView sPath, plAudioSystemDataID uiBankId)
+  {
+    plTestLogInterface log;
+    plTestLogSystemScope logScope(&log);
+    log.ExpectMessage("could not be loaded", plLogMsgType::WarningMsg);
+    const plUInt32 uiPackedBefore = plAudioPackedContent::GetCount();
+    plAudioSystemStringBankData bank(uiBankId, sPath);
+    // A request can be accepted before its file is read; only a successful final state may report ready.
+    pMiddleware->LoadBank(&bank).IgnoreResult();
+    PL_TEST_BOOL(WaitForBankFailed(*pMiddleware, uiBankId));
+    PL_TEST_BOOL(!pMiddleware->IsBankReady(uiBankId));
+    PL_TEST_BOOL(pMiddleware->LoadBank(&bank).Failed());
+    PL_TEST_INT(plAudioPackedContent::GetCount(), uiPackedBefore);
+    PL_TEST_RESULT(pMiddleware->UnloadBank(&bank));
+    PL_TEST_BOOL(!pMiddleware->IsBankReady(uiBankId) && !pMiddleware->IsBankFailed(uiBankId));
+  };
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Missing bank")
+  {
+    CheckFailedBank(":banktest/DoesNotExist.plBinAudioBank", 1021);
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Truncated and unsupported bank descriptors")
+  {
+    for (plTypeVersion uiVersion : {plTypeVersion(2), plTypeVersion(3)})
+    {
+      plDynamicArray<plUInt8> bytes;
+      plMemoryStreamContainerWrapperStorage<plDynamicArray<plUInt8>> storage(&bytes);
+      plMemoryStreamWriter writer(&storage);
+      writer << uiVersion << plUInt32(1); // v2 lacks the required event id; v3 is unsupported
+      plStringBuilder path;
+      path.SetFormat(":banktest/InvalidVersion{}.plBinAudioBank", uiVersion);
+      PL_TEST_RESULT(WriteAssetFile(path, bytes));
+      CheckFailedBank(path, 1022 + uiVersion);
+    }
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Corrupt asset header")
+  {
+    const plStringView path = ":banktest/CorruptHeader.plBinAudioBank";
+    {
+      plFileWriter writer;
+      if (!PL_TEST_RESULT(writer.Open(path)))
+        return;
+      const plUInt8 bytes[] = {0, 1, 2};
+      PL_TEST_RESULT(writer.WriteBytes(bytes, sizeof(bytes)));
+    }
+    CheckFailedBank(path, 1026);
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Packed entries cannot extend beyond the bank file")
+  {
+    plAudioBankDesc desc;
+    desc.m_Clips.PushBack(":banktest/OutOfRange.plBinAudioClip");
+    desc.m_Packed.PushBack({desc.m_Clips[0], true, 0, 100});
+    PL_TEST_RESULT(WriteBankFile(":banktest/OutOfRange.plBinAudioBank", desc));
+    CheckFailedBank(":banktest/OutOfRange.plBinAudioBank", 1027);
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Missing event and clip fail a valid bank")
+  {
+    for (plUInt32 uiKind = 0; uiKind < 2; ++uiKind)
+    {
+      plTestLogInterface log;
+      plTestLogSystemScope logScope(&log);
+      log.ExpectMessage("has missing or invalid content", plLogMsgType::WarningMsg);
+      plStringBuilder bankName;
+      bankName.SetFormat("PlasmaAudioTest:MissingContent{}", uiKind);
+      plAudioBankResourceDescriptor desc;
+      if (uiKind == 0)
+        desc.m_Desc.m_Events.PushBack(":banktest/MissingEvent.plBinAudioEvent");
+      else
+        desc.m_Desc.m_Clips.PushBack(":banktest/MissingClip.plBinAudioClip");
+      plResourceManager::CreateResource<plAudioBankResource>(bankName, std::move(desc));
+      plAudioSystemStringBankData bank(1030 + uiKind, bankName);
+      PL_TEST_RESULT(pMiddleware->LoadBank(&bank));
+      PL_TEST_BOOL(WaitForBankFailed(*pMiddleware, 1030 + uiKind));
+      PL_TEST_BOOL(pMiddleware->LoadBank(&bank).Failed());
+      PL_TEST_RESULT(pMiddleware->UnloadBank(&bank));
+    }
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Unsupported clip content never reports ready")
+  {
+    plDynamicArray<plUInt8> bytes;
+    plMemoryStreamContainerWrapperStorage<plDynamicArray<plUInt8>> storage(&bytes);
+    plMemoryStreamWriter writer(&storage);
+    writer << plTypeVersion(3) << plUInt8(255) << plUInt8(0) << plUInt8(1) << plUInt8(0);
+    PL_TEST_RESULT(WriteAssetFile(":banktest/Unsupported.plBinAudioClip", bytes));
+
+    plTestLogInterface log;
+    plTestLogSystemScope logScope(&log, true);
+    log.ExpectMessage("Invalid audio clip header", plLogMsgType::ErrorMsg);
+    log.ExpectMessage("has missing or invalid content", plLogMsgType::WarningMsg);
+    plAudioBankResourceDescriptor desc;
+    desc.m_Desc.m_Clips.PushBack(":banktest/Unsupported.plBinAudioClip");
+    plResourceManager::CreateResource<plAudioBankResource>("PlasmaAudioTest:UnsupportedClipBank", std::move(desc));
+    plAudioSystemStringBankData bank(1032, "PlasmaAudioTest:UnsupportedClipBank");
+    PL_TEST_RESULT(pMiddleware->LoadBank(&bank));
+    PL_TEST_BOOL(WaitForBankFailed(*pMiddleware, 1032));
+    PL_TEST_RESULT(pMiddleware->UnloadBank(&bank));
+  }
+
+  plResourceManager::FreeAllUnusedResources();
+}
+
+PL_CREATE_SIMPLE_TEST(AudioBank, EventDependencies)
+{
+  if (!PL_TEST_RESULT(plFileSystem::AddDataDirectory(">pltest/", "PlasmaAudioBankTest", "banktest", plDataDirUsage::AllowWrites)))
+    return;
+
+  PL_SCOPE_EXIT(plFileSystem::RemoveDataDirectoryGroup("PlasmaAudioBankTest"));
+  plUniquePtr<plPlasmaAudioMiddleware> pMiddleware = PL_DEFAULT_NEW(plPlasmaAudioMiddleware);
+
+  for (plUInt32 uiMissing = 0; uiMissing < 2; ++uiMissing)
+  {
+    PL_TEST_BLOCK(plTestBlock::Enabled, uiMissing ? "Missing transitive clip fails readiness" : "Transitive clip becomes ready and is released")
+    {
+      plTestLogInterface log;
+      plTestLogSystemScope logScope(&log);
+      if (uiMissing)
+        log.ExpectMessage("has missing or invalid content", plLogMsgType::WarningMsg);
+
+      const plStringView sClip = uiMissing ? ":banktest/MissingNestedClip.plBinAudioClip" : "PlasmaAudioTest:NestedClip";
+      if (!uiMissing)
+        CreateTestClip(sClip);
+
+      plStringBuilder childName, eventName, bankName;
+      childName.SetFormat("PlasmaAudioTest:ChildEvent{}", uiMissing);
+      eventName.SetFormat("PlasmaAudioTest:ParentEvent{}", uiMissing);
+      bankName.SetFormat("PlasmaAudioTest:NestedBank{}", uiMissing);
+
+      plAudioEventResourceDescriptor child;
+      child.m_Desc.m_Instruments.ExpandAndGetRef().m_Playlist.ExpandAndGetRef().m_sClip = sClip;
+      plResourceManager::CreateResource<plAudioEventResource>(childName, std::move(child));
+      plAudioEventResourceDescriptor event;
+      event.m_Desc.m_Instruments.ExpandAndGetRef().m_Playlist.ExpandAndGetRef().m_sEvent = childName;
+      plResourceManager::CreateResource<plAudioEventResource>(eventName, std::move(event));
+      plAudioBankResourceDescriptor desc;
+      desc.m_Desc.m_Events.PushBack(eventName); // Neither the nested event nor the clip is explicitly listed.
+      plResourceManager::CreateResource<plAudioBankResource>(bankName, std::move(desc));
+
+      const plAudioSystemDataID uiBankId = 1040 + uiMissing;
+      plAudioSystemStringBankData bank(uiBankId, bankName);
+      PL_TEST_RESULT(pMiddleware->LoadBank(&bank));
+      if (uiMissing)
+        PL_TEST_BOOL(WaitForBankFailed(*pMiddleware, uiBankId));
+      else
+        PL_TEST_BOOL(WaitForBankReady(*pMiddleware, uiBankId));
+
+      PL_TEST_RESULT(pMiddleware->UnloadBank(&bank));
+      plResourceManager::FreeAllUnusedResources();
+      PL_TEST_BOOL(!plResourceManager::GetExistingResource<plAudioEventResource>(eventName).IsValid());
+      PL_TEST_BOOL(!plResourceManager::GetExistingResource<plAudioEventResource>(childName).IsValid());
+      PL_TEST_BOOL(!plResourceManager::GetExistingResource<plAudioClipResource>(sClip).IsValid());
+    }
   }
 }
 

@@ -8,14 +8,14 @@
 PackageInfo
 {
 	string %Id{"plasma.audio"}
-	string %Version{"2.1.0"}
+	string %Version{"2.1.2"}
 	string %Publisher{"PlasmaTechnology"}
 	string %License{"MIT"}
 	string %Homepage{"https://plasmagameengine.com"}
 
-	string %MinEngineVersion{"0.10.0"}
-	string %MaxEngineVersion{"0.10.0"}
-	string %AbiTag{"win64-msvc19-0.10.0-abi6-dev"}
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
+	string %AbiTag{"win64-msvc19-0.11.2-abi6-dev"}
 
 	string %DisplayName{"PlasmaAudio"}
 	string %Category{"Audio"}
@@ -38,7 +38,7 @@ PackageInfo
 	Component { string %Name{"manifest"} string %Platform{"any"} }
 	Component { string %Name{"runtime-win64"} string %Platform{"win64"} }
 	Component { string %Name{"editor-win64"} string %Platform{"win64"} }
-	Component { string %Name{"editoricons"} string %Platform{"any"} string %Path{"EditorIcons"} }
+	Component { string %Name{"tool"} string %Platform{"any"} string %Path{"EditorIcons"} }
 	Component { string %Name{"icon"} string %Platform{"any"} }
 	Component { string %Name{"banner"} string %Platform{"any"} }
 }
