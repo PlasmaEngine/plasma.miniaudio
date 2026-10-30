@@ -330,6 +330,7 @@ private:
   plAudioProfilingSnapshot m_ProfilingSnapshot;
   plDataBuffer m_ProfilingScratch;
   plTime m_LastProfilingSnapshot;
+  bool m_bEndedVoicesEnabled = false; ///< audio thread: what the event manager was last told
 
   /// A snapshot carries the event log entries added since the last ProfilingLogOverlap snapshots, so a reader that
   /// polls the published snapshot less often than it is produced still sees every entry.

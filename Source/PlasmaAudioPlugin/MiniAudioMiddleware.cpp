@@ -228,6 +228,14 @@ void plPlasmaAudioMiddleware::PublishOutputStats()
 void plPlasmaAudioMiddleware::UpdateProfilingSnapshot()
 {
   const plInt32 iHz = cvar_PlasmaAudioProfilerSnapshotHz.GetValue();
+
+  // ended voices are recorded only while snapshots carry them
+  if (m_bEndedVoicesEnabled != (iHz > 0))
+  {
+    m_bEndedVoicesEnabled = iHz > 0;
+    m_EventManager.SetEndedVoicesEnabled(m_bEndedVoicesEnabled);
+  }
+
   if (iHz <= 0)
     return;
 
@@ -243,13 +251,15 @@ void plPlasmaAudioMiddleware::UpdateProfilingSnapshot()
   m_ProfilingSnapshot.m_uiStreams = m_StreamService.GetActiveStreamCount();
   m_ProfilingSnapshot.m_fDspLoad = m_pBackend->GetDspLoad();
   m_ProfilingSnapshot.m_fUpdateMs = GetLastUpdateMilliseconds();
-  m_ProfilingSnapshot.m_uiMemoryBytes = plAudioClipResource::GetTotalResidentBytes() + m_StreamService.GetRingBytesInUse();
   m_ProfilingSnapshot.m_fTime = m_EventManager.GetEventLog().GetTime();
   m_ProfilingSnapshot.m_uiStreamUnderruns = m_StreamService.GetTotalUnderruns();
   m_ProfilingSnapshot.m_uiMemoryBudgetBytes = m_MemoryBudget.m_uiTotalBytes;
 
   FillBusSnapshot();
   FillMemorySnapshot();
+
+  // the same total as the rows of the memory section
+  m_ProfilingSnapshot.m_uiMemoryBytes = m_ProfilingSnapshot.m_uiClipResidentBytes + m_ProfilingSnapshot.m_uiStreamRingBytes + m_ProfilingSnapshot.m_uiEmbeddedSampleBytes;
 
   // the oldest cursor of the ring is where the entries of this snapshot start; it is replaced by the current end
   {
@@ -353,6 +363,12 @@ void plPlasmaAudioMiddleware::FillMemorySnapshot()
   m_ProfilingSnapshot.m_uiClipResidentBytes = plAudioClipResource::GetTotalResidentBytes();
   m_ProfilingSnapshot.m_uiStreamRingBytes = m_StreamService.GetRingBytesInUse();
   m_ProfilingSnapshot.m_uiPooledStreams = m_StreamService.GetPooledStreamCount();
+
+  m_ProfilingSnapshot.m_uiEmbeddedSampleBytes = 0;
+  for (const plAudioEventMemorySnapshotEntry& event : m_ProfilingSnapshot.m_Events)
+  {
+    m_ProfilingSnapshot.m_uiEmbeddedSampleBytes += event.m_uiSampleBytes;
+  }
 }
 
 void plPlasmaAudioMiddleware::PublishStats()
@@ -2001,8 +2017,8 @@ void plPlasmaAudioMiddleware::GetProfilingInfo(plAudioSystemProfilingInfo& out_i
   out_info.m_uiActiveVoices = m_EventManager.GetRealVoiceCount();
   out_info.m_uiEventInstances = m_EventManager.GetInstanceCount();
 
-  // sample data of the loaded clips plus the stream rings
-  out_info.m_uiMemoryUsed = plAudioClipResource::GetTotalResidentBytes() + m_StreamService.GetRingBytesInUse();
+  // audio data, as the profiler counts it: sample data of the loaded clips, the stream rings and the embedded samples
+  out_info.m_uiMemoryUsed = plAudioClipResource::GetTotalResidentBytes() + m_StreamService.GetRingBytesInUse() + plAudioEventResource::GetTotalSampleBytes();
   out_info.m_fDspLoad = m_pBackend != nullptr ? m_pBackend->GetDspLoad() : 0.0f;
 }
 

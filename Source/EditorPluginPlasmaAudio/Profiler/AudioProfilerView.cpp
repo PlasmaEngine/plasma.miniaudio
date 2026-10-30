@@ -29,8 +29,13 @@ namespace
   constexpr float s_fTotalsRow = 28.0f;
   constexpr float s_fSearchWidth = 220.0f;
   constexpr float s_fWheelStep = 3.0f * plEditorUi::RowHeight;
-  constexpr plUInt32 s_uiMaxRows = 200;
+  constexpr plUInt32 s_uiMaxRows = 1000;
   constexpr plUInt32 s_uiMaxLogLines = 2000;
+
+  constexpr float s_fSummaryRow = 50.0f; ///< the Voices tab's summary cards
+  constexpr float s_fBannerRow = 22.0f;  ///< the note above the voice table when the query's cap cut rows
+  constexpr plUInt32 s_uiSummaryCards = 6;
+  constexpr float s_fBusDropdownWidth = 150.0f;
 
   constexpr float s_fBusStripWidth = 86.0f;
   constexpr float s_fBusStripGap = 6.0f;
@@ -38,7 +43,13 @@ namespace
 
   const plHashedString s_sDrawing = plMakeHashedString("Profiler.Drawing");
 
-  constexpr const char* s_szStateNames[3] = {"real", "virtual", "stopping"};
+  constexpr const char* s_szStateNames[4] = {"real", "virtual", "stopping", "ended"};
+  constexpr const char* s_szStateTips[4] = {
+    "Show real voices: decoded and mixed",
+    "Show virtual voices: tracked without decoding, over the real budget or beyond their max distance",
+    "Show voices whose instance fades out",
+    "Show the voices that ended in the last seconds, and why: stolen, killed by the budget, stopped or finished",
+  };
   constexpr const char* s_szLogCategoryNames[4] = {"lifecycle", "voices", "warnings", "system"};
   constexpr const char* s_szLogCategoryTips[4] = {
     "Instance starts, stops and ends",
@@ -47,7 +58,107 @@ namespace
     "Clip load waits, device recovery, mixer, bank and language changes",
   };
 
-  constexpr const char* s_szDetailNames[] = {"Entity", "State", "Priority", "Audibility", "Distance", "Bus", "Codec", "Age", "Occlusion"};
+  constexpr const char* s_szDetailNames[] = {"Owner", "Entity id", "State", "Stop reason", "Priority", "Audibility", "Volume", "Distance", "Occlusion", "Bus", "Codec", "Age"};
+
+  /// The voice table's columns; a width of 0 takes the remaining space.
+  constexpr const char* s_szVoiceColumns[] = {"Event", "Owner", "State", "Prio", "Audibility", "Volume", "Dist", "Bus", "Codec"};
+  constexpr float s_fVoiceColumnWidths[] = {0.0f, 110.0f, 156.0f, 50.0f, 92.0f, 100.0f, 70.0f, 96.0f, 120.0f};
+  constexpr bool s_bVoiceColumnRight[] = {false, false, false, true, false, true, true, false, false};
+  constexpr plAudioProfilerVoiceQuery::SortKey s_VoiceColumnKeys[] = {plAudioProfilerVoiceQuery::SortKey::Event, plAudioProfilerVoiceQuery::SortKey::Owner,
+    plAudioProfilerVoiceQuery::SortKey::State, plAudioProfilerVoiceQuery::SortKey::Priority, plAudioProfilerVoiceQuery::SortKey::Audibility,
+    plAudioProfilerVoiceQuery::SortKey::Volume, plAudioProfilerVoiceQuery::SortKey::Distance, plAudioProfilerVoiceQuery::SortKey::Bus,
+    plAudioProfilerVoiceQuery::SortKey::Codec};
+  constexpr plUInt32 s_uiVoiceColumns = PL_ARRAY_SIZE(s_szVoiceColumns);
+
+  /// The status row's values, and what each of them measures.
+  constexpr const char* s_szStatusLabels[7] = {"Real", "Virtual", "Instances", "Mix CPU", "Audio update", "Streams", "Audio data"};
+  constexpr const char* s_szStatusTips[7] = {
+    "Real voices: decoded and mixed, against PlasmaAudio.MaxRealVoices. Counted on the audio thread at the snapshot.",
+    "Virtual voices: tracked without decoding, against PlasmaAudio.MaxVirtualVoices. Counted on the audio thread at the snapshot.",
+    "Event instances alive in the event manager. An instance can have several voices.",
+    "Audio device thread: time spent in the device callback mixing one period, as a share of the period, smoothed. Measured every callback.",
+    "Audio thread: wall time of the last PlasmaAudio update (voice ranking, spatialisation, parameters, streams). Measured around the update.",
+    "Streamed clip voices reading from disk right now.",
+    "Resident audio data: clip sample data, stream rings and the samples embedded in events. Miniaudio node and decoder state are not counted.",
+  };
+
+  /// The summary cards of the Voices tab: title, scope and what the card measures.
+  constexpr const char* s_szCardTitles[s_uiSummaryCards] = {"Real", "Virtual", "Ended", "Mix CPU", "Audio update", "Audio data"};
+  constexpr const char* s_szCardScopes[s_uiSummaryCards] = {"of budget", "of budget", "last 5 s", "device thread", "audio thread", "resident"};
+  constexpr const char* s_szCardTips[s_uiSummaryCards] = {
+    s_szStatusTips[0],
+    s_szStatusTips[1],
+    "Voices that ended in the last 5 seconds: stolen by a newer instance of their polyphony group, killed by the voice budget, stopped by the game, or finished.",
+    s_szStatusTips[3],
+    s_szStatusTips[4],
+    s_szStatusTips[6],
+  };
+
+  /// The status row's values and where each label starts; out_xs[i + 1] is where item i ends (with its gap). Returns how
+  /// many items fit into fWidth.
+  plUInt32 LayoutStatus(const plAudioProfilingSnapshot& s, bool bHasSnapshot, float fWidth, plStringBuilder out_values[7], float out_xs[8])
+  {
+    using namespace plEditorUi;
+
+    if (bHasSnapshot)
+    {
+      out_values[0].SetFormat("{}/{}", s.m_uiRealVoices, s.m_uiMaxReal);
+      out_values[1].SetFormat("{}/{}", s.m_uiVirtualVoices, s.m_uiMaxVirtual);
+      out_values[2].SetFormat("{}", s.m_uiInstances);
+      out_values[3].SetFormat("{}%", plArgF(s.m_fDspLoad * 100.0f, 1));
+      out_values[4].SetFormat("{} ms", plArgF(s.m_fUpdateMs, 2));
+      out_values[5].SetFormat("{}", s.m_uiStreams);
+      plAudioEngineUi::FormatBytes(s.m_uiMemoryBytes, out_values[6]);
+    }
+    else
+    {
+      for (plUInt32 i = 0; i < 7; ++i)
+        out_values[i] = "-";
+    }
+
+    float x = 8.0f;
+    plUInt32 uiShown = 0;
+    for (; uiShown < 7; ++uiShown)
+    {
+      const float fLabel = MeasureText(s_szStatusLabels[uiShown], FontSize - 1) + 5.0f;
+      const float fValue = MeasureCodeText(out_values[uiShown], FontSize - 2) + 2.0f;
+      if (x + fLabel + fValue > fWidth - 8.0f)
+        break;
+
+      out_xs[uiShown] = x;
+      x += fLabel + fValue + 12.0f;
+    }
+
+    out_xs[uiShown] = x;
+    return uiShown;
+  }
+
+  /// A state chip of the Voices tab: its name and room for the count.
+  float StateChipWidth(plUInt32 uiState)
+  {
+    return plAudioEngineUi::ChipWidth(s_szStateNames[uiState]) + 26.0f;
+  }
+
+  /// Where the Voices tab's bus dropdown starts: after the state chips.
+  float BusDropdownX()
+  {
+    float x = 8.0f + plEditorUi::MeasureText("State", plEditorUi::FontSize - 1) + 10.0f;
+    for (plUInt32 i = 0; i < 4; ++i)
+      x += StateChipWidth(i) + 4.0f;
+
+    return x + 12.0f;
+  }
+
+  /// Linear volume as dB, "-inf" for silence.
+  plString VolumeText(float fLinear)
+  {
+    if (fLinear <= 0.00001f)
+      return "-inf dB";
+
+    plStringBuilder s;
+    s.SetFormat("{} dB", plArgF(20.0f * plMath::Log10(fLinear), 1));
+    return s;
+  }
 
   plUInt32 GetLogCategory(plUInt8 uiType)
   {
@@ -70,7 +181,8 @@ namespace
     }
   }
 
-  /// Voice states as system colours: real in the accent, virtual in the XR colour, stopping in the warning colour.
+  /// Voice states as system colours: real in the accent, virtual in the XR colour, stopping in the warning colour, ended
+  /// dimmed.
   plColorGammaUB StateColor(plUInt8 uiState)
   {
     switch (uiState)
@@ -79,9 +191,25 @@ namespace
         return plEditorUi::Accent();
       case plAudioVoiceSnapshotEntry::Virtual:
         return plAudioEngineUi::CategoryColor("XR");
+      case plAudioVoiceSnapshotEntry::Ended:
+        return plEditorUi::Dim();
       default:
         return plEditorUi::Warning();
     }
+  }
+
+  /// "real", "stopping · virtual", "stopping · stolen · oldest", "ended · finished".
+  plString StateText(const plAudioVoiceSnapshotEntry& voice)
+  {
+    const auto reason = static_cast<plAudioStopReason::Enum>(voice.m_uiStopReason);
+    plStringBuilder s = s_szStateNames[plMath::Min<plUInt8>(voice.m_uiState, plAudioVoiceSnapshotEntry::Ended)];
+
+    if (voice.m_uiState == plAudioVoiceSnapshotEntry::Stopping)
+      s.Append(" \xC2\xB7 ", plAudioStopReason::IsForced(reason) ? plStringView(plAudioStopReason::GetName(reason)) : plStringView(voice.m_bVirtual ? "virtual" : "real"));
+    else if (voice.m_uiState == plAudioVoiceSnapshotEntry::Ended && reason != plAudioStopReason::None)
+      s.Append(" \xC2\xB7 ", plAudioStopReason::GetName(reason));
+
+    return s;
   }
 
   plStringView CodecName(plUInt8 uiCodec)
@@ -138,10 +266,14 @@ namespace
     return sName;
   }
 
-  plString EntityText(const plAudioVoiceSnapshotEntry& voice)
+  /// The game object the voice plays on: its name, its entity id without a name, "2D" without an entity.
+  plString OwnerText(const plAudioVoiceSnapshotEntry& voice)
   {
+    if (!voice.m_sEntity.IsEmpty())
+      return voice.m_sEntity;
+
     if (voice.m_uiEntityId == 0)
-      return "-";
+      return "2D";
 
     plStringBuilder s;
     s.SetFormat("#{}", voice.m_uiEntityId);
@@ -156,7 +288,8 @@ namespace
   }
 
   /// Column x positions for widths, where a width of 0 takes the remaining space.
-  void LayoutColumns(float x, float fWidth, plArrayPtr<const float> widths, plHybridArray<float, 8>& out_x, plHybridArray<float, 8>& out_w)
+  template <plUInt32 N>
+  void LayoutColumns(float x, float fWidth, plArrayPtr<const float> widths, plHybridArray<float, N>& out_x, plHybridArray<float, N>& out_w)
   {
     float fFixed = 0.0f;
     for (float w : widths)
@@ -225,6 +358,23 @@ void plEditorUiAudioProfilerView::SetSnapshot(const plAudioProfilingSnapshot& sn
   m_LiveSnapshot = snapshot;
   m_bHasLiveSnapshot = true;
 
+  // the live graphs run on while paused, as a recording does
+  AddLiveSample(snapshot);
+
+  // paused, the lines wait, so the shown log keeps its lines
+  if (m_bPaused)
+  {
+    for (const plAudioProfilerLogLine& line : newLines)
+    {
+      m_PausedLines.PushBack(line);
+      if (m_PausedLines.GetCount() > s_uiMaxLogLines)
+        m_PausedLines.PopFront();
+    }
+
+    m_bDrawDirty = true;
+    return;
+  }
+
   for (const plAudioProfilerLogLine& line : newLines)
   {
     if (line.m_uiType != plAudioProfilerLogLine::GapType)
@@ -278,7 +428,94 @@ void plEditorUiAudioProfilerView::SetRecording(bool bRecording)
     return;
 
   m_bRecording = bRecording;
+
+  // a recording is what the graphs follow while it grows
+  if (bRecording)
+    SetGraphSource(GraphSource::Capture);
+
   m_bDrawDirty = true;
+}
+
+void plEditorUiAudioProfilerView::SetGraphSource(GraphSource source)
+{
+  if (m_GraphSource == source)
+    return;
+
+  m_GraphSource = source;
+  m_fHoverTime = -1.0;
+  m_bDraggingRange = false;
+
+  // a range belongs to the capture; the live graphs go with the live tabs
+  if (source == GraphSource::Live && HasRange())
+  {
+    m_fRangeA = m_fRangeB = -1.0;
+    ApplyRange();
+  }
+
+  m_bDrawDirty = true;
+}
+
+const plDynamicArray<plAudioProfilerCapture::Sample>& plEditorUiAudioProfilerView::GetGraphSamples() const
+{
+  return IsGraphLive() ? m_LiveSamples : m_pCapture->GetSamples();
+}
+
+void plEditorUiAudioProfilerView::GetGraphSpan(double& out_fStart, double& out_fEnd) const
+{
+  if (IsGraphLive())
+  {
+    out_fEnd = m_LiveSamples.IsEmpty() ? 0.0 : m_LiveSamples.PeekBack().m_fTime;
+    out_fStart = out_fEnd - LiveWindowSeconds;
+    return;
+  }
+
+  out_fStart = 0.0;
+  out_fEnd = plMath::Max(m_pCapture->GetSamples().PeekBack().m_fTime, 1.0);
+}
+
+void plEditorUiAudioProfilerView::AddLiveSample(const plAudioProfilingSnapshot& snapshot)
+{
+  // snapshots before version 3 have no time of their own
+  const double fTime = snapshot.m_fTime > 0.0 ? snapshot.m_fTime : plTime::Now().GetSeconds();
+
+  if (!m_LiveSamples.IsEmpty())
+  {
+    // the same snapshot can arrive twice (a poll before the next one was taken)
+    if (fTime == m_LiveSamples.PeekBack().m_fTime)
+      return;
+
+    // a clock that went back is a new target or a restarted one: the window starts over
+    if (fTime < m_LiveSamples.PeekBack().m_fTime)
+    {
+      m_LiveSamples.Clear();
+    }
+  }
+
+  const bool bFirst = m_LiveSamples.IsEmpty();
+
+  plAudioProfilerCapture::Sample& sample = m_LiveSamples.ExpandAndGetRef();
+  sample.m_fTime = fTime;
+  sample.m_uiReal = snapshot.m_uiRealVoices;
+  sample.m_uiVirtual = snapshot.m_uiVirtualVoices;
+  sample.m_uiMaxReal = snapshot.m_uiMaxReal;
+  sample.m_uiMaxVirtual = snapshot.m_uiMaxVirtual;
+  sample.m_fDspLoad = snapshot.m_fDspLoad;
+  sample.m_uiStreams = snapshot.m_uiStreams;
+  sample.m_uiMemoryBytes = snapshot.m_uiMemoryBytes;
+  sample.m_uiBudgetBytes = snapshot.m_uiMemoryBudgetBytes;
+  sample.m_uiUnderruns = (!bFirst && snapshot.m_uiStreamUnderruns > m_uiLiveUnderruns) ? static_cast<plUInt32>(snapshot.m_uiStreamUnderruns - m_uiLiveUnderruns) : 0;
+  m_uiLiveUnderruns = snapshot.m_uiStreamUnderruns;
+
+  // what left the window is forgotten; only a recording keeps it
+  plUInt32 uiOld = 0;
+  while (uiOld < m_LiveSamples.GetCount() && fTime - m_LiveSamples[uiOld].m_fTime > LiveWindowSeconds)
+    ++uiOld;
+
+  if (uiOld > 0)
+    m_LiveSamples.RemoveAtAndCopy(0, uiOld);
+
+  if (IsGraphLive())
+    m_bDrawDirty = true;
 }
 
 void plEditorUiAudioProfilerView::ShowToast(plStringView sText)
@@ -382,47 +619,126 @@ void plEditorUiAudioProfilerView::RebuildLanes()
 
 void plEditorUiAudioProfilerView::RebuildVoiceRows()
 {
-  m_VoiceRows.Clear();
+  m_VoiceQuery.m_sText = m_sVoiceFilter;
+  m_VoiceQuery.m_uiMaxRows = s_uiMaxRows;
+  m_uiVoiceMatches = m_VoiceQuery.Run(m_Snapshot, m_VoiceRows);
 
-  for (const plAudioVoiceSnapshotEntry& voice : m_Snapshot.m_Voices)
-  {
-    if (!m_StateFilter[plMath::Min<plUInt8>(voice.m_uiState, 2)])
-      continue;
-
-    if (!m_sVoiceFilter.IsEmpty() && voice.m_sEvent.FindSubString_NoCase(m_sVoiceFilter) == nullptr)
-      continue;
-
-    m_VoiceRows.PushBack(&voice);
-  }
-
-  // real voices first, then by audibility; the id keeps the order stable
-  m_VoiceRows.Sort([](const plAudioVoiceSnapshotEntry* a, const plAudioVoiceSnapshotEntry* b)
-    {
-      const int iRankA = a->m_uiState == plAudioVoiceSnapshotEntry::Real ? 0 : 1;
-      const int iRankB = b->m_uiState == plAudioVoiceSnapshotEntry::Real ? 0 : 1;
-      if (iRankA != iRankB)
-        return iRankA < iRankB;
-      if (a->m_fAudibility != b->m_fAudibility)
-        return a->m_fAudibility > b->m_fAudibility;
-      return a->m_uiId < b->m_uiId; });
-
-  if (m_VoiceRows.GetCount() > s_uiMaxRows)
-    m_VoiceRows.SetCount(s_uiMaxRows);
-
-  // the selected voice keeps its last values once it ended
+  // the selected voice keeps its last values once it ended; the ended list has its final ones. A selected ended row
+  // stays ended even when its slot plays again under the same id.
   if (m_bHasSelection)
   {
     m_bSelectedVoiceEnded = true;
     for (const plAudioVoiceSnapshotEntry& voice : m_Snapshot.m_Voices)
     {
-      if (voice.m_uiId == m_uiSelectedId)
+      if (voice.m_uiId == m_uiSelectedId && m_SelectedVoice.m_uiState != plAudioVoiceSnapshotEntry::Ended)
       {
         m_SelectedVoice = voice;
         m_bSelectedVoiceEnded = false;
         break;
       }
     }
+
+    if (m_bSelectedVoiceEnded)
+    {
+      for (const plAudioEndedVoiceSnapshotEntry& ended : m_Snapshot.m_Ended)
+      {
+        if (ended.m_Voice.m_uiId == m_uiSelectedId)
+          m_SelectedVoice = ended.m_Voice;
+      }
+    }
   }
+}
+
+void plEditorUiAudioProfilerView::SetPaused(bool bPaused)
+{
+  if (m_bPaused == bPaused)
+    return;
+
+  m_bPaused = bPaused;
+
+  if (!bPaused)
+  {
+    // the lines that arrived while paused, then the latest snapshot
+    for (const plAudioProfilerLogLine& line : m_PausedLines)
+    {
+      if (line.m_uiType != plAudioProfilerLogLine::GapType)
+        ++m_uiLogReceived;
+
+      m_LogLines.PushBack(line);
+      if (m_LogLines.GetCount() > s_uiMaxLogLines)
+        m_LogLines.PopFront();
+    }
+    m_PausedLines.Clear();
+
+    if (!HasRange())
+    {
+      m_Snapshot = m_LiveSnapshot;
+      m_bHasSnapshot = m_bHasLiveSnapshot;
+    }
+
+    RebuildVoiceRows();
+    RebuildMemoryRows();
+    RebuildVisibleLog();
+  }
+
+  m_bRebuild = true;
+  m_bDrawDirty = true;
+}
+
+void plEditorUiAudioProfilerView::SortVoicesBy(plUInt32 uiColumn)
+{
+  using SortKey = plAudioProfilerVoiceQuery::SortKey;
+
+  const SortKey key = s_VoiceColumnKeys[uiColumn];
+
+  if (m_VoiceQuery.m_SortKey == key)
+  {
+    m_VoiceQuery.m_bAscending = !m_VoiceQuery.m_bAscending;
+  }
+  else
+  {
+    // names read A to Z first; numbers largest first, except audibility, whose default order is already the loudest first
+    const bool bText = key == SortKey::Event || key == SortKey::Owner || key == SortKey::Bus || key == SortKey::Codec || key == SortKey::State;
+    m_VoiceQuery.m_bAscending = bText || (key == SortKey::Audibility && m_VoiceQuery.m_SortKey == SortKey::Default);
+    m_VoiceQuery.m_SortKey = key;
+  }
+
+  RebuildVoiceRows();
+  m_bDrawDirty = true;
+}
+
+void plEditorUiAudioProfilerView::ShowBusMenu()
+{
+  // the loaded mixer's buses, and buses voices play on that it does not have
+  plHybridArray<plString, 16> buses;
+  for (const plAudioBusSnapshotEntry& bus : m_Snapshot.m_Buses)
+    buses.PushBack(bus.m_sName);
+
+  for (const plAudioVoiceSnapshotEntry& voice : m_Snapshot.m_Voices)
+  {
+    if (!voice.m_sBus.IsEmpty() && !buses.Contains(voice.m_sBus))
+      buses.PushBack(voice.m_sBus);
+  }
+
+  plEditorUiMenu menu;
+  plEditorUiMenuItem& all = menu.AddAction("All buses", 0);
+  all.m_bCheckable = true;
+  all.m_bChecked = m_VoiceQuery.m_sBus.IsEmpty();
+
+  for (plUInt32 i = 0; i < buses.GetCount(); ++i)
+  {
+    plEditorUiMenuItem& item = menu.AddAction(buses[i], i + 1);
+    item.m_bCheckable = true;
+    item.m_bChecked = m_VoiceQuery.m_sBus == buses[i];
+  }
+
+  const plRectFloat tool = GetToolRowRect();
+  plEditorUiMenuView::Show(*GetSurface(), plVec2(BusDropdownX(), tool.y + 3.0f + plEditorUi::ControlHeight), menu, [this, buses](plUInt32 uiId)
+    {
+      m_VoiceQuery.m_sBus = uiId == 0 ? plString() : buses[uiId - 1];
+      RebuildVoiceRows();
+      m_fScroll = 0.0f;
+      m_bDrawDirty = true; });
 }
 
 void plEditorUiAudioProfilerView::RebuildMemoryRows()
@@ -553,7 +869,47 @@ plRectFloat plEditorUiAudioProfilerView::GetBodyRect() const
 plRectFloat plEditorUiAudioProfilerView::GetToolRowRect() const
 {
   const plRectFloat body = GetBodyRect();
-  return plRectFloat(body.x, body.y, body.width, s_fToolRow);
+  const float fTop = m_Tab == Tab::Voices ? s_fSummaryRow : 0.0f;
+  return plRectFloat(body.x, body.y + fTop, body.width, s_fToolRow);
+}
+
+plRectFloat plEditorUiAudioProfilerView::GetVoiceSummaryRect() const
+{
+  const plRectFloat body = GetBodyRect();
+  return plRectFloat(body.x, body.y, body.width, s_fSummaryRow);
+}
+
+plRectFloat plEditorUiAudioProfilerView::GetVoiceCardRect(plUInt32 uiCard) const
+{
+  const plRectFloat summary = GetVoiceSummaryRect();
+  const float fWidth = summary.width / s_uiSummaryCards;
+  return plRectFloat(summary.x + uiCard * fWidth, summary.y, fWidth, summary.height - 1.0f);
+}
+
+float plEditorUiAudioProfilerView::GetVoiceRowsTop() const
+{
+  const float fBanner = m_uiVoiceMatches > m_VoiceRows.GetCount() ? s_fBannerRow : 0.0f;
+  return GetTableRect().y + fBanner + s_fTableHeader;
+}
+
+void plEditorUiAudioProfilerView::LayoutVoiceColumns(plHybridArray<float, 12>& out_x, plHybridArray<float, 12>& out_w) const
+{
+  const plRectFloat table = GetTableRect();
+  LayoutColumns(table.x, table.width, plArrayPtr<const float>(s_fVoiceColumnWidths), out_x, out_w);
+}
+
+float plEditorUiAudioProfilerView::GetGraphSourceX() const
+{
+  // left of the range text, which sits left of Clear range
+  const plVec2 size = IsReady() ? GetSurface()->GetLogicalSize() : plVec2(800.0f, 400.0f);
+  const float fButtons = plAudioEngineUi::TextButtonWidth("Live", false) + 2.0f + plAudioEngineUi::TextButtonWidth("Capture", false);
+  return size.x - 8.0f - plAudioEngineUi::TextButtonWidth("Clear range", false) - 210.0f - 8.0f - fButtons;
+}
+
+float plEditorUiAudioProfilerView::GetPauseButtonX() const
+{
+  // after Record, Save capture and Open...; the target follows it
+  return 6.0f + plAudioEngineUi::TextButtonWidth("Record", true) + 4.0f + plAudioEngineUi::TextButtonWidth("Save capture", false) + 4.0f + plAudioEngineUi::TextButtonWidth("Open...", false) + 6.0f;
 }
 
 plRectFloat plEditorUiAudioProfilerView::GetTableRect() const
@@ -565,7 +921,7 @@ plRectFloat plEditorUiAudioProfilerView::GetTableRect() const
     case Tab::Instances:
       return plRectFloat(body.x, body.y, plMath::Max(body.width - s_fCardWidth, 100.0f), body.height);
     case Tab::Voices:
-      return plRectFloat(body.x, body.y + s_fToolRow, plMath::Max(body.width - s_fDetailsWidth, 100.0f), plMath::Max(body.height - s_fToolRow, 1.0f));
+      return plRectFloat(body.x, body.y + s_fSummaryRow + s_fToolRow, plMath::Max(body.width - s_fDetailsWidth, 100.0f), plMath::Max(body.height - s_fSummaryRow - s_fToolRow, 1.0f));
     case Tab::Memory:
       return plRectFloat(body.x, body.y, body.width, plMath::Max(body.height - s_fTotalsRow, 1.0f));
     case Tab::Log:
@@ -631,13 +987,7 @@ plString plEditorUiAudioProfilerView::GetTabCount(Tab tab) const
 
     case Tab::Memory:
       if (m_bHasSnapshot)
-      {
-        // clip data and stream rings plus the embedded samples of the events, as the memory tab totals them
-        plUInt64 uiMemory = m_Snapshot.m_uiMemoryBytes;
-        for (const plAudioEventMemorySnapshotEntry& event : m_Snapshot.m_Events)
-          uiMemory += event.m_uiSampleBytes;
-        plAudioEngineUi::FormatBytes(uiMemory, s);
-      }
+        plAudioEngineUi::FormatBytes(m_Snapshot.m_uiMemoryBytes, s);
       break;
 
     default:
@@ -680,6 +1030,10 @@ void plEditorUiAudioProfilerView::OnUiUpdate()
       m_bRebuild = true;
   }
 
+  // the cap banner moves the voice table's sort headers
+  if (m_Tab == Tab::Voices && (m_uiVoiceMatches > m_VoiceRows.GetCount()) != m_bBuiltVoiceBanner)
+    m_bRebuild = true;
+
   // the document is not rebuilt while a search field is being typed into
   const plStringView sFocused = GetSurface()->GetCanvas().GetFocusedElementName();
   const bool bTyping = sFocused.StartsWith("Ap.VoiceSearch") || sFocused.StartsWith("Ap.LogSearch");
@@ -697,6 +1051,7 @@ void plEditorUiAudioProfilerView::BuildDocument()
 
   m_bRebuild = false;
   m_vBuiltSize = GetSurface()->GetLogicalSize();
+  m_bBuiltVoiceBanner = m_uiVoiceMatches > m_VoiceRows.GetCount();
   plBlackboard& board = GetSurface()->GetBlackboard();
 
   plUiPanel* pRoot = Panel();
@@ -718,9 +1073,18 @@ void plEditorUiAudioProfilerView::BuildDocument()
 
     const float fOpen = plAudioEngineUi::TextButtonWidth("Open...", false);
     plAudioEngineUi::HitButton(pRoot, plRectFloat(x, y, fOpen, ControlHeight), "Ap.Open", "Open a saved .plAudioCapture", &board);
-    x += fOpen + 14.0f;
+
+    x = GetPauseButtonX();
+    const float fPause = plAudioEngineUi::TextButtonWidth("Resume view", false);
+    plAudioEngineUi::HitButton(pRoot, plRectFloat(x, y, fPause, ControlHeight), "Ap.Pause", "Keep the tabs on the snapshot they show; the target keeps running and Record keeps recording", &board);
+    x += fPause + 14.0f;
 
     plAudioEngineUi::HitButton(pRoot, plRectFloat(x, y, 260.0f, ControlHeight), "Ap.Target", "What the profiler listens to: the editor's engine process, or a Player through its telemetry", &board);
+
+    const float fLive = plAudioEngineUi::TextButtonWidth("Live", false);
+    plAudioEngineUi::HitButton(pRoot, plRectFloat(GetGraphSourceX(), y, fLive, ControlHeight), "Ap.GraphLive", "Graphs: the last 60 seconds of the target, recorded or not; what leaves the window is dropped", &board);
+    plAudioEngineUi::HitButton(pRoot, plRectFloat(GetGraphSourceX() + fLive + 2.0f, y, plAudioEngineUi::TextButtonWidth("Capture", false), ControlHeight), "Ap.GraphCapture",
+      "Graphs: the whole recording or opened capture, with ranges and instance lanes", &board);
 
     const float fClear = plAudioEngineUi::TextButtonWidth("Clear range", false);
     plAudioEngineUi::HitButton(pRoot, plRectFloat(m_vBuiltSize.x - 8.0f - fClear, y, fClear, ControlHeight), "Ap.ClearRange", "Show the whole capture and the live state again", &board);
@@ -753,20 +1117,42 @@ void plEditorUiAudioProfilerView::BuildDocument()
   if (m_Tab == Tab::Voices)
   {
     x = 8.0f + MeasureText("State", FontSize - 1) + 10.0f;
-    for (plUInt32 i = 0; i < 3; ++i)
+    for (plUInt32 i = 0; i < 4; ++i)
     {
-      const float fWidth = plAudioEngineUi::ChipWidth(s_szStateNames[i]);
-      plStringBuilder sTip;
-      sTip.SetFormat("Show {} voices", s_szStateNames[i]);
-      plAudioEngineUi::HitButton(pRoot, plRectFloat(x, fToolY + 1.0f, fWidth, 22.0f), IndexedName("Ap.State", i), sTip, &board);
+      const float fWidth = StateChipWidth(i);
+      plAudioEngineUi::HitButton(pRoot, plRectFloat(x, fToolY + 1.0f, fWidth, 22.0f), IndexedName("Ap.State", i), s_szStateTips[i], &board);
       x += fWidth + 4.0f;
     }
 
+    x = BusDropdownX();
+    plAudioEngineUi::HitButton(pRoot, plRectFloat(x, fToolY, s_fBusDropdownWidth, ControlHeight), "Ap.Bus", "Show the voices of one mixer bus", &board);
+
     plUiPanel* pSearch = Panel(pRoot);
-    plAudioEngineUi::Place(pSearch, plRectFloat(x + 12.0f, fToolY, s_fSearchWidth, ControlHeight));
+    plAudioEngineUi::Place(pSearch, plRectFloat(x + s_fBusDropdownWidth + 8.0f, fToolY, s_fSearchWidth, ControlHeight));
     pSearch->m_Color = plColorGammaUB(0, 0, 0, 0);
-    m_pVoiceSearch->Build(pSearch, "filter event...");
+    m_pVoiceSearch->Build(pSearch, "filter event, owner or bus...");
     m_pVoiceSearch->SetText(m_sVoiceFilter);
+
+    // the column headers sort; they move down with the cap banner
+    plHybridArray<float, 12> xs, ws;
+    LayoutVoiceColumns(xs, ws);
+    const float fHeaderY = GetVoiceRowsTop() - s_fTableHeader;
+    for (plUInt32 i = 0; i < s_uiVoiceColumns; ++i)
+    {
+      plStringBuilder sTip;
+      sTip.SetFormat("Sort by {}; click again to reverse", s_szVoiceColumns[i]);
+      plAudioEngineUi::HitButton(pRoot, plRectFloat(xs[i], fHeaderY, ws[i], s_fTableHeader), IndexedName("Ap.Sort", i), sTip, &board);
+    }
+
+    // the selected voice's links
+    if (m_bHasSelection)
+    {
+      const plRectFloat details = GetDetailsRect();
+      const float fY = details.y + plAudioEngineUi::SectionHeight + 6.0f;
+      const float fOwner = plAudioEngineUi::TextButtonWidth("Select owner", false);
+      plAudioEngineUi::HitButton(pRoot, plRectFloat(details.x + 12.0f, fY, fOwner, ControlHeight), "Ap.VoiceOwner", "Select the objects with the owner's name in the open scene", &board);
+      plAudioEngineUi::HitButton(pRoot, plRectFloat(details.x + 12.0f + fOwner + 6.0f, fY, plAudioEngineUi::TextButtonWidth("Open event", false), ControlHeight), "Ap.VoiceEvent", "Open the event asset", &board);
+    }
   }
   else if (m_Tab == Tab::Log)
   {
@@ -803,6 +1189,18 @@ void plEditorUiAudioProfilerView::OnUiEvent(const plMsgUiEvent& event)
     return;
   }
 
+  if (sId == "Ap.GraphLive" || sId == "Ap.GraphCapture")
+  {
+    const bool bHasCapture = m_pCapture != nullptr && !m_pCapture->IsEmpty();
+    if (sId == "Ap.GraphLive" || bHasCapture)
+      SetGraphSource(sId == "Ap.GraphLive" ? GraphSource::Live : GraphSource::Capture);
+    return;
+  }
+
+  // an opened capture is what the graphs show next
+  if (sId == "Ap.Open")
+    SetGraphSource(GraphSource::Capture);
+
   if (sId == "Ap.Save" || sId == "Ap.Open")
   {
     // the file dialog runs its own loop; it opens after this click has been handled
@@ -816,6 +1214,33 @@ void plEditorUiAudioProfilerView::OnUiEvent(const plMsgUiEvent& event)
   if (sId == "Ap.Target")
   {
     ShowTargetMenu();
+    return;
+  }
+
+  if (sId == "Ap.Pause")
+  {
+    SetPaused(!m_bPaused);
+    return;
+  }
+
+  if (sId == "Ap.Bus")
+  {
+    ShowBusMenu();
+    return;
+  }
+
+  if (sId == "Ap.VoiceOwner" || sId == "Ap.VoiceEvent")
+  {
+    if (!m_bHasSelection)
+      return;
+
+    const plString sTarget = sId == "Ap.VoiceOwner" ? m_SelectedVoice.m_sEntity : m_SelectedVoice.m_sEvent;
+    plDelegate<void(plStringView)> action = sId == "Ap.VoiceOwner" ? m_OnSelectEntity : m_OnOpenEvent;
+
+    // opening a document subscribes to the events this click is dispatched by
+    if (action.IsValid() && !sTarget.IsEmpty())
+      plEditorUiRuntime::RunAfterFrame([action, sTarget]()
+        { action(sTarget); });
     return;
   }
 
@@ -876,11 +1301,16 @@ void plEditorUiAudioProfilerView::OnUiEvent(const plMsgUiEvent& event)
       m_bRebuild = true;
     }
   }
-  else if (const plInt32 iState = indexOf("Ap.State"); iState >= 0 && iState < 3)
+  else if (const plInt32 iState = indexOf("Ap.State"); iState >= 0 && iState < 4)
   {
-    m_StateFilter[iState] = !m_StateFilter[iState];
+    m_VoiceQuery.m_StateFilter[iState] = !m_VoiceQuery.m_StateFilter[iState];
     RebuildVoiceRows();
+    m_bRebuild = true; // the cap banner can come or go, which moves the sort headers
     m_bDrawDirty = true;
+  }
+  else if (const plInt32 iColumn = indexOf("Ap.Sort"); iColumn >= 0 && iColumn < static_cast<plInt32>(s_uiVoiceColumns))
+  {
+    SortVoicesBy(static_cast<plUInt32>(iColumn));
   }
   else if (const plInt32 iType = indexOf("Ap.LogType"); iType >= 0 && iType < static_cast<plInt32>(LogCategoryCount))
   {
@@ -975,7 +1405,14 @@ void plEditorUiAudioProfilerView::DrawHeader()
 
     const float fOpen = plAudioEngineUi::TextButtonWidth("Open...", false);
     plAudioEngineUi::TextButton(m_Writer, plRectFloat(x, y, fOpen, ControlHeight), "Open...");
-    x += fOpen + 14.0f;
+
+    // Pause view, outlined in the warning colour while paused
+    x = GetPauseButtonX();
+    const plRectFloat pause(x, y, plAudioEngineUi::TextButtonWidth("Resume view", false), ControlHeight);
+    plAudioEngineUi::TextButton(m_Writer, pause, m_bPaused ? "Resume view" : "Pause view");
+    if (m_bPaused)
+      m_Writer.RectOutline(pause, Warning(), 1.0f, 4.0f);
+    x += pause.width + 14.0f;
 
     // the target, and whether it answers
     plColorGammaUB dot = Danger();
@@ -995,6 +1432,12 @@ void plEditorUiAudioProfilerView::DrawHeader()
         break;
     }
 
+    if (m_bPaused)
+    {
+      dot = Warning();
+      sState.Append(" \xC2\xB7 view paused");
+    }
+
     plAudioEngineUi::Dropdown(m_Writer, plRectFloat(x, y, 260.0f, ControlHeight), "Target", m_sTargetText);
     x += 260.0f + 10.0f;
     plAudioEngineUi::DotText(m_Writer, plRectFloat(x, 0.0f, 200.0f, s_fHeaderRow), sState, dot, plAudioEngineUi::Mix(Foreground(), dot, 0.82f), FontSize - 1);
@@ -1003,7 +1446,18 @@ void plEditorUiAudioProfilerView::DrawHeader()
     const float fClear = plAudioEngineUi::TextButtonWidth("Clear range", false);
     plAudioEngineUi::TextButton(m_Writer, plRectFloat(size.x - 8.0f - fClear, y, fClear, ControlHeight), "Clear range", {}, HasRange());
 
-    plStringBuilder sRange = "range: whole capture";
+    // Live and Capture: what the graphs plot; Capture waits for a recording or an opened file
+    {
+      const bool bLive = IsGraphLive();
+      const bool bHasCapture = m_pCapture != nullptr && !m_pCapture->IsEmpty();
+      const plRectFloat live(GetGraphSourceX(), y, plAudioEngineUi::TextButtonWidth("Live", false), ControlHeight);
+      const plRectFloat capture(live.x + live.width + 2.0f, y, plAudioEngineUi::TextButtonWidth("Capture", false), ControlHeight);
+      plAudioEngineUi::TextButton(m_Writer, live, "Live");
+      plAudioEngineUi::TextButton(m_Writer, capture, "Capture", {}, bHasCapture);
+      m_Writer.RectOutline(bLive ? live : capture, Accent(), 1.0f, 4.0f);
+    }
+
+    plStringBuilder sRange = IsGraphLive() ? "live: last 60 s" : "range: whole capture";
     if (HasRange())
     {
       double fStart = 0.0, fEnd = 0.0;
@@ -1074,32 +1528,75 @@ void plEditorUiAudioProfilerView::DrawVoices()
 
   const plRectFloat tool = GetToolRowRect();
   const plRectFloat table = GetTableRect();
-  const plRectFloat details = GetDetailsRect();
 
-  // tool row: state chips; the search field is a retained element
+  DrawVoiceSummary();
+
+  // tool row: state chips with their counts, the bus dropdown; the search field is a retained element
+  plUInt32 counts[4] = {};
+  plAudioProfilerVoiceQuery::CountStates(m_Snapshot, counts);
+
+  m_Writer.Rect(tool, Surface());
   m_Writer.Text(plRectFloat(8.0f, tool.y, 60.0f, s_fToolRow), "State", Dim(), FontSize - 1);
   float x = 8.0f + MeasureText("State", FontSize - 1) + 10.0f;
-  for (plUInt32 i = 0; i < 3; ++i)
+  for (plUInt32 i = 0; i < 4; ++i)
   {
-    const float fWidth = plAudioEngineUi::ChipWidth(s_szStateNames[i]);
-    plAudioEngineUi::Chip(m_Writer, plRectFloat(x, tool.y + 4.0f, fWidth, 22.0f), s_szStateNames[i], StateColor(static_cast<plUInt8>(i)), m_StateFilter[i]);
+    const float fWidth = StateChipWidth(i);
+    const plRectFloat chip(x, tool.y + 4.0f, fWidth, 22.0f);
+    plAudioEngineUi::Chip(m_Writer, chip, s_szStateNames[i], StateColor(static_cast<plUInt8>(i)), m_VoiceQuery.m_StateFilter[i]);
+
+    // the count in the room StateChipWidth leaves at the chip's right end
+    plStringBuilder sCount;
+    sCount.SetFormat("{}", counts[i]);
+    m_Writer.Text(plRectFloat(chip.x + fWidth - 32.0f, chip.y, 24.0f, chip.height), sCount, m_VoiceQuery.m_StateFilter[i] ? Muted() : Dim(), MinFontSize, plUiTextHAlign::Right, plUiTextVAlign::Center, true);
     x += fWidth + 4.0f;
   }
   m_Writer.Rect(plRectFloat(x + 4.0f, tool.y + 7.0f, 1.0f, 16.0f), Line());
+
+  plAudioEngineUi::Dropdown(m_Writer, plRectFloat(BusDropdownX(), tool.y + 3.0f, s_fBusDropdownWidth, ControlHeight), "Bus", m_VoiceQuery.m_sBus.IsEmpty() ? plStringView("All") : m_VoiceQuery.m_sBus.GetView());
+
+  // how many rows the filters leave, of all voices
+  plStringBuilder sShown;
+  const plUInt32 uiAll = m_Snapshot.m_Voices.GetCount() + (m_VoiceQuery.m_StateFilter[plAudioVoiceSnapshotEntry::Ended] ? m_Snapshot.m_Ended.GetCount() : 0);
+  sShown.SetFormat("{} of {} shown", m_VoiceRows.GetCount(), uiAll);
+  m_Writer.Text(plRectFloat(table.x + table.width - 160.0f, tool.y, 152.0f, s_fToolRow), sShown, Dim(), MinFontSize + 1, plUiTextHAlign::Right, plUiTextVAlign::Center, true);
   m_Writer.Rect(plRectFloat(0.0f, tool.y + s_fToolRow - 1.0f, tool.width, 1.0f), Line());
 
-  // table
-  const char* const titles[] = {"Event", "Entity", "State", "Prio", "Audibility", "Dist", "Bus", "Codec"};
-  const float widths[] = {0.0f, 80.0f, 86.0f, 50.0f, 104.0f, 70.0f, 100.0f, 120.0f};
-  const bool right[] = {false, false, false, true, false, true, false, false};
-
   m_Writer.Rect(table, Surface());
-  DrawTableHeader(table, titles, widths, right);
 
-  plHybridArray<float, 8> xs, ws;
-  LayoutColumns(table.x, table.width, widths, xs, ws);
+  // the cap banner: rows the query cut are announced, never silently dropped
+  plRectFloat header = table;
+  if (m_uiVoiceMatches > m_VoiceRows.GetCount())
+  {
+    const plRectFloat banner(table.x, table.y, table.width, s_fBannerRow);
+    m_Writer.Rect(banner, plAudioEngineUi::Mix(Surface(), Warning(), 0.14f));
 
-  const plRectFloat rows(table.x, table.y + s_fTableHeader, table.width, plMath::Max(table.height - s_fTableHeader, 1.0f));
+    plStringBuilder sBanner;
+    sBanner.SetFormat("Showing {} of {} voices. Filter by state, bus or name to see the rest.", m_VoiceRows.GetCount(), m_uiVoiceMatches);
+    m_Writer.Text(plRectFloat(banner.x + 10.0f, banner.y, banner.width - 20.0f, banner.height), sBanner, Warning(), FontSize - 2);
+
+    header = plRectFloat(table.x, table.y + s_fBannerRow, table.width, table.height - s_fBannerRow);
+  }
+
+  // the header marks the sort column; the default order is the loudest first
+  const plAudioProfilerVoiceQuery::SortKey sortKey = m_VoiceQuery.m_SortKey == plAudioProfilerVoiceQuery::SortKey::Default ? plAudioProfilerVoiceQuery::SortKey::Audibility : m_VoiceQuery.m_SortKey;
+  const bool bAscending = m_VoiceQuery.m_SortKey != plAudioProfilerVoiceQuery::SortKey::Default && m_VoiceQuery.m_bAscending;
+
+  plStringBuilder titles[s_uiVoiceColumns];
+  const char* szTitles[s_uiVoiceColumns] = {};
+  for (plUInt32 i = 0; i < s_uiVoiceColumns; ++i)
+  {
+    titles[i] = s_szVoiceColumns[i];
+    if (s_VoiceColumnKeys[i] == sortKey)
+      titles[i].Append(bAscending ? " \xE2\x96\xB4" : " \xE2\x96\xBE");
+    szTitles[i] = titles[i].GetData();
+  }
+  DrawTableHeader(header, plArrayPtr<const char* const>(szTitles), plArrayPtr<const float>(s_fVoiceColumnWidths), plArrayPtr<const bool>(s_bVoiceColumnRight));
+
+  plHybridArray<float, 12> xs, ws;
+  LayoutVoiceColumns(xs, ws);
+
+  const float fRowsTop = GetVoiceRowsTop();
+  const plRectFloat rows(table.x, fRowsTop, table.width, plMath::Max(table.y + table.height - fRowsTop, 1.0f));
   m_Writer.PushClip(rows);
 
   for (plUInt32 r = 0; r < m_VoiceRows.GetCount(); ++r)
@@ -1108,9 +1605,11 @@ void plEditorUiAudioProfilerView::DrawVoices()
     if (y + s_fRow < rows.y || y > rows.y + rows.height)
       continue;
 
+    // a slot that plays again reuses the id of the voice that ended in it, so ended and live rows are told apart
     const plAudioVoiceSnapshotEntry& voice = *m_VoiceRows[r];
-    const bool bSelected = m_bHasSelection && voice.m_uiId == m_uiSelectedId;
-    const plColorGammaUB text = bSelected ? Foreground() : Muted();
+    const bool bEnded = voice.m_uiState == plAudioVoiceSnapshotEntry::Ended;
+    const bool bSelected = m_bHasSelection && voice.m_uiId == m_uiSelectedId && bEnded == (m_SelectedVoice.m_uiState == plAudioVoiceSnapshotEntry::Ended);
+    const plColorGammaUB text = bEnded ? Dim() : (bSelected ? Foreground() : Muted());
 
     if (bSelected)
       m_Writer.Rect(plRectFloat(rows.x, y, rows.width, s_fRow), Selection());
@@ -1119,29 +1618,146 @@ void plEditorUiAudioProfilerView::DrawVoices()
     auto cell = [&](plUInt32 c)
     { return plRectFloat(xs[c] + 8.0f, y, ws[c] - 16.0f, s_fRow); };
 
-    m_Writer.Text(cell(0), ShortName(voice.m_sEvent), Foreground(), FontSize - 1);
-    m_Writer.Text(cell(1), EntityText(voice), text, FontSize - 1);
-    plAudioEngineUi::DotText(m_Writer, cell(2), s_szStateNames[plMath::Min<plUInt8>(voice.m_uiState, 2)], StateColor(voice.m_uiState), plAudioEngineUi::Mix(Foreground(), StateColor(voice.m_uiState), 0.82f), FontSize - 1);
+    m_Writer.Text(cell(0), ShortName(voice.m_sEvent), bEnded ? Dim() : Foreground(), FontSize - 1);
+    m_Writer.Text(cell(1), OwnerText(voice), voice.m_uiEntityId == 0 ? Dim() : text, FontSize - 1);
+
+    // a stolen or killed voice says so in the danger colour
+    const bool bForced = plAudioStopReason::IsForced(static_cast<plAudioStopReason::Enum>(voice.m_uiStopReason));
+    const plColorGammaUB stateText = bForced ? Danger() : (bEnded ? Dim() : plAudioEngineUi::Mix(Foreground(), StateColor(voice.m_uiState), 0.82f));
+    plAudioEngineUi::DotText(m_Writer, cell(2), StateText(voice), StateColor(voice.m_uiState), stateText, FontSize - 2);
 
     plStringBuilder s;
     s.SetFormat("{}", voice.m_uiPriority);
     m_Writer.Text(cell(3), s, text, FontSize - 2, plUiTextHAlign::Right, plUiTextVAlign::Center, true);
 
     const plRectFloat audibility = cell(4);
-    plAudioEngineUi::ValueBar(m_Writer, plRectFloat(audibility.x, y + 8.0f, plMath::Min(80.0f, audibility.width), 6.0f), voice.m_fAudibility, Muted());
+    plAudioEngineUi::ValueBar(m_Writer, plRectFloat(audibility.x, y + 8.0f, plMath::Min(70.0f, audibility.width), 6.0f), voice.m_fAudibility, Muted());
 
-    s.SetFormat("{} m", plArgF(voice.m_fDistance, 1));
-    m_Writer.Text(cell(5), s, text, FontSize - 2, plUiTextHAlign::Right, plUiTextVAlign::Center, true);
-    m_Writer.Text(cell(6), voice.m_sBus, text, FontSize - 1);
-    m_Writer.Text(cell(7), CodecText(voice), text, FontSize - 2, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
+    m_Writer.Text(cell(5), VolumeText(voice.m_fVolume), text, FontSize - 2, plUiTextHAlign::Right, plUiTextVAlign::Center, true);
+
+    if (voice.m_uiEntityId != 0)
+      s.SetFormat("{} m", plArgF(voice.m_fDistance, 1));
+    else
+      s = "-";
+    m_Writer.Text(cell(6), s, text, FontSize - 2, plUiTextHAlign::Right, plUiTextVAlign::Center, true);
+    m_Writer.Text(cell(7), voice.m_sBus, text, FontSize - 1);
+    m_Writer.Text(cell(8), CodecText(voice), text, FontSize - 2, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
   }
 
   m_Writer.PopClip();
 
   if (m_VoiceRows.IsEmpty())
-    m_Writer.Text(plRectFloat(rows.x, rows.y + 8.0f, rows.width, 20.0f), m_bHasSnapshot ? "No voices" : "No data from the engine process", Dim(), FontSize - 1, plUiTextHAlign::Center);
+  {
+    const char* szEmpty = "No data from the target: it publishes snapshots while a scene simulates or plays";
+    if (m_bHasSnapshot)
+      szEmpty = (m_Snapshot.m_Voices.IsEmpty() && m_Snapshot.m_Ended.IsEmpty()) ? "No voices" : "No voices match the filters";
 
-  // details of the selected voice
+    m_Writer.Text(plRectFloat(rows.x, rows.y + 8.0f, rows.width, 20.0f), szEmpty, Dim(), FontSize - 1, plUiTextHAlign::Center);
+  }
+
+  DrawVoiceDetails(GetDetailsRect());
+}
+
+void plEditorUiAudioProfilerView::DrawVoiceSummary()
+{
+  using namespace plEditorUi;
+
+  const plAudioProfilingSnapshot& s = m_Snapshot;
+  const plRectFloat summary = GetVoiceSummaryRect();
+  m_Writer.Rect(summary, Line());
+
+  plUInt32 uiStolen = 0, uiKilled = 0;
+  for (const plAudioEndedVoiceSnapshotEntry& ended : s.m_Ended)
+  {
+    const auto reason = static_cast<plAudioStopReason::Enum>(ended.m_Voice.m_uiStopReason);
+    if (reason == plAudioStopReason::StolenOldest || reason == plAudioStopReason::StolenQuietest)
+      ++uiStolen;
+    else if (plAudioStopReason::IsForced(reason))
+      ++uiKilled;
+  }
+
+  for (plUInt32 i = 0; i < s_uiSummaryCards; ++i)
+  {
+    const plRectFloat card = GetVoiceCardRect(i);
+    m_Writer.Rect(plRectFloat(card.x, card.y, card.width - (i + 1 < s_uiSummaryCards ? 1.0f : 0.0f), card.height), Surface());
+
+    // title on the left, scope on the right
+    plStringBuilder sTitle = s_szCardTitles[i];
+    sTitle.ToUpper();
+    m_Writer.Text(plRectFloat(card.x + 10.0f, card.y + 4.0f, card.width - 20.0f, 14.0f), sTitle, Dim(), MinFontSize);
+    m_Writer.Text(plRectFloat(card.x + 10.0f, card.y + 4.0f, card.width - 20.0f, 14.0f), s_szCardScopes[i], Dim(), MinFontSize, plUiTextHAlign::Right);
+
+    const plRectFloat value(card.x + 10.0f, card.y + 18.0f, card.width - 20.0f, 18.0f);
+    const plRectFloat foot(card.x + 10.0f, card.y + 36.0f, card.width - 20.0f, 12.0f);
+
+    if (!m_bHasSnapshot)
+    {
+      m_Writer.Text(value, "-", Muted(), FontSize, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
+      continue;
+    }
+
+    plStringBuilder sValue, sFoot;
+    float fBar = -1.0f;
+    plColorGammaUB bar = Accent();
+
+    switch (i)
+    {
+      case 0:
+        sValue.SetFormat("{} / {}", s.m_uiRealVoices, s.m_uiMaxReal);
+        fBar = s.m_uiMaxReal > 0 ? static_cast<float>(s.m_uiRealVoices) / s.m_uiMaxReal : 0.0f;
+        bar = fBar >= 1.0f ? Warning() : Accent();
+        break;
+      case 1:
+        sValue.SetFormat("{} / {}", s.m_uiVirtualVoices, s.m_uiMaxVirtual);
+        fBar = s.m_uiMaxVirtual > 0 ? static_cast<float>(s.m_uiVirtualVoices) / s.m_uiMaxVirtual : 0.0f;
+        bar = plAudioEngineUi::CategoryColor("XR");
+        break;
+      case 2:
+        sValue.SetFormat("{}", s.m_Ended.GetCount());
+        sFoot.SetFormat("{} stolen \xC2\xB7 {} killed \xC2\xB7 {} other", uiStolen, uiKilled, s.m_Ended.GetCount() - uiStolen - uiKilled);
+        break;
+      case 3:
+        sValue.SetFormat("{}%", plArgF(s.m_fDspLoad * 100.0f, 1));
+        fBar = s.m_fDspLoad;
+        bar = s.m_fDspLoad >= 0.8f ? Danger() : Accent();
+        break;
+      case 4:
+        sValue.SetFormat("{} ms", plArgF(s.m_fUpdateMs, 2));
+        sFoot.SetFormat("{} instances \xC2\xB7 {} streams", s.m_uiInstances, s.m_uiStreams);
+        break;
+      default:
+      {
+        plStringBuilder sBytes, sBudget;
+        plAudioEngineUi::FormatBytes(s.m_uiMemoryBytes, sBytes);
+        if (s.m_uiMemoryBudgetBytes > 0)
+        {
+          plAudioEngineUi::FormatBytes(s.m_uiMemoryBudgetBytes, sBudget);
+          sValue.SetFormat("{} / {}", sBytes, sBudget);
+          fBar = static_cast<float>(static_cast<double>(s.m_uiMemoryBytes) / static_cast<double>(s.m_uiMemoryBudgetBytes));
+          bar = fBar > 1.0f ? Danger() : plAudioEngineUi::AudioColor();
+        }
+        else
+        {
+          sValue = sBytes;
+          sFoot = "no bank budget";
+        }
+        break;
+      }
+    }
+
+    m_Writer.Text(value, sValue, Foreground(), FontSize, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
+
+    if (fBar >= 0.0f)
+      plAudioEngineUi::ValueBar(m_Writer, plRectFloat(foot.x, foot.y + 4.0f, foot.width, 4.0f), plMath::Min(fBar, 1.0f), bar);
+    else
+      m_Writer.Text(foot, sFoot, (i == 2 && uiStolen + uiKilled > 0) ? Danger() : Dim(), MinFontSize, plUiTextHAlign::Left, plUiTextVAlign::Center);
+  }
+}
+
+void plEditorUiAudioProfilerView::DrawVoiceDetails(const plRectFloat& details)
+{
+  using namespace plEditorUi;
+
   m_Writer.Rect(details, Surface());
   m_Writer.Rect(plRectFloat(details.x, details.y, 1.0f, details.height), Line());
 
@@ -1154,30 +1770,74 @@ void plEditorUiAudioProfilerView::DrawVoices()
   }
 
   const plAudioVoiceSnapshotEntry& voice = m_SelectedVoice;
+  const bool bEnded = m_bSelectedVoiceEnded || voice.m_uiState == plAudioVoiceSnapshotEntry::Ended;
   plAudioEngineUi::SectionHeader(m_Writer, section, ShortName(voice.m_sEvent), plAudioEngineUi::AudioColor());
 
-  plStringBuilder values[PL_ARRAY_SIZE(s_szDetailNames)];
-  values[0] = EntityText(voice);
-  values[1] = m_bSelectedVoiceEnded ? plStringView("ended") : plStringView(s_szStateNames[plMath::Min<plUInt8>(voice.m_uiState, 2)]);
-  values[2].SetFormat("{}", voice.m_uiPriority);
-  values[3].SetFormat("{}", plArgF(voice.m_fAudibility, 3));
-  values[4].SetFormat("{} m", plArgF(voice.m_fDistance, 2));
-  values[5] = voice.m_sBus;
-  values[6] = CodecText(voice);
-  values[7].SetFormat("{} s", plArgF(voice.m_fAge, 2));
-  values[8].SetFormat("{}", plArgF(voice.m_fOcclusion, 2));
+  // Select owner and Open event first, so a short panel shows them (the document's hit buttons sit on them)
+  const float fButtonY = section.y + section.height + 6.0f;
+  const float fOwner = plAudioEngineUi::TextButtonWidth("Select owner", false);
+  plAudioEngineUi::TextButton(m_Writer, plRectFloat(details.x + 12.0f, fButtonY, fOwner, ControlHeight), "Select owner", {}, !voice.m_sEntity.IsEmpty());
+  plAudioEngineUi::TextButton(m_Writer, plRectFloat(details.x + 12.0f + fOwner + 6.0f, fButtonY, plAudioEngineUi::TextButtonWidth("Open event", false), ControlHeight), "Open event");
 
-  float y = section.y + section.height + 6.0f;
+  const auto reason = static_cast<plAudioStopReason::Enum>(voice.m_uiStopReason);
+
+  plStringBuilder values[PL_ARRAY_SIZE(s_szDetailNames)];
+  values[0] = OwnerText(voice);
+  if (voice.m_uiEntityId != 0)
+    values[1].SetFormat("#{}", voice.m_uiEntityId);
+  else
+    values[1] = "-";
+  values[2] = bEnded ? plString("ended") : StateText(voice);
+  values[3] = reason != plAudioStopReason::None ? plStringView(plAudioStopReason::GetName(reason)) : plStringView(bEnded ? "not recorded" : "-");
+  values[4].SetFormat("{}", voice.m_uiPriority);
+  values[5].SetFormat("{}", plArgF(voice.m_fAudibility, 3));
+  values[6].SetFormat("{} \xC2\xB7 {}", VolumeText(voice.m_fVolume), plArgF(voice.m_fVolume, 3));
+  if (voice.m_uiEntityId != 0)
+    values[7].SetFormat("{} m", plArgF(voice.m_fDistance, 2));
+  else
+    values[7] = "-";
+  values[8].SetFormat("{}", plArgF(voice.m_fOcclusion, 2));
+  values[9] = voice.m_sBus;
+  values[10] = CodecText(voice);
+  values[11].SetFormat("{} s", plArgF(voice.m_fAge, 2));
+
+  float y = fButtonY + ControlHeight + 6.0f;
   for (plUInt32 i = 0; i < PL_ARRAY_SIZE(s_szDetailNames); ++i)
   {
     const plRectFloat line(details.x + 10.0f, y, details.width - 20.0f, 18.0f);
     m_Writer.Text(line, s_szDetailNames[i], Dim(), FontSize - 1);
 
     plColorGammaUB value = Muted();
-    if (i == 1)
-      value = m_bSelectedVoiceEnded ? Dim() : plAudioEngineUi::Mix(Foreground(), StateColor(voice.m_uiState), 0.82f);
+    if (i == 2)
+      value = bEnded ? Dim() : plAudioEngineUi::Mix(Foreground(), StateColor(voice.m_uiState), 0.82f);
+    else if (i == 3 && plAudioStopReason::IsForced(reason))
+      value = Danger();
 
     m_Writer.Text(line, values[i], value, FontSize - 2, plUiTextHAlign::Right, plUiTextVAlign::Center, true);
+    y += 20.0f;
+  }
+
+  // the instance's parameter values, as bars across the parameter's last known range
+  y += 4.0f;
+  plStringBuilder sCount;
+  sCount.SetFormat("{}", voice.m_Parameters.GetCount());
+  plAudioEngineUi::SectionHeader(m_Writer, plRectFloat(details.x + 1.0f, y, details.width - 1.0f, plAudioEngineUi::SectionHeight), "Parameters", plAudioEngineUi::AudioColor(), sCount);
+  y += plAudioEngineUi::SectionHeight + 4.0f;
+
+  if (voice.m_Parameters.IsEmpty())
+  {
+    m_Writer.Text(plRectFloat(details.x + 10.0f, y, details.width - 20.0f, 18.0f), "The event has no parameters.", Dim(), FontSize - 2);
+    return;
+  }
+
+  for (const plAudioVoiceParameterSnapshotEntry& parameter : voice.m_Parameters)
+  {
+    const plRectFloat line(details.x + 10.0f, y, details.width - 20.0f, 18.0f);
+    m_Writer.Text(line, parameter.m_sName, Dim(), FontSize - 1);
+
+    plStringBuilder sValue;
+    sValue.SetFormat("{}", plArgF(parameter.m_fValue, 2));
+    m_Writer.Text(line, sValue, Muted(), FontSize - 2, plUiTextHAlign::Right, plUiTextVAlign::Center, true);
     y += 20.0f;
   }
 }
@@ -1451,40 +2111,19 @@ void plEditorUiAudioProfilerView::DrawStatus()
   m_Writer.Rect(status, Background());
   m_Writer.Rect(plRectFloat(0.0f, status.y, status.width, 1.0f), Line());
 
-  const plAudioProfilingSnapshot& s = m_Snapshot;
-
-  // "Real 5/32" ... with the values in the code face
+  // "Real 5/32" ... with the values in the code face; GetToolTipAt says what each one measures
   plStringBuilder values[7];
-  const char* labels[7] = {"Real", "Virtual", "Instances", "DSP", "Audio thread", "Streams", "Memory"};
+  float xs[8] = {};
+  const plUInt32 uiShown = LayoutStatus(m_Snapshot, m_bHasSnapshot, size.x, values, xs);
 
-  if (m_bHasSnapshot)
+  for (plUInt32 i = 0; i < uiShown; ++i)
   {
-    values[0].SetFormat("{}/{}", s.m_uiRealVoices, s.m_uiMaxReal);
-    values[1].SetFormat("{}/{}", s.m_uiVirtualVoices, s.m_uiMaxVirtual);
-    values[2].SetFormat("{}", s.m_uiInstances);
-    values[3].SetFormat("{}%", plArgF(s.m_fDspLoad * 100.0f, 1));
-    values[4].SetFormat("{} ms", plArgF(s.m_fUpdateMs, 2));
-    values[5].SetFormat("{}", s.m_uiStreams);
-    plAudioEngineUi::FormatBytes(s.m_uiMemoryBytes, values[6]);
-  }
-  else
-  {
-    for (plStringBuilder& value : values)
-      value = "-";
+    const float fLabel = MeasureText(s_szStatusLabels[i], FontSize - 1) + 5.0f;
+    m_Writer.Text(plRectFloat(xs[i], status.y + 1.0f, fLabel, status.height - 1.0f), s_szStatusLabels[i], Dim(), FontSize - 1);
+    m_Writer.Text(plRectFloat(xs[i] + fLabel, status.y + 1.0f, xs[i + 1] - xs[i] - fLabel, status.height - 1.0f), values[i], Muted(), FontSize - 2, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
   }
 
-  float x = 8.0f;
-  for (plUInt32 i = 0; i < 7; ++i)
-  {
-    const float fLabel = MeasureText(labels[i], FontSize - 1) + 5.0f;
-    const float fValue = MeasureCodeText(values[i], FontSize - 2) + 2.0f;
-    if (x + fLabel + fValue > size.x - 8.0f)
-      break;
-
-    m_Writer.Text(plRectFloat(x, status.y + 1.0f, fLabel, status.height - 1.0f), labels[i], Dim(), FontSize - 1);
-    m_Writer.Text(plRectFloat(x + fLabel, status.y + 1.0f, fValue, status.height - 1.0f), values[i], Muted(), FontSize - 2, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
-    x += fLabel + fValue + 12.0f;
-  }
+  float x = xs[uiShown];
 
   // the capture at the right end, or a note that just happened
   plStringBuilder sCapture;
@@ -1527,7 +2166,8 @@ void plEditorUiAudioProfilerView::ClampScroll()
       fContent = m_Lanes.GetCount() * s_fLaneRow + s_fTableHeader;
       break;
     case Tab::Voices:
-      fContent = m_VoiceRows.GetCount() * s_fRow;
+      // the cap banner takes room from the rows
+      fContent = m_VoiceRows.GetCount() * s_fRow + (GetVoiceRowsTop() - table.y - s_fTableHeader);
       break;
     case Tab::Memory:
       fContent = m_MemoryRows.GetCount() * s_fRow;
@@ -1558,8 +2198,8 @@ void plEditorUiAudioProfilerView::OnPointer(const plEditorUiPointerEvent& e)
 
   const plRectFloat table = GetTableRect();
 
-  // the graphs: the pointer's time, and dragging out a range
-  if (m_pCapture != nullptr && !m_pCapture->IsEmpty())
+  // the capture's graphs: the pointer's time, and dragging out a range
+  if (!IsGraphLive())
   {
     const plRectFloat graph = GetGraphRect();
     const bool bInGraph = plRectFloat(graph.x - 4.0f, graph.y - 4.0f, graph.width + 8.0f, graph.height + 20.0f).Contains(e.m_vPosition);
@@ -1657,7 +2297,7 @@ void plEditorUiAudioProfilerView::OnPointer(const plEditorUiPointerEvent& e)
   if (e.m_Type != Type::Press || e.m_Button != plEditorUiPointerEvent::Button::Left || m_Tab != Tab::Voices || !e.m_sElement.IsEmpty())
     return;
 
-  const float fRowsTop = table.y + s_fTableHeader;
+  const float fRowsTop = GetVoiceRowsTop();
   if (!table.Contains(e.m_vPosition) || e.m_vPosition.y < fRowsTop)
     return;
 
@@ -1665,10 +2305,13 @@ void plEditorUiAudioProfilerView::OnPointer(const plEditorUiPointerEvent& e)
   if (iRow < 0 || iRow >= static_cast<plInt32>(m_VoiceRows.GetCount()))
     return;
 
+  // the details' Select owner and Open event come with the first selection
+  m_bRebuild |= !m_bHasSelection;
+
   m_uiSelectedId = m_VoiceRows[iRow]->m_uiId;
   m_SelectedVoice = *m_VoiceRows[iRow];
   m_bHasSelection = true;
-  m_bSelectedVoiceEnded = false;
+  m_bSelectedVoiceEnded = m_SelectedVoice.m_uiState == plAudioVoiceSnapshotEntry::Ended;
   m_bDrawDirty = true;
 }
 
@@ -1680,6 +2323,31 @@ plString plEditorUiAudioProfilerView::GetToolTipAt(const plVec2& vLogical) const
 
   const plRectFloat table = GetTableRect();
   const plRectFloat tool = GetToolRowRect();
+
+  // the status row: what each value measures, and where
+  const plVec2 size = GetSurface()->GetLogicalSize();
+  if (vLogical.y >= size.y - s_fStatus)
+  {
+    plStringBuilder values[7];
+    float xs[8] = {};
+    const plUInt32 uiShown = LayoutStatus(m_Snapshot, m_bHasSnapshot, size.x, values, xs);
+    for (plUInt32 i = 0; i < uiShown; ++i)
+    {
+      if (vLogical.x >= xs[i] && vLogical.x < xs[i + 1])
+        return s_szStatusTips[i];
+    }
+    return {};
+  }
+
+  if (m_Tab == Tab::Voices && GetVoiceSummaryRect().Contains(vLogical))
+  {
+    for (plUInt32 i = 0; i < s_uiSummaryCards; ++i)
+    {
+      if (GetVoiceCardRect(i).Contains(vLogical))
+        return s_szCardTips[i];
+    }
+    return {};
+  }
 
   if (m_Tab == Tab::Buses)
   {
@@ -1733,7 +2401,7 @@ plString plEditorUiAudioProfilerView::GetToolTipAt(const plVec2& vLogical) const
     return {};
   }
 
-  const float fRowsTop = table.y + s_fTableHeader;
+  const float fRowsTop = m_Tab == Tab::Voices ? GetVoiceRowsTop() : table.y + s_fTableHeader;
   if (!table.Contains(vLogical) || vLogical.y < fRowsTop)
     return {};
 
@@ -1745,7 +2413,11 @@ plString plEditorUiAudioProfilerView::GetToolTipAt(const plVec2& vLogical) const
   {
     const plAudioVoiceSnapshotEntry& voice = *m_VoiceRows[iRow];
     plStringBuilder sTip;
-    sTip.SetFormat("{}\nAudibility {}", voice.m_sEvent, plArgF(voice.m_fAudibility, 3));
+    sTip.SetFormat("{}\nOwner {}\nAudibility {} \xC2\xB7 volume {}", voice.m_sEvent, OwnerText(voice), plArgF(voice.m_fAudibility, 3), VolumeText(voice.m_fVolume));
+
+    if (voice.m_uiStopReason != plAudioStopReason::None)
+      sTip.AppendFormat("\nStop reason: {}", plAudioStopReason::GetName(static_cast<plAudioStopReason::Enum>(voice.m_uiStopReason)));
+
     return sTip;
   }
 
@@ -1803,15 +2475,17 @@ float plEditorUiAudioProfilerView::GetGraphHeight() const
 double plEditorUiAudioProfilerView::GraphTimeAt(float x) const
 {
   const plRectFloat graph = GetGraphRect();
-  const double fDuration = (m_pCapture != nullptr && !m_pCapture->IsEmpty()) ? plMath::Max(m_pCapture->GetSamples().PeekBack().m_fTime, 1.0) : 1.0;
-  return plMath::Clamp(static_cast<double>(x - graph.x) / graph.width, 0.0, 1.0) * fDuration;
+  double fStart = 0.0, fEnd = 0.0;
+  GetGraphSpan(fStart, fEnd);
+  return fStart + plMath::Clamp(static_cast<double>(x - graph.x) / graph.width, 0.0, 1.0) * (fEnd - fStart);
 }
 
 float plEditorUiAudioProfilerView::GraphXAt(double fTime) const
 {
   const plRectFloat graph = GetGraphRect();
-  const double fDuration = (m_pCapture != nullptr && !m_pCapture->IsEmpty()) ? plMath::Max(m_pCapture->GetSamples().PeekBack().m_fTime, 1.0) : 1.0;
-  return graph.x + static_cast<float>(fTime / fDuration) * graph.width;
+  double fStart = 0.0, fEnd = 0.0;
+  GetGraphSpan(fStart, fEnd);
+  return graph.x + static_cast<float>((fTime - fStart) / plMath::Max(fEnd - fStart, 0.001)) * graph.width;
 }
 
 void plEditorUiAudioProfilerView::DrawGraphs()
@@ -1822,9 +2496,9 @@ void plEditorUiAudioProfilerView::DrawGraphs()
   const plRectFloat graph = GetGraphRect();
   m_Writer.Rect(plRectFloat(0.0f, s_fHeaderRow, size.x, GetGraphHeight()), Background());
 
-  const bool bEmpty = m_pCapture == nullptr || m_pCapture->IsEmpty();
-  const auto* pSamples = bEmpty ? nullptr : &m_pCapture->GetSamples();
-  const plUInt32 uiCount = bEmpty ? 0 : pSamples->GetCount();
+  const bool bLive = IsGraphLive();
+  const plDynamicArray<plAudioProfilerCapture::Sample>* pSamples = &GetGraphSamples();
+  const plUInt32 uiCount = pSamples->GetCount();
 
   // the scale of each row: the capture's largest value with some headroom
   float fMaxVoices = 8.0f, fMaxStreams = 4.0f, fMaxMemory = 1.0f;
@@ -1836,7 +2510,7 @@ void plEditorUiAudioProfilerView::DrawGraphs()
     fMaxMemory = plMath::Max(fMaxMemory, static_cast<float>(plMath::Max(s.m_uiMemoryBytes, s.m_uiBudgetBytes) / (1024.0 * 1024.0)));
   }
 
-  const char* szRows[4] = {"Voices", "DSP", "Streams", "Memory"};
+  const char* szRows[4] = {"Voices", "Mix CPU", "Streams", "Audio data"};
   const float rowMax[4] = {fMaxVoices * 1.1f, 100.0f, fMaxStreams * 1.25f, fMaxMemory * 1.1f};
   const float fRowHeight = graph.height / 4.0f;
 
@@ -1849,7 +2523,7 @@ void plEditorUiAudioProfilerView::DrawGraphs()
     m_Writer.Rect(plot, Field(), 3.0f);
 
     // the range under the series (the drawing has no blending, so it is a tint of the well)
-    if (HasRange() && uiCount > 0)
+    if (!bLive && HasRange() && uiCount > 0)
     {
       double fStart = 0.0, fEnd = 0.0;
       GetRange(fStart, fEnd);
@@ -1955,22 +2629,33 @@ void plEditorUiAudioProfilerView::DrawGraphs()
 
   if (uiCount == 0)
   {
-    m_Writer.Text(graph, m_bRecording ? "Waiting for the first snapshot..." : "Press Record to capture the target, or open a saved capture", Dim(), FontSize - 1, plUiTextHAlign::Center);
+    m_Writer.Text(graph, "Waiting for snapshots from the target: it sends them while a scene simulates or plays", Dim(), FontSize - 1, plUiTextHAlign::Center);
     return;
   }
 
-  // the time axis
-  const double fDuration = plMath::Max(pSamples->PeekBack().m_fTime, 1.0);
+  // the time axis: seconds since the capture's start, or seconds before the newest live sample
+  double fStart = 0.0, fEnd = 0.0;
+  GetGraphSpan(fStart, fEnd);
+  const double fDuration = fEnd - fStart;
   const double fStep = AxisStep(fDuration, graph.width);
-  for (double t = 0.0; t <= fDuration + 0.001; t += fStep)
+  for (double fOffset = 0.0; fOffset <= fDuration + 0.001; fOffset += fStep)
   {
-    const float x = GraphXAt(t);
+    const float x = GraphXAt(fStart + fOffset);
     m_Writer.Rect(plRectFloat(x, graph.y, 1.0f, graph.height), Line());
 
     plStringBuilder sTime;
-    sTime.SetFormat("{}s", plArgF(t, fStep < 1.0 ? 1 : 0));
+    if (!bLive)
+      sTime.SetFormat("{}s", plArgF(fOffset, fStep < 1.0 ? 1 : 0));
+    else if (fDuration - fOffset < 0.001)
+      sTime = "now";
+    else
+      sTime.SetFormat("-{}s", plArgF(fDuration - fOffset, fStep < 1.0 ? 1 : 0));
+
     m_Writer.Text(plRectFloat(plMath::Min(x + 2.0f, graph.x + graph.width - 30.0f), graph.y + graph.height + 2.0f, 40.0f, 14.0f), sTime, Dim(), MinFontSize, plUiTextHAlign::Left, plUiTextVAlign::Center, true);
   }
+
+  if (bLive)
+    return;
 
   // the range and the pointer's time
   if (HasRange())
@@ -2184,7 +2869,7 @@ void plEditorUiAudioProfilerView::ShowTargetMenu()
   player.m_bCheckable = true;
   player.m_bChecked = bPlayer;
 
-  const float x = 6.0f + plAudioEngineUi::TextButtonWidth("Record", true) + 4.0f + plAudioEngineUi::TextButtonWidth("Save capture", false) + 4.0f + plAudioEngineUi::TextButtonWidth("Open...", false) + 14.0f;
+  const float x = GetPauseButtonX() + plAudioEngineUi::TextButtonWidth("Resume view", false) + 14.0f;
   plEditorUiMenuView::Show(*GetSurface(), plVec2(x, 3.0f + plEditorUi::ControlHeight), menu, [this](plUInt32 uiId)
     {
       if (m_OnTargetChosen.IsValid())

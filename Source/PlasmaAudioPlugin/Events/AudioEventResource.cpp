@@ -574,6 +574,19 @@ void plAudioEventResource::GatherLoadedEvents(plDynamicArray<plAudioEventMemoryS
   }
 }
 
+plUInt64 plAudioEventResource::GetTotalSampleBytes()
+{
+  PL_LOCK(s_LoadedMutex);
+
+  plUInt64 uiBytes = 0;
+  for (const plAudioEventResource* pEvent = s_pFirstLoaded; pEvent != nullptr; pEvent = pEvent->m_pNextLoaded)
+  {
+    uiBytes += pEvent->m_uiSampleBytes;
+  }
+
+  return uiBytes;
+}
+
 const plAudioClipResourceHandle& plAudioEventResource::GetClip(plUInt32 uiInstrument, plUInt32 uiEntry) const
 {
   static const plAudioClipResourceHandle s_hNone;

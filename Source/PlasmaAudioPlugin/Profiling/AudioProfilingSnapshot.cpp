@@ -30,7 +30,121 @@ namespace
     PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_uiCount));
     return out_uiCount <= MaxSnapshotSectionEntries ? PL_SUCCESS : PL_FAILURE;
   }
+
+  /// The fields of a voice that version 1 has.
+  void WriteVoiceV1(plStreamWriter& inout_stream, const plAudioVoiceSnapshotEntry& voice)
+  {
+    WriteValue(inout_stream, voice.m_uiId);
+    inout_stream.WriteString(voice.m_sEvent).AssertSuccess();
+    WriteValue(inout_stream, voice.m_uiEntityId);
+    WriteValue(inout_stream, voice.m_uiState);
+    WriteValue(inout_stream, voice.m_uiPriority);
+    WriteValue(inout_stream, voice.m_uiCodec);
+    WriteValue(inout_stream, voice.m_uiLoadMode);
+    WriteValue(inout_stream, voice.m_fAudibility);
+    WriteValue(inout_stream, voice.m_fDistance);
+    WriteValue(inout_stream, voice.m_fOcclusion);
+    WriteValue(inout_stream, voice.m_fVolume);
+    WriteValue(inout_stream, voice.m_fAge);
+    inout_stream.WriteString(voice.m_sBus).AssertSuccess();
+  }
+
+  plResult ReadVoiceV1(plStreamReader& inout_stream, plAudioVoiceSnapshotEntry& out_voice)
+  {
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_uiId));
+    PL_SUCCEED_OR_RETURN(inout_stream.ReadString(out_voice.m_sEvent, MaxSnapshotStringBytes));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_uiEntityId));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_uiState));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_uiPriority));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_uiCodec));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_uiLoadMode));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_fAudibility));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_fDistance));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_fOcclusion));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_fVolume));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_fAge));
+    return inout_stream.ReadString(out_voice.m_sBus, MaxSnapshotStringBytes);
+  }
+
+  /// The fields of a voice that version 4 adds.
+  void WriteVoiceV4(plStreamWriter& inout_stream, const plAudioVoiceSnapshotEntry& voice)
+  {
+    WriteValue(inout_stream, static_cast<plUInt8>(voice.m_bVirtual ? 1 : 0));
+    WriteValue(inout_stream, voice.m_uiStopReason);
+
+    const plUInt8 uiParameters = static_cast<plUInt8>(plMath::Min(voice.m_Parameters.GetCount(), plAudioVoiceSnapshotEntry::MaxParameters));
+    WriteValue(inout_stream, uiParameters);
+    for (plUInt32 i = 0; i < uiParameters; ++i)
+    {
+      inout_stream.WriteString(voice.m_Parameters[i].m_sName).AssertSuccess();
+      WriteValue(inout_stream, voice.m_Parameters[i].m_fValue);
+    }
+  }
+
+  plResult ReadVoiceV4(plStreamReader& inout_stream, plAudioVoiceSnapshotEntry& out_voice)
+  {
+    plUInt8 uiVirtual = 0;
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, uiVirtual));
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, out_voice.m_uiStopReason));
+    out_voice.m_bVirtual = uiVirtual != 0;
+
+    plUInt8 uiParameters = 0;
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, uiParameters));
+    if (uiParameters > plAudioVoiceSnapshotEntry::MaxParameters)
+      return PL_FAILURE;
+
+    out_voice.m_Parameters.SetCount(uiParameters);
+    for (plAudioVoiceParameterSnapshotEntry& parameter : out_voice.m_Parameters)
+    {
+      PL_SUCCEED_OR_RETURN(inout_stream.ReadString(parameter.m_sName, MaxSnapshotStringBytes));
+      PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, parameter.m_fValue));
+    }
+
+    return PL_SUCCESS;
+  }
 } // namespace
+
+const char* plAudioStopReason::GetName(Enum reason)
+{
+  switch (reason)
+  {
+    case None:
+      return "";
+    case Requested:
+      return "stopped";
+    case Finished:
+      return "finished";
+    case StolenOldest:
+      return "stolen \xC2\xB7 oldest";
+    case StolenQuietest:
+      return "stolen \xC2\xB7 quietest";
+    case KilledAtStart:
+      return "killed \xC2\xB7 at start";
+    case KilledVirtualised:
+      return "killed \xC2\xB7 virtualised";
+    case KilledVirtualBudget:
+      return "killed \xC2\xB7 virtual budget";
+    case Unloaded:
+      return "unloaded";
+    default:
+      return "?";
+  }
+}
+
+bool plAudioStopReason::IsForced(Enum reason)
+{
+  switch (reason)
+  {
+    case StolenOldest:
+    case StolenQuietest:
+    case KilledAtStart:
+    case KilledVirtualised:
+    case KilledVirtualBudget:
+      return true;
+    default:
+      return false;
+  }
+}
 
 const char* plAudioLogEventType::GetName(Enum type)
 {
@@ -122,6 +236,7 @@ void plAudioProfilingSnapshot::Clear()
   m_fUpdateMs = 0.0f;
   m_uiMemoryBytes = 0;
   m_Voices.Clear();
+  m_Ended.Clear();
   m_sMixer.Clear();
   m_Buses.Clear();
   m_ActiveSnapshots.Clear();
@@ -130,6 +245,7 @@ void plAudioProfilingSnapshot::Clear()
   m_Banks.Clear();
   m_uiClipResidentBytes = 0;
   m_uiStreamRingBytes = 0;
+  m_uiEmbeddedSampleBytes = 0;
   m_uiPooledStreams = 0;
   m_uiEventLogFirstSequence = 0;
   m_EventLog.Clear();
@@ -156,19 +272,7 @@ void plAudioProfilingSnapshot::Write(plStreamWriter& inout_stream) const
 
   for (const plAudioVoiceSnapshotEntry& voice : m_Voices)
   {
-    WriteValue(inout_stream, voice.m_uiId);
-    inout_stream.WriteString(voice.m_sEvent).AssertSuccess();
-    WriteValue(inout_stream, voice.m_uiEntityId);
-    WriteValue(inout_stream, voice.m_uiState);
-    WriteValue(inout_stream, voice.m_uiPriority);
-    WriteValue(inout_stream, voice.m_uiCodec);
-    WriteValue(inout_stream, voice.m_uiLoadMode);
-    WriteValue(inout_stream, voice.m_fAudibility);
-    WriteValue(inout_stream, voice.m_fDistance);
-    WriteValue(inout_stream, voice.m_fOcclusion);
-    WriteValue(inout_stream, voice.m_fVolume);
-    WriteValue(inout_stream, voice.m_fAge);
-    inout_stream.WriteString(voice.m_sBus).AssertSuccess();
+    WriteVoiceV1(inout_stream, voice);
   }
 
   // version 2: buses
@@ -243,6 +347,23 @@ void plAudioProfilingSnapshot::Write(plStreamWriter& inout_stream) const
   {
     inout_stream.WriteString(voice.m_sEntity).AssertSuccess();
   }
+
+  // version 4: voice state and parameters, ended voices, embedded samples
+  for (const plAudioVoiceSnapshotEntry& voice : m_Voices)
+  {
+    WriteVoiceV4(inout_stream, voice);
+  }
+
+  WriteValue(inout_stream, m_Ended.GetCount());
+  for (const plAudioEndedVoiceSnapshotEntry& ended : m_Ended)
+  {
+    WriteValue(inout_stream, ended.m_fEndTime);
+    WriteVoiceV1(inout_stream, ended.m_Voice);
+    inout_stream.WriteString(ended.m_Voice.m_sEntity).AssertSuccess();
+    WriteVoiceV4(inout_stream, ended.m_Voice);
+  }
+
+  WriteValue(inout_stream, m_uiEmbeddedSampleBytes);
 }
 
 plResult plAudioProfilingSnapshot::Read(plStreamReader& inout_stream)
@@ -255,6 +376,22 @@ plResult plAudioProfilingSnapshot::Read(plStreamReader& inout_stream)
   if (uiVersion == 0 || uiVersion > kSnapshotVersion)
     return PL_FAILURE;
 
+  PL_SUCCEED_OR_RETURN(ReadSections(inout_stream, uiVersion));
+
+  // older snapshots counted only clip data and stream rings as memory
+  if (uiVersion < 4)
+  {
+    for (const plAudioEventMemorySnapshotEntry& event : m_Events)
+      m_uiEmbeddedSampleBytes += event.m_uiSampleBytes;
+
+    m_uiMemoryBytes += m_uiEmbeddedSampleBytes;
+  }
+
+  return PL_SUCCESS;
+}
+
+plResult plAudioProfilingSnapshot::ReadSections(plStreamReader& inout_stream, plUInt8 uiVersion)
+{
   PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, m_uiRealVoices));
   PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, m_uiVirtualVoices));
   PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, m_uiMaxReal));
@@ -275,19 +412,10 @@ plResult plAudioProfilingSnapshot::Read(plStreamReader& inout_stream)
 
   for (plAudioVoiceSnapshotEntry& voice : m_Voices)
   {
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_uiId));
-    PL_SUCCEED_OR_RETURN(inout_stream.ReadString(voice.m_sEvent, MaxSnapshotStringBytes));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_uiEntityId));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_uiState));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_uiPriority));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_uiCodec));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_uiLoadMode));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_fAudibility));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_fDistance));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_fOcclusion));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_fVolume));
-    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, voice.m_fAge));
-    PL_SUCCEED_OR_RETURN(inout_stream.ReadString(voice.m_sBus, MaxSnapshotStringBytes));
+    PL_SUCCEED_OR_RETURN(ReadVoiceV1(inout_stream, voice));
+
+    // before version 4 only a voice in the virtual state is known to be virtual
+    voice.m_bVirtual = voice.m_uiState == plAudioVoiceSnapshotEntry::Virtual;
   }
 
   if (uiVersion < 2)
@@ -379,7 +507,30 @@ plResult plAudioProfilingSnapshot::Read(plStreamReader& inout_stream)
     PL_SUCCEED_OR_RETURN(inout_stream.ReadString(voice.m_sEntity, MaxSnapshotStringBytes));
   }
 
-  return PL_SUCCESS;
+  if (uiVersion < 4)
+    return PL_SUCCESS;
+
+  // voice state and parameters, ended voices, embedded samples
+  for (plAudioVoiceSnapshotEntry& voice : m_Voices)
+  {
+    PL_SUCCEED_OR_RETURN(ReadVoiceV4(inout_stream, voice));
+  }
+
+  plUInt32 uiEnded = 0;
+  PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, uiEnded));
+  if (uiEnded > MaxSnapshotVoices)
+    return PL_FAILURE;
+
+  m_Ended.SetCount(uiEnded);
+  for (plAudioEndedVoiceSnapshotEntry& ended : m_Ended)
+  {
+    PL_SUCCEED_OR_RETURN(ReadValue(inout_stream, ended.m_fEndTime));
+    PL_SUCCEED_OR_RETURN(ReadVoiceV1(inout_stream, ended.m_Voice));
+    PL_SUCCEED_OR_RETURN(inout_stream.ReadString(ended.m_Voice.m_sEntity, MaxSnapshotStringBytes));
+    PL_SUCCEED_OR_RETURN(ReadVoiceV4(inout_stream, ended.m_Voice));
+  }
+
+  return ReadValue(inout_stream, m_uiEmbeddedSampleBytes);
 }
 
 PL_STATICLINK_FILE(PlasmaAudioPlugin, PlasmaAudioPlugin_Profiling_AudioProfilingSnapshot);
